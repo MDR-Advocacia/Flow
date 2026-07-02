@@ -1,8 +1,10 @@
-// Overlay de progresso BLOQUEANTE: cobre a tela inteira enquanto a redistribuição
-// (ou a reversão) executa — o usuário não navega nem fecha nada até terminar.
-// MOCK: a barra avança por passo simulado; na versão real, 1 passo = 1 tarefa
-// reatribuída no L1 (API ou POST Workflow).
+// Overlay de progresso que cobre a tela enquanto a redistribuição (ou reversão)
+// executa. É PORTALADO no document.body: renderizado na árvore da página, o
+// z-index ficaria preso num contexto de empilhamento ABAIXO do modal Radix
+// (portal no body) e o progresso apareceria escondido atrás do modal. No body,
+// com z alto + pointer-events auto, fica acima de tudo e clicável.
 
+import { createPortal } from "react-dom";
 import { CheckCircle2, Loader2, RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -29,8 +31,11 @@ export default function ExecProgressOverlay({ exec, onClose }: { exec: ExecState
   const reverter = exec.mode === "reverter";
   const titulo = reverter ? "Revertendo alterações" : "Aplicando redistribuição";
 
-  return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+      style={{ pointerEvents: "auto" }}
+    >
       <div className="w-[92vw] max-w-md rounded-xl border bg-background p-6 shadow-2xl">
         <div className="flex items-center gap-2">
           {exec.finished ? (
@@ -95,6 +100,7 @@ export default function ExecProgressOverlay({ exec, onClose }: { exec: ExecState
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

@@ -300,7 +300,15 @@ export default function RedistribuicaoModal({
   return (
     <>
       <Dialog open onOpenChange={(o) => { if (!o && !exec) onClose(); }}>
-        <DialogContent className="flex max-h-[92vh] w-[94vw] max-w-[1400px] flex-col overflow-hidden" style={{ pointerEvents: "auto" }}>
+        <DialogContent
+          className="flex max-h-[92vh] w-[94vw] max-w-[1400px] flex-col overflow-hidden"
+          style={{ pointerEvents: "auto" }}
+          // Não fechar em clique/interação FORA do conteúdo: os diálogos aninhados
+          // são modal={false}, então o pointerdown dentro deles vaza pra cá e o
+          // Radix fechava tudo. Fecha só no X ou no botão Fechar.
+          onPointerDownOutside={(e) => e.preventDefault()}
+          onInteractOutside={(e) => e.preventDefault()}
+        >
           <DialogHeader>
             <DialogTitle className="flex flex-wrap items-center gap-2">
               <Users className="h-5 w-5 text-[hsl(var(--dunatech-blue))]" />
@@ -479,8 +487,10 @@ export default function RedistribuicaoModal({
         </DialogContent>
       </Dialog>
 
-      {/* dialog de quantidade no drop */}
-      <Dialog open={dropCtx != null} onOpenChange={(o) => !o && setDropCtx(null)}>
+      {/* dialog de quantidade no drop — modal={false}: aninhado dentro do modal
+          principal, NÃO deve marcar o pai como inert/travar pointer-events (senão
+          ao fechar deixa o footer/X congelados até dar refresh — bug do Radix). */}
+      <Dialog open={dropCtx != null} modal={false} onOpenChange={(o) => !o && setDropCtx(null)}>
         <DialogContent className="max-w-sm" style={{ pointerEvents: "auto" }}>
           <DialogHeader>
             <DialogTitle className="text-base">Mover quantas?</DialogTitle>

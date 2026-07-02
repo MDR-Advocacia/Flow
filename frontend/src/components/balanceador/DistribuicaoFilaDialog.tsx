@@ -131,7 +131,9 @@ export default function DistribuicaoFilaDialog({
     });
 
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
+    // modal={false}: aninhado dentro do modal de redistribuição — não deve marcar
+    // o pai como inert nem travar pointer-events (senão trava o footer/X ao fechar).
+    <Dialog open modal={false} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[88vh] max-w-lg overflow-y-auto" style={{ pointerEvents: "auto" }}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-base">
