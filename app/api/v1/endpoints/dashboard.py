@@ -458,6 +458,125 @@ def get_publications_pipeline(db: Session = Depends(get_db)):
 # Tratamento por operador (agendadas + ciências) — Bloco 4
 # ───────────────────────────────────────────────────────────────
 
+
+def _treatment_window_starts(mode: str, now: datetime):
+    """Inícios das 4 janelas (dia/semana/mês/semestre) em UTC.
+
+    'rolling' = últimas 24h/7d/30d/180d; 'calendar' = marcos no horário de
+    Brasília (hoje 00:00, segunda-feira, dia 1º do mês, 1º do semestre),
+    convertidos pra UTC pra comparar com os timestamptz.
+    """
+    if mode == "rolling":
+        return (
+            now - timedelta(days=1),
+            now - timedelta(days=7),
+            now - timedelta(days=30),
+            now - timedelta(days=180),
+        )
+    sp = ZoneInfo("America/Sao_Paulo")
+    now_sp = now.astimezone(sp)
+    day_sp = now_sp.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_sp = day_sp - timedelta(days=day_sp.weekday())  # segunda-feira
+    month_sp = day_sp.replace(day=1)
+    semester_sp = day_sp.replace(month=(1 if now_sp.month <= 6 else 7), day=1)
+    return (
+        day_sp.astimezone(timezone.utc),
+        week_sp.astimezone(timezone.utc),
+        month_sp.astimezone(timezone.utc),
+        semester_sp.astimezone(timezone.utc),
+    )
+
+
+@router.get(
+    "/publications-operator-offices",
+    summary="Detalhe do tratamento de UM operador por escritório responsável",
+)
+def get_publications_operator_offices(
+    user_id: int = Query(..., description="id do operador (legal_one_users.id)"),
+    mode: Literal["calendar", "rolling"] = Query("calendar"),
+    db: Session = Depends(get_db),
+):
+    """
+    Breakdown do tratamento (agendadas + ciências) de um operador por
+    ESCRITÓRIO RESPONSÁVEL da publicação (linked_office_id → catálogo
+    legal_one_offices; exibe `path`, a hierarquia completa — convenção da
+    casa). Publicação sem pasta/escritório vinculado cai em "Sem escritório".
+
+    Mesmas janelas do /publications-operators (dia/semana/mês/semestre/total)
+    + split agendadas/ciências. Ordenado por total (desc). Lista curta por
+    natureza (catálogo de escritórios), cap 100 por segurança.
+    """
+    now = datetime.now(timezone.utc)
+    day_start, week_start, month_start, semester_start = _treatment_window_starts(mode, now)
+
+    query = text(
+        """
+        WITH eventos AS (
+            SELECT linked_office_id AS office_id,
+                   scheduled_at AS at,
+                   'agendado' AS tipo
+            FROM publicacao_registros
+            WHERE scheduled_by_user_id = :user_id AND scheduled_at IS NOT NULL
+            UNION ALL
+            SELECT linked_office_id, ignored_at, 'ignorado'
+            FROM publicacao_registros
+            WHERE ignored_by_user_id = :user_id AND ignored_at IS NOT NULL
+        )
+        SELECT
+            e.office_id,
+            max(COALESCE(o.path, o.name)) AS office_name,
+            count(*) FILTER (WHERE at >= :day_start) AS dia,
+            count(*) FILTER (WHERE at >= :week_start) AS semana,
+            count(*) FILTER (WHERE at >= :month_start) AS mes,
+            count(*) FILTER (WHERE at >= :semester_start) AS semestre,
+            count(*) AS total,
+            count(*) FILTER (WHERE tipo = 'agendado') AS agendado_total,
+            count(*) FILTER (WHERE tipo = 'ignorado') AS ignorado_total
+        FROM eventos e
+        LEFT JOIN legal_one_offices o ON o.external_id = e.office_id
+        GROUP BY e.office_id
+        ORDER BY total DESC
+        LIMIT 100
+        """
+    )
+
+    rows = db.execute(
+        query,
+        {
+            "user_id": user_id,
+            "day_start": day_start,
+            "week_start": week_start,
+            "month_start": month_start,
+            "semester_start": semester_start,
+        },
+    ).fetchall()
+
+    # Nome: path do catálogo; escritório real mas FORA do catálogo local vira
+    # "Escritório #id" (distinto de publicação sem vínculo — são coisas diferentes).
+    offices = [
+        {
+            "office_id": r.office_id,
+            "office_name": r.office_name
+            or (f"Escritório #{r.office_id}" if r.office_id is not None else "Sem escritório vinculado"),
+            "dia": int(r.dia),
+            "semana": int(r.semana),
+            "mes": int(r.mes),
+            "semestre": int(r.semestre),
+            "total": int(r.total),
+            "agendado_total": int(r.agendado_total),
+            "ignorado_total": int(r.ignorado_total),
+        }
+        for r in rows
+    ]
+
+    return {
+        "mode": mode,
+        "user_id": user_id,
+        "offices": offices,
+        "generated_at": now.isoformat(),
+    }
+
+
 @router.get(
     "/publications-operators",
     summary="Tratamento (agendadas + ciências) por operador, em janelas de tempo",
@@ -487,25 +606,7 @@ def get_publications_operators(
     de fora da contagem.
     """
     now = datetime.now(timezone.utc)
-
-    if mode == "rolling":
-        day_start = now - timedelta(days=1)
-        week_start = now - timedelta(days=7)
-        month_start = now - timedelta(days=30)
-        semester_start = now - timedelta(days=180)
-    else:
-        # Marcos de calendário no horário de Brasília, convertidos pra UTC
-        # pra comparar com os timestamps (timestamptz, armazenados em UTC).
-        sp = ZoneInfo("America/Sao_Paulo")
-        now_sp = now.astimezone(sp)
-        day_sp = now_sp.replace(hour=0, minute=0, second=0, microsecond=0)
-        week_sp = day_sp - timedelta(days=day_sp.weekday())  # segunda-feira
-        month_sp = day_sp.replace(day=1)
-        semester_sp = day_sp.replace(month=(1 if now_sp.month <= 6 else 7), day=1)
-        day_start = day_sp.astimezone(timezone.utc)
-        week_start = week_sp.astimezone(timezone.utc)
-        month_start = month_sp.astimezone(timezone.utc)
-        semester_start = semester_sp.astimezone(timezone.utc)
+    day_start, week_start, month_start, semester_start = _treatment_window_starts(mode, now)
 
     query = text(
         """

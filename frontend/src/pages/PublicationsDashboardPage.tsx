@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -6,7 +6,10 @@ import {
   ArrowDown,
   ArrowRight,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Clock,
+  CornerDownRight,
   FileBarChart2,
   FileText,
   Inbox,
@@ -157,6 +160,26 @@ interface OperatorsPayload {
   generated_at: string;
 }
 
+// Breakdown de UM operador por escritório responsável (dropdown da linha)
+interface OperatorOfficeRow {
+  office_id: number | null;
+  office_name: string;
+  dia: number;
+  semana: number;
+  mes: number;
+  semestre: number;
+  total: number;
+  agendado_total: number;
+  ignorado_total: number;
+}
+
+interface OperatorOfficesPayload {
+  mode: 'calendar' | 'rolling';
+  user_id: number;
+  offices: OperatorOfficeRow[];
+  generated_at: string;
+}
+
 const OPERATOR_WINDOWS: OperatorWindow[] = ['dia', 'semana', 'mes', 'semestre', 'total'];
 
 const OPERATOR_WINDOW_LABELS: Record<'calendar' | 'rolling', Record<OperatorWindow, string>> = {
@@ -248,6 +271,92 @@ const initials = (name?: string | null, email?: string | null): string => {
 // ──────────────────────────────────────────────────────────────
 // Componentes menores
 // ──────────────────────────────────────────────────────────────
+
+// Linhas do breakdown por ESCRITÓRIO RESPONSÁVEL de um operador (expandidas
+// na tabela do Bloco 4). Lazy: só busca quando a linha abre; cache por
+// (operador, modo). Mesmas colunas da tabela-mãe pra alinhar os números.
+const OperatorOfficeRows = ({
+  userId,
+  mode,
+  sort,
+}: {
+  userId: number;
+  mode: 'calendar' | 'rolling';
+  sort: OperatorWindow;
+}) => {
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['dashboard-operator-offices', userId, mode],
+    queryFn: async () => {
+      const res = await apiFetch(
+        `/api/v1/dashboard/publications-operator-offices?user_id=${userId}&mode=${mode}`,
+      );
+      if (!res.ok) throw new Error('Falha ao carregar escritórios do operador');
+      return (await res.json()) as OperatorOfficesPayload;
+    },
+    staleTime: 60_000,
+  });
+
+  if (isLoading || isError) {
+    return (
+      <tr className="border-b bg-muted/30">
+        <td colSpan={6} className="py-2 px-2 text-xs text-muted-foreground">
+          {isError ? (
+            'Não consegui carregar o detalhe por escritório.'
+          ) : (
+            <>
+              <Loader2 className="mr-1.5 inline h-3.5 w-3.5 animate-spin" />
+              Carregando escritórios…
+            </>
+          )}
+        </td>
+      </tr>
+    );
+  }
+
+  const offices = [...(data?.offices ?? [])].sort((a, b) => b[sort] - a[sort] || b.total - a.total);
+  if (offices.length === 0) {
+    return (
+      <tr className="border-b bg-muted/30">
+        <td colSpan={6} className="py-2 px-2 text-xs text-muted-foreground">
+          Sem detalhe por escritório pra esse operador.
+        </td>
+      </tr>
+    );
+  }
+
+  return (
+    <>
+      {offices.map((of) => (
+        <tr key={of.office_id ?? 'sem-escritorio'} className="border-b bg-muted/30 text-xs">
+          <td className="py-1.5 px-2">
+            <div className="flex items-center gap-1.5 pl-7 text-muted-foreground">
+              <CornerDownRight className="h-3 w-3 shrink-0" />
+              <span className="max-w-[320px] truncate" title={of.office_name}>
+                {of.office_name}
+              </span>
+            </div>
+          </td>
+          {(['dia', 'semana', 'mes', 'semestre'] as OperatorWindow[]).map((w) => (
+            <td
+              key={w}
+              className={`py-1.5 px-2 text-right tabular-nums ${
+                sort === w ? 'font-semibold text-[hsl(var(--dunatech-navy))]' : 'text-muted-foreground'
+              }`}
+            >
+              {of[w]}
+            </td>
+          ))}
+          <td className="py-1.5 px-2 text-right">
+            <span className="font-semibold tabular-nums text-[hsl(var(--dunatech-navy))]">{of.total}</span>
+            <span className="ml-1.5 text-[10px] text-muted-foreground">
+              {of.agendado_total} ag · {of.ignorado_total} ci
+            </span>
+          </td>
+        </tr>
+      ))}
+    </>
+  );
+};
 
 interface KpiCardProps {
   label: string;
@@ -348,6 +457,8 @@ const PublicationsDashboardPage = () => {
   // Tratamento por operador (Bloco 4): modo de janela + coluna de ordenacao
   const [operatorMode, setOperatorMode] = useState<'calendar' | 'rolling'>('calendar');
   const [operatorSort, setOperatorSort] = useState<OperatorWindow>('dia');
+  // Operador expandido (dropdown com o detalhe por escritório responsável)
+  const [expandedOperator, setExpandedOperator] = useState<number | null>(null);
 
   // Overview (KPIs + funil + serie) — a serie respeita a granularidade do grafico.
   // KPIs e funil sao snapshot/janela e nao mudam com a granularidade.
@@ -584,7 +695,8 @@ const PublicationsDashboardPage = () => {
                     Tratamento por operador
                   </CardTitle>
                   <CardDescription className="text-xs">
-                    Agendadas + ciências por pessoa. Clique numa coluna pra ordenar.
+                    Agendadas + ciências por pessoa. Clique numa coluna pra ordenar; clique no
+                    operador pra detalhar por escritório responsável.
                   </CardDescription>
                 </div>
                 <div className="inline-flex rounded-lg border p-0.5 text-xs">
@@ -650,42 +762,63 @@ const PublicationsDashboardPage = () => {
                         const name = isMe
                           ? 'Você'
                           : o.user_name || o.user_email || `Operador #${o.user_id}`;
+                        const expanded = expandedOperator === o.user_id;
                         return (
-                          <tr
-                            key={o.user_id}
-                            className={`border-b last:border-0 ${
-                              isMe ? 'bg-[hsl(var(--dunatech-blue)/0.08)]' : ''
-                            }`}
-                          >
-                            <td className="py-2 px-2">
-                              <div className="flex items-center gap-2">
-                                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[hsl(var(--dunatech-blue)/0.12)] text-[11px] font-semibold text-[hsl(var(--dunatech-blue))]">
-                                  {initials(o.user_name, o.user_email)}
-                                </span>
-                                <span className="truncate">{name}</span>
-                              </div>
-                            </td>
-                            {(['dia', 'semana', 'mes', 'semestre'] as OperatorWindow[]).map((w) => (
-                              <td
-                                key={w}
-                                className={`text-right py-2 px-2 tabular-nums ${
-                                  operatorSort === w
-                                    ? 'font-semibold text-[hsl(var(--dunatech-navy))]'
-                                    : ''
-                                }`}
-                              >
-                                {o[w]}
+                          <Fragment key={o.user_id}>
+                            <tr
+                              className={`border-b last:border-0 ${
+                                isMe ? 'bg-[hsl(var(--dunatech-blue)/0.08)]' : ''
+                              }`}
+                            >
+                              <td className="py-2 px-2">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setExpandedOperator((cur) => (cur === o.user_id ? null : o.user_id))
+                                  }
+                                  className="flex w-full items-center gap-2 text-left"
+                                  title="Detalhar por escritório responsável"
+                                >
+                                  {expanded ? (
+                                    <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[hsl(var(--dunatech-blue))]" />
+                                  ) : (
+                                    <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                  )}
+                                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[hsl(var(--dunatech-blue)/0.12)] text-[11px] font-semibold text-[hsl(var(--dunatech-blue))]">
+                                    {initials(o.user_name, o.user_email)}
+                                  </span>
+                                  <span className="truncate">{name}</span>
+                                </button>
                               </td>
-                            ))}
-                            <td className="text-right py-2 px-2">
-                              <div className="font-semibold tabular-nums text-[hsl(var(--dunatech-navy))]">
-                                {o.total}
-                              </div>
-                              <div className="text-[11px] text-muted-foreground">
-                                {o.agendado_total} ag · {o.ignorado_total} ci
-                              </div>
-                            </td>
-                          </tr>
+                              {(['dia', 'semana', 'mes', 'semestre'] as OperatorWindow[]).map((w) => (
+                                <td
+                                  key={w}
+                                  className={`text-right py-2 px-2 tabular-nums ${
+                                    operatorSort === w
+                                      ? 'font-semibold text-[hsl(var(--dunatech-navy))]'
+                                      : ''
+                                  }`}
+                                >
+                                  {o[w]}
+                                </td>
+                              ))}
+                              <td className="text-right py-2 px-2">
+                                <div className="font-semibold tabular-nums text-[hsl(var(--dunatech-navy))]">
+                                  {o.total}
+                                </div>
+                                <div className="text-[11px] text-muted-foreground">
+                                  {o.agendado_total} ag · {o.ignorado_total} ci
+                                </div>
+                              </td>
+                            </tr>
+                            {expanded && (
+                              <OperatorOfficeRows
+                                userId={o.user_id}
+                                mode={operatorMode}
+                                sort={operatorSort}
+                              />
+                            )}
+                          </Fragment>
                         );
                       })}
                     </tbody>
