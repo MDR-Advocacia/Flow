@@ -1,8 +1,13 @@
 """Endpoints do Balanceador de Agenda.
 
-Read-only (MOCK 2026-06-29): diagnóstico de carga + matriz de redistribuição +
-detalhe por subtipo, lidos do snapshot perf_l1_tarefa. Reusa o gate por time do
-Minha Equipe. A reatribuição efetiva (escrita no L1) entra na versão real.
+Leitura: diagnóstico de carga + matriz de redistribuição + detalhe por subtipo
+(snapshot perf_l1_tarefa) + fila AO VIVO do L1. Reusa o gate por time do Minha
+Equipe.
+
+Escrita REAL (2026-07-02): `/reatribuir` dispara um job server-backed que troca
+responsável+executante no L1 (PATCH normal; tarefa de Workflow vai pro bucket
+`workflow_bloqueadas`). Progresso via `/reatribuir/status`. Ver
+app/services/performance/reatribuir_job.py.
 """
 
 from fastapi import APIRouter, Depends, Query
@@ -106,3 +111,52 @@ def registrar_log(
 @router.get("/logs", summary="Lista os logs de redistribuição do time", dependencies=[_team])
 def listar_logs(team: str = Query(...), db: Session = Depends(get_db)):
     return {"logs": BalanceadorService(db).listar_logs(team)}
+
+
+# ── Reatribuição EM LOTE (escrita REAL no L1) — job server-backed com progresso ──
+
+
+class ReatribuirItem(BaseModel):
+    task_id: int
+    to_id: int | None = None
+    to_nome: str | None = None
+
+
+class ReatribuirReq(BaseModel):
+    itens: list[ReatribuirItem]
+    movimentos: list = []  # move-level (from/to/subtipo/qtd), só pra auditoria
+
+
+@router.post(
+    "/reatribuir",
+    summary="Dispara a reatribuição EM LOTE das tarefas (PATCH normal; Workflow vai pro bucket bloqueado)",
+    dependencies=[_team],
+)
+def reatribuir(
+    team: str = Query(...),
+    dry_run: bool = Query(False, description="só lê participantes (prova acesso, conta) — não grava"),
+    req: ReatribuirReq = ...,
+    current_user: LegalOneUser = Depends(get_current_user),
+):
+    from app.services.performance import reatribuir_job
+
+    itens = [i.model_dump() for i in req.itens]
+    job_id = reatribuir_job.iniciar(team, itens, req.movimentos, dry_run, current_user)
+    return {"job_id": job_id, "status": reatribuir_job.status(job_id)}
+
+
+@router.get("/reatribuir/status", summary="Progresso do job de reatribuição", dependencies=[_team])
+def reatribuir_status(team: str = Query(...), job_id: str = Query(...)):
+    from app.services.performance import reatribuir_job
+
+    st = reatribuir_job.status(job_id)
+    if st is None:
+        return {"status": "not_found"}
+    return st
+
+
+@router.post("/reatribuir/abort", summary="Aborta o job de reatribuição", dependencies=[_team])
+def reatribuir_abort(team: str = Query(...), job_id: str = Query(...)):
+    from app.services.performance import reatribuir_job
+
+    return {"ok": reatribuir_job.solicitar_abort(job_id)}

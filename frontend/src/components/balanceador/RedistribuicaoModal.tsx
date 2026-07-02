@@ -1,10 +1,12 @@
 // Modal amplo de redistribuição: 1 coluna por colaborador escolhido, cards de
 // subtipo arrastáveis entre colunas (com quantidade), (i) → detalhe individual,
 // e painel de "mudanças pendentes". Rebalanceia visualmente ao vivo.
-// MOCK: a aplicação é simulada (não escreve no L1 ainda).
+// Aplicar = reatribuição REAL no L1 (job server-backed com progresso): troca
+// responsável+executante (PATCH normal; Workflow vai pro bucket bloqueado).
+// "Simular" faz um dry-run (lê participantes, não grava).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Check, Info, Loader2, RotateCcw, Split, Trash2, Users } from "lucide-react";
+import { ArrowRight, Check, FlaskConical, Info, Loader2, RotateCcw, Split, Trash2, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -20,9 +22,11 @@ import { teamLabel } from "@/lib/teams";
 import {
   type MatrizItem,
   type MovePendente,
+  type ReatribuirItem,
   type TarefaDetalhe,
   getLivePessoa,
-  registrarLog,
+  iniciarReatribuicao,
+  statusReatribuicao,
 } from "@/services/balanceador";
 import DetalheSubtipoModal from "@/components/balanceador/DetalheSubtipoModal";
 import DistribuicaoFilaDialog from "@/components/balanceador/DistribuicaoFilaDialog";
@@ -73,6 +77,10 @@ export default function RedistribuicaoModal({
   const [filaCtx, setFilaCtx] = useState<{ fromPessoa: Pessoa; subtipo: string; max: number } | null>(null);
   const [exec, setExec] = useState<ExecState | null>(null);
   const dragged = useRef<Dragged>(null);
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (pollTimer.current) clearTimeout(pollTimer.current);
+  }, []);
 
   const nomeById = useMemo(() => Object.fromEntries(pessoas.map((p) => [p.id, p.nome])), [pessoas]);
 
@@ -172,23 +180,107 @@ export default function RedistribuicaoModal({
     setMoves((prev) => prev.filter((m) => m.id !== id));
   };
 
-  const aplicar = async () => {
+  // Resolve os movimentos → lista plana de tarefas a reatribuir (task_id →
+  // destino). Individuais já trazem taskIds; agregados (drag/fila) consomem os
+  // task_ids reais que o operador viu (tarefas[fromId] do subtipo), sem repetir
+  // entre movimentos da mesma (origem, subtipo).
+  const resolverItens = (lista: MovePendente[]): ReatribuirItem[] => {
+    const consumido = new Map<string, Set<number>>();
+    const marcar = (key: string, id: number) => {
+      const s = consumido.get(key) ?? new Set<number>();
+      s.add(id);
+      consumido.set(key, s);
+    };
+    const itens: ReatribuirItem[] = [];
+    for (const m of lista) {
+      const key = `${m.fromId}|${m.subtipo}`;
+      if (m.taskIds && m.taskIds.length) {
+        for (const tid of m.taskIds) {
+          itens.push({ task_id: tid, to_id: m.toId, to_nome: m.toNome });
+          marcar(key, tid);
+        }
+        continue;
+      }
+      const usados = consumido.get(key) ?? new Set<number>();
+      const pool = (tarefas[m.fromId] || []).filter(
+        (t) => t.subtipo === m.subtipo && t.l1_task_id != null && !usados.has(t.l1_task_id),
+      );
+      for (const t of pool.slice(0, m.qtd)) {
+        itens.push({ task_id: t.l1_task_id as number, to_id: m.toId, to_nome: m.toNome });
+        marcar(key, t.l1_task_id as number);
+      }
+    }
+    return itens;
+  };
+
+  // Reatribuição REAL no L1 (server-backed): dispara o job e faz polling do
+  // progresso. dryRun = só simula (lê participantes, não grava). O job roda no
+  // servidor — se fechar a tela, ele continua.
+  const aplicar = async (dryRun: boolean) => {
     if (!moves.length || exec) return;
     const lista = [...moves];
-    setExec({ mode: "aplicar", total: lista.length, done: 0, label: "", finished: false });
-    for (let i = 0; i < lista.length; i++) {
-      const m = lista[i];
-      setExec((e) => (e ? { ...e, done: i, label: `${m.qtd}× ${m.subtipo} · ${m.fromNome} → ${m.toNome}` } : e));
-      await sleep(450); // mock: 1 passo = 1 reatribuição (API/Workflow) na versão real
+    const itens = resolverItens(lista);
+    if (!itens.length) {
+      toast({
+        title: "Nada a reatribuir",
+        description: "Não consegui resolver as tarefas dos movimentos (recarregue o L1 e tente de novo).",
+        variant: "destructive",
+      });
+      return;
     }
-    setExec((e) => (e ? { ...e, done: lista.length, finished: true, label: "" } : e));
-    registrarLog(team, lista)
-      .then(() => onAplicado?.())
-      .catch(() => undefined);
-    toast({
-      title: "Redistribuição aplicada (mock)",
-      description: "Log gerado na aba Relatórios. Não escreve no L1 ainda — a versão real troca responsável + executante (mantém o solicitante).",
+    setExec({
+      mode: "aplicar",
+      total: itens.length,
+      done: 0,
+      label: dryRun ? "Simulando…" : "Iniciando…",
+      finished: false,
+      resultado: { reatribuidas: 0, workflow_bloqueadas: 0, falhas: 0, dry_run: dryRun },
     });
+
+    let jobId: string;
+    try {
+      const r = await iniciarReatribuicao(team, itens, lista, dryRun);
+      jobId = r.job_id;
+    } catch (e) {
+      setExec(null);
+      toast({ title: "Falha ao iniciar", description: String((e as Error)?.message || e), variant: "destructive" });
+      return;
+    }
+
+    const poll = async () => {
+      try {
+        const st = await statusReatribuicao(team, jobId);
+        const done = st.status === "done";
+        setExec((e) =>
+          e
+            ? {
+                ...e,
+                total: st.total || itens.length,
+                done: st.feito || 0,
+                label: done ? "" : `${(st.reatribuidas || 0) + (st.workflow_bloqueadas || 0) + (st.falhas || 0)} processada(s)`,
+                finished: done,
+                resultado: {
+                  reatribuidas: st.reatribuidas || 0,
+                  workflow_bloqueadas: st.workflow_bloqueadas || 0,
+                  falhas: st.falhas || 0,
+                  dry_run: dryRun,
+                },
+              }
+            : e,
+        );
+        if (done) {
+          if (!dryRun) {
+            setMoves([]); // as tarefas já foram reatribuídas no L1
+            onAplicado?.();
+          }
+          return;
+        }
+      } catch {
+        /* transitório — segue tentando */
+      }
+      pollTimer.current = setTimeout(poll, 1500);
+    };
+    poll();
   };
 
   const reverterTudo = async () => {
@@ -221,7 +313,8 @@ export default function RedistribuicaoModal({
           <p className="text-xs text-muted-foreground">
             Arraste um tipo de tarefa de uma pessoa para outra e informe a quantidade — ou clique no{" "}
             <Info className="inline h-3 w-3" /> pra escolher tarefa a tarefa. Troca <b>responsável + executante</b>,
-            mantém o solicitante. <span className="text-amber-700">Leitura ao vivo do L1 · aplicação simulada.</span>
+            mantém o solicitante. <span className="text-emerald-700">Leitura e escrita ao vivo no L1 · use “Simular” pra
+            conferir antes.</span>
           </p>
 
           {naoResolvidos.length > 0 && (
@@ -369,7 +462,16 @@ export default function RedistribuicaoModal({
               >
                 <RotateCcw className="h-4 w-4" /> Reverter tudo
               </Button>
-              <Button className="gap-1.5" disabled={moves.length === 0 || !!exec} onClick={aplicar}>
+              <Button
+                variant="outline"
+                className="gap-1.5"
+                disabled={moves.length === 0 || !!exec}
+                onClick={() => aplicar(true)}
+                title="Simula sem gravar no L1 — lê os participantes e conta o que seria reatribuído"
+              >
+                <FlaskConical className="h-4 w-4" /> Simular
+              </Button>
+              <Button className="gap-1.5" disabled={moves.length === 0 || !!exec} onClick={() => aplicar(false)}>
                 <Check className="h-4 w-4" /> Aplicar {moves.length > 0 ? `(${moves.length})` : ""}
               </Button>
             </div>
@@ -453,8 +555,14 @@ export default function RedistribuicaoModal({
         />
       )}
 
-      {/* progresso bloqueante (aplicar / reverter) */}
-      <ExecProgressOverlay exec={exec} onClose={() => setExec(null)} />
+      {/* progresso (aplicar / reverter) — a reatribuição roda no servidor */}
+      <ExecProgressOverlay
+        exec={exec}
+        onClose={() => {
+          if (pollTimer.current) clearTimeout(pollTimer.current);
+          setExec(null);
+        }}
+      />
     </>
   );
 }

@@ -1377,6 +1377,71 @@ class LegalOneApiClient:
             )
             return False
 
+    def get_task_participants(self, task_id: int) -> List[Dict[str, Any]]:
+        """
+        Participantes (Envolvidos) atuais da tarefa. Ler SEMPRE antes de
+        escrever — o PATCH de participants substitui a coleção inteira
+        (REPLACE). Ver docs/legalone-reatribuir-responsavel-executante-tarefa.md.
+        """
+        url = f"{self.base_url}/tasks/{task_id}/participants"
+        resp = self._request_with_retry("GET", url)
+        return (resp.json() or {}).get("value", [])
+
+    @staticmethod
+    def is_workflow_locked(body: dict) -> bool:
+        """
+        True se o 400 é de tarefa gerada por Modelo de Procedimento do Workflow
+        (a API trava; só via RPA/UI). Detecta pela mensagem do erro.
+        """
+        try:
+            details = ((body or {}).get("error", {}) or {}).get("details", []) or []
+            for d in details:
+                if "modelo de procedimento do workflow" in (d.get("message") or "").lower():
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+    def update_task_participants(self, task_id: int, participants: list) -> dict:
+        """
+        Substitui a coleção de participantes (Envolvidos) — troca responsável /
+        executante / solicitante. Semântica de REPLACE: mande a lista final
+        COMPLETA (leia get_task_participants antes pra preservar o que fica).
+
+        Cada item: {"contact": {"id": int}, "isResponsible": bool,
+                    "isExecuter": bool, "isRequester": bool}  (grafia: Executer).
+
+        Retorna {"ok": bool, "reason": "reassigned"|"workflow_locked"|"error",
+                 "http": int|None}. Tarefa de Workflow = HTTP 400 travado.
+        """
+        url = f"{self.base_url}/Tasks/{task_id}"
+        try:
+            resp = self._request_with_retry(
+                "PATCH", url, json={"participants": participants}
+            )
+            ok = resp.status_code in (200, 204)
+            return {
+                "ok": ok,
+                "reason": "reassigned" if ok else "error",
+                "http": resp.status_code,
+            }
+        except requests.exceptions.HTTPError as exc:
+            resp = exc.response
+            http = resp.status_code if resp is not None else None
+            body = {}
+            if resp is not None:
+                try:
+                    body = resp.json()
+                except Exception:  # noqa: BLE001
+                    body = {}
+            if self.is_workflow_locked(body):
+                return {"ok": False, "reason": "workflow_locked", "http": http}
+            self.logger.error(
+                "Falha PATCH participants /Tasks/%s: HTTP %s. %s",
+                task_id, http, (getattr(resp, "text", "") or "")[:400],
+            )
+            return {"ok": False, "reason": "error", "http": http}
+
     def get_task_relationships(self, task_id: int) -> List[Dict[str, Any]]:
         self.logger.info("Buscando relacionamentos da tarefa ID %s.", task_id)
         endpoint = f"/tasks/{task_id}/relationships"

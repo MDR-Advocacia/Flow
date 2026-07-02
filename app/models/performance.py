@@ -232,3 +232,34 @@ class BalanceadorFilaPref(Base):
     __table_args__ = (
         UniqueConstraint("origem_pessoa_id", "subtipo", "alvo_nome", name="uq_fila_pref"),
     )
+
+
+class BalanceadorReatribuirJob(Base):
+    """Job de reatribuição EM LOTE de tarefas (Balanceador) — ESCRITA REAL no L1.
+
+    Espelha o padrão do perf_cancel_job: roda numa thread daemon, progresso
+    PERSISTIDO nesta tabela pro polling enxergar mesmo com vários workers do
+    uvicorn. Buckets do resultado:
+      - reatribuidas          → PATCH /Tasks participants OK (tarefa normal);
+      - workflow_bloqueadas   → API trava (modelo de procedimento do workflow),
+                                exige RPA/UI — fica separado pra tratamento manual;
+      - falhas                → erro de rede/HTTP inesperado.
+    Suporta abort (status 'aborting', checado entre tarefas). dry_run só lê os
+    participantes atuais e classifica (não grava)."""
+
+    __tablename__ = "balanceador_reatribuir_job"
+
+    id = Column(String, primary_key=True)  # uuid hex
+    team = Column(String, nullable=True, index=True)
+    status = Column(String, nullable=False, server_default="running")  # running|aborting|done
+    dry_run = Column(Boolean, nullable=False, server_default="false")
+    total = Column(Integer, nullable=False, server_default="0")
+    feito = Column(Integer, nullable=False, server_default="0")
+    reatribuidas = Column(Integer, nullable=False, server_default="0")
+    workflow_bloqueadas = Column(Integer, nullable=False, server_default="0")
+    falhas = Column(Integer, nullable=False, server_default="0")
+    detalhe = Column(JSONB, nullable=True)  # lista por tarefa: {task_id, to_id, to_nome, reason, http}
+    criado_por_id = Column(Integer, nullable=True)
+    criado_por_nome = Column(String, nullable=True)
+    iniciado_em = Column(DateTime(timezone=True), server_default=func.now())
+    terminado_em = Column(DateTime(timezone=True), nullable=True)

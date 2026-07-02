@@ -194,3 +194,48 @@ export async function listarLogs(team: string): Promise<RedistribuicaoLog[]> {
   const r = await json<{ logs: RedistribuicaoLog[] }>(await apiFetch(`${BASE}/logs?team=${team}`));
   return r.logs;
 }
+
+// ── Reatribuição REAL no L1 (job server-backed com progresso) ──
+// Um item = uma tarefa a reatribuir (troca responsável+executante pro to_id).
+export interface ReatribuirItem {
+  task_id: number;
+  to_id: number | null;
+  to_nome: string | null;
+}
+
+export interface ReatribuirStatus {
+  job_id?: string;
+  status: "running" | "aborting" | "done" | "not_found";
+  dry_run?: boolean;
+  total: number;
+  feito: number;
+  reatribuidas: number; // PATCH normal OK (ou, em dry-run, "seria reatribuída")
+  workflow_bloqueadas: number; // API trava (Workflow) — tratamento manual/RPA
+  falhas: number;
+  detalhe?: { task_id: number; to_id: number | null; to_nome: string | null; reason: string; http: number | null }[];
+}
+
+export async function iniciarReatribuicao(
+  team: string,
+  itens: ReatribuirItem[],
+  movimentos: MovePendente[],
+  dryRun = false,
+): Promise<{ job_id: string; status: ReatribuirStatus }> {
+  const qs = new URLSearchParams({ team, dry_run: String(dryRun) });
+  const res = await apiFetch(`${BASE}/reatribuir?${qs.toString()}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ itens, movimentos }),
+  });
+  return json(res);
+}
+
+export async function statusReatribuicao(team: string, jobId: string): Promise<ReatribuirStatus> {
+  const qs = new URLSearchParams({ team, job_id: jobId });
+  return json(await apiFetch(`${BASE}/reatribuir/status?${qs.toString()}`));
+}
+
+export async function abortarReatribuicao(team: string, jobId: string): Promise<void> {
+  const qs = new URLSearchParams({ team, job_id: jobId });
+  await apiFetch(`${BASE}/reatribuir/abort?${qs.toString()}`, { method: "POST" });
+}
