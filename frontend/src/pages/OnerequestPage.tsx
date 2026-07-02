@@ -993,7 +993,20 @@ export default function OnerequestPage() {
       })()}
 
       {/* KPIs */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        {/* Card ESTÁTICO: total de DMIs pendentes (abertas). Não clica/filtra —
+            estilo distinto pra sinalizar que é o total, não um farol. */}
+        <Card className="border-primary/30 bg-primary/5">
+          <CardContent className="flex items-center gap-3 p-4">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/15 text-primary">
+              <Inbox className="h-5 w-5" />
+            </span>
+            <div className="min-w-0">
+              <div className="text-2xl font-bold leading-none tabular-nums">{estado?.abertas ?? 0}</div>
+              <div className="mt-1 truncate text-xs text-muted-foreground">Pendentes</div>
+            </div>
+          </CardContent>
+        </Card>
         {KPI_DEFS.map((kpi) => {
           const ativo = farolFilter === kpi.farol;
           const toggle = () => {
