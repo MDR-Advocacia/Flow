@@ -103,7 +103,7 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
         Carga pendente de cada colaborador. Selecione quem quer rebalancear + o período e clique em Redistribuir.
-        <span className="ml-1 text-amber-700">Mock: leitura real, aplicação simulada.</span>
+        <span className="ml-1 text-emerald-700">Leitura e escrita ao vivo no L1.</span>
       </p>
 
       {/* KPIs do time */}

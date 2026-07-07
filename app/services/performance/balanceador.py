@@ -311,22 +311,29 @@ class BalanceadorService:
             return {"pessoa_id": pessoa_id, "nome": p.nome, "resolvido": False, "subtipos": [], "tarefas": []}
 
         client = LegalOneApiClient()
-        # Só tarefas COM prazo (a agenda), ordenadas da mais urgente, com TETO de
-        # páginas — o L1 limita a ~1,2 req/s. O recorte de data é feito NO L1
-        # (deadLine ge/le), senão o teto comeria as atrasadas e esconderia o futuro.
+        # A agenda da pessoa = tarefas onde ela é EXECUTANTE (isExecuter), com o
+        # prazo em endDateTime — é assim que o relatório Agenda Analytics (fonte
+        # do snapshot/diagnóstico) atribui. Validado empiricamente 2026-07-07:
+        # participants/any sem papel puxava também onde ela é só responsável/
+        # solicitante (pool de OUTRO universo), e deadLine é null nessas tarefas
+        # (o prazo real vive em endDateTime). Ordena da mais urgente, com TETO de
+        # páginas — o L1 limita a ~1,2 req/s. Recorte de data feito NO L1.
         hoje = _hoje_brt()
-        flt = f"participants/any(pp: pp/contact/id eq {cid}) and statusId eq 0 and deadLine ne null"
+        flt = (
+            f"participants/any(pp: pp/contact/id eq {cid} and pp/isExecuter eq true)"
+            " and statusId eq 0 and endDateTime ne null"
+        )
         if not incluir_atrasadas:
-            flt += f" and deadLine ge {hoje.isoformat()}T00:00:00-03:00"
+            flt += f" and endDateTime ge {hoje.isoformat()}T00:00:00-03:00"
         if dias and dias > 0:
             teto = hoje + _dt.timedelta(days=dias)
-            flt += f" and deadLine le {teto.isoformat()}T23:59:59-03:00"
+            flt += f" and endDateTime le {teto.isoformat()}T23:59:59-03:00"
         raw, skip, total_real, capado = [], 0, None, False
         MAX_TAREFAS = 180  # ~6 páginas; cobre a maioria e capa os backlogs gigantes
         while skip < MAX_TAREFAS:
             params = {
                 "$filter": flt, "$top": "30", "$skip": str(skip),
-                "$orderby": "deadLine", "$select": "id,subTypeId,deadLine,description",
+                "$orderby": "endDateTime", "$select": "id,subTypeId,endDateTime,description",
             }
             if skip == 0:
                 params["$count"] = "true"
@@ -347,12 +354,27 @@ class BalanceadorService:
             s.external_id: s.name
             for s in self.db.query(LegalOneTaskSubType).filter(LegalOneTaskSubType.external_id.in_(sub_ids)).all()
         }
+        # Fallback de nome pro subtipo FORA do catálogo local (não há endpoint
+        # /TaskSubTypes no L1): o snapshot do relatório tem o nome dessas mesmas
+        # tarefas — resolve subTypeId→nome pelo l1_task_id.
+        faltantes = sub_ids - set(nomes)
+        if faltantes:
+            ids_falt = [int(t["id"]) for t in raw if t.get("subTypeId") in faltantes and t.get("id")]
+            if ids_falt:
+                for row in self.db.execute(
+                    text("SELECT l1_task_id, subtipo FROM perf_l1_tarefa WHERE l1_task_id = ANY(:ids) AND subtipo IS NOT NULL"),
+                    {"ids": ids_falt},
+                ).fetchall():
+                    tid = int(row.l1_task_id)
+                    stid = next((t.get("subTypeId") for t in raw if t.get("id") == tid), None)
+                    if stid in faltantes:
+                        nomes[stid] = row.subtipo
         tarefas = []
         for t in raw:
             sub = nomes.get(t.get("subTypeId")) or f"subtipo {t.get('subTypeId')}"
             if sub.lower().startswith("acompanhar"):
                 continue
-            dl = t.get("deadLine")
+            dl = t.get("endDateTime")
             d = None
             if dl:
                 try:
