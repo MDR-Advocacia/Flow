@@ -11,6 +11,7 @@ TEAMS = [
     {"key": "bb-execucao", "label": "BB Execução & Encerramento"},
     {"key": "bb-acordos", "label": "BB Acordos"},
     {"key": "bb-estrategico", "label": "BB Estratégico"},
+    {"key": "bb-cadastro", "label": "BB Cadastro"},
     {"key": "master-reu", "label": "Master Réu"},
     {"key": "ativos-reu", "label": "Ativos Réu"},
     # Autor (Recuperação de Crédito) — 2026-06-29

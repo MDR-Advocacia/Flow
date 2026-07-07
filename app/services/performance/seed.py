@@ -56,7 +56,7 @@ _CARGO_OVERRIDE = {
 
 # Aba (sheet) da planilha de squads → setor (supervisão). Chave = nome da aba
 # normalizado. Várias abas caem no MESMO setor (BB Réu = Defesa + Réu + Recursos).
-# Abas fora deste mapa são ignoradas (ex.: BB CADASTRO vazia).
+# Abas fora deste mapa são ignoradas.
 TAB_TO_SETOR = {
     "bb defesa": "bb-reu",
     "bb reu": "bb-reu",
@@ -64,6 +64,7 @@ TAB_TO_SETOR = {
     "bb execucao&encerramento": "bb-execucao",
     "bb acordos": "bb-acordos",
     "bb estrategico": "bb-estrategico",
+    "bb cadastro": "bb-cadastro",
     "master reu": "master-reu",
     "ativos reu": "ativos-reu",
 }

@@ -9,6 +9,7 @@ export const TEAMS = [
   { key: "bb-execucao", label: "BB Execução & Encerramento", grupo: GRUPO_PASSIVO },
   { key: "bb-acordos", label: "BB Acordos", grupo: GRUPO_PASSIVO },
   { key: "bb-estrategico", label: "BB Estratégico", grupo: GRUPO_PASSIVO },
+  { key: "bb-cadastro", label: "BB Cadastro", grupo: GRUPO_PASSIVO },
   { key: "master-reu", label: "Master Réu", grupo: GRUPO_PASSIVO },
   { key: "ativos-reu", label: "Ativos Réu", grupo: GRUPO_PASSIVO },
   { key: "bb-autor-processual", label: "BB Autor — Processual", grupo: GRUPO_CREDITO },
