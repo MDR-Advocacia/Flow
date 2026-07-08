@@ -1,6 +1,7 @@
-// Distribuição em fila (round-robin): pega N tarefas de um subtipo de uma pessoa
-// e espalha igualmente entre vários colaboradores escolhidos. Ex.: 7 tarefas pra
-// 3 estagiários → 3 / 2 / 2.
+// Distribuição em fila (round-robin): pega as tarefas de UM OU MAIS subtipos de
+// uma pessoa e espalha igualmente entre vários colaboradores escolhidos. Ex.: 7
+// tarefas pra 3 estagiários → 3 / 2 / 2. Em multi-subtipo, cada subtipo é
+// distribuído por inteiro (Todas) entre os mesmos alvos.
 
 import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, Split, UserPlus } from "lucide-react";
@@ -28,27 +29,39 @@ import { type UsuarioBusca, getSugestoesFila, getUsuarios, registrarFilaPref } f
 
 type Pessoa = { id: number; nome: string };
 export type DistItem = { toId: number; toNome: string; qtd: number };
+export type FilaSubtipo = { subtipo: string; max: number };
+// Resultado por subtipo: como a fila daquele subtipo ficou entre os alvos.
+export type FilaResultado = { subtipo: string; dist: DistItem[] };
+
+function splitRR(count: number, targets: Pessoa[]): DistItem[] {
+  if (!targets.length || count <= 0) return [];
+  const base = Math.floor(count / targets.length);
+  const rem = count % targets.length;
+  return targets
+    .map((t, i) => ({ toId: t.id, toNome: t.nome, qtd: base + (i < rem ? 1 : 0) }))
+    .filter((d) => d.qtd > 0);
+}
 
 export default function DistribuicaoFilaDialog({
   team,
   fromPessoa,
-  subtipo,
-  max,
+  itens,
   alvos,
   onConfirm,
   onClose,
 }: {
   team: string;
   fromPessoa: Pessoa;
-  subtipo: string;
-  max: number;
+  itens: FilaSubtipo[]; // 1 = comportamento antigo; N = distribui vários de uma vez
   alvos: Pessoa[];
-  onConfirm: (dist: DistItem[]) => void;
+  onConfirm: (resultado: FilaResultado[]) => void;
   onClose: () => void;
 }) {
+  const single = itens.length === 1;
+  const totalMax = useMemo(() => itens.reduce((s, it) => s + it.max, 0), [itens]);
   const outros = useMemo(() => alvos.filter((a) => a.id !== fromPessoa.id), [alvos, fromPessoa.id]);
   const [todos, setTodos] = useState(true);
-  const [qtd, setQtd] = useState(max);
+  const [qtd, setQtd] = useState(single ? itens[0].max : totalMax);
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [externos, setExternos] = useState<Pessoa[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -63,10 +76,12 @@ export default function DistribuicaoFilaDialog({
       .catch(() => undefined);
   }, [searchOpen, busca, team]);
 
-  // Sugere os destinos RECORRENTES (origem+subtipo) no topo, já marcados.
+  // Sugere destinos RECORRENTES no topo, já marcados. Em single, por subtipo;
+  // em multi, une as sugestões de todos os subtipos selecionados.
   useEffect(() => {
-    getSugestoesFila(team, fromPessoa.id, subtipo)
-      .then((sugs) => {
+    Promise.all(itens.map((it) => getSugestoesFila(team, fromPessoa.id, it.subtipo).catch(() => [])))
+      .then((listas) => {
+        const sugs = listas.flat();
         if (!sugs.length) return;
         const recIds = new Set<number>();
         const novos: Pessoa[] = [];
@@ -77,7 +92,7 @@ export default function DistribuicaoFilaDialog({
             recIds.add(naTabela.id);
             selNovos.push(naTabela.id);
           } else if (s.id != null) {
-            novos.push({ id: s.id, nome: s.nome });
+            if (!novos.some((n) => n.id === s.id)) novos.push({ id: s.id, nome: s.nome });
             recIds.add(s.id);
             selNovos.push(s.id);
           }
@@ -98,7 +113,6 @@ export default function DistribuicaoFilaDialog({
     () => [...outros, ...externos].sort((a, b) => Number(recorrentes.has(b.id)) - Number(recorrentes.has(a.id))),
     [outros, externos, recorrentes],
   );
-  const n = todos ? max : Math.max(1, Math.min(qtd || 0, max));
   const targets = pool.filter((o) => sel.has(o.id));
 
   const addExterno = (u: UsuarioBusca) => {
@@ -107,21 +121,30 @@ export default function DistribuicaoFilaDialog({
     if (u.id === fromPessoa.id) return; // não distribui pra própria origem
     const jaNaTabela = outros.find((o) => o.nome.toLowerCase() === u.nome.toLowerCase());
     if (jaNaTabela) {
-      setSel((s) => new Set(s).add(jaNaTabela.id)); // já está na tabela: só marca
+      setSel((s) => new Set(s).add(jaNaTabela.id));
     } else {
       if (!externos.some((e) => e.id === u.id)) setExternos((prev) => [...prev, u]);
       setSel((s) => new Set(s).add(u.id));
     }
   };
 
-  const dist = useMemo<DistItem[]>(() => {
-    if (!targets.length || n <= 0) return [];
-    const base = Math.floor(n / targets.length);
-    const rem = n % targets.length;
-    return targets
-      .map((t, i) => ({ toId: t.id, toNome: t.nome, qtd: base + (i < rem ? 1 : 0) }))
-      .filter((d) => d.qtd > 0);
-  }, [n, targets]);
+  // single: respeita "Todas/número"; multi: Todas de cada subtipo.
+  const resultado = useMemo<FilaResultado[]>(() => {
+    if (!targets.length) return [];
+    if (single) {
+      const n = todos ? itens[0].max : Math.max(1, Math.min(qtd || 0, itens[0].max));
+      const d = splitRR(n, targets);
+      return d.length ? [{ subtipo: itens[0].subtipo, dist: d }] : [];
+    }
+    return itens
+      .map((it) => ({ subtipo: it.subtipo, dist: splitRR(it.max, targets) }))
+      .filter((r) => r.dist.length);
+  }, [single, todos, qtd, targets, itens]);
+
+  const totalDistribuido = useMemo(
+    () => resultado.reduce((s, r) => s + r.dist.reduce((a, d) => a + d.qtd, 0), 0),
+    [resultado],
+  );
 
   const toggle = (id: number) =>
     setSel((s) => {
@@ -130,6 +153,18 @@ export default function DistribuicaoFilaDialog({
       return c;
     });
 
+  const confirmar = () => {
+    resultado.forEach((r) =>
+      registrarFilaPref(
+        team,
+        fromPessoa.id,
+        r.subtipo,
+        r.dist.map((d) => ({ id: d.toId, nome: d.toNome })),
+      ).catch(() => undefined),
+    );
+    onConfirm(resultado);
+  };
+
   return (
     // modal={false}: aninhado dentro do modal de redistribuição — não deve marcar
     // o pai como inert nem travar pointer-events (senão trava o footer/X ao fechar).
@@ -137,32 +172,56 @@ export default function DistribuicaoFilaDialog({
       <DialogContent className="max-h-[88vh] max-w-lg overflow-y-auto" style={{ pointerEvents: "auto" }}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-base">
-            <Split className="h-4 w-4 text-[hsl(var(--dunatech-blue))]" /> Distribuir em fila
+            <Split className="h-4 w-4 text-[hsl(var(--dunatech-blue))]" />
+            {single ? "Distribuir em fila" : `Distribuir ${itens.length} tipos em fila`}
           </DialogTitle>
         </DialogHeader>
         <p className="text-xs text-muted-foreground">
-          <b>{subtipo}</b> · de {fromPessoa.nome}. Espalha igualmente (round-robin) entre os escolhidos.
+          {single ? (
+            <>
+              <b>{itens[0].subtipo}</b> · de {fromPessoa.nome}. Espalha igualmente (round-robin) entre os escolhidos.
+            </>
+          ) : (
+            <>
+              {itens.length} tipos ({totalMax} tarefas) · de {fromPessoa.nome}. Cada tipo é espalhado por inteiro
+              (round-robin) entre os escolhidos.
+            </>
+          )}
         </p>
 
-        {/* quantas */}
-        <div className="space-y-2 rounded-lg border p-3">
-          <div className="text-xs font-medium text-muted-foreground">Quantas distribuir?</div>
-          <div className="flex items-center gap-3">
-            <label className="flex items-center gap-1.5 text-sm">
-              <Checkbox checked={todos} onCheckedChange={(c) => setTodos(!!c)} /> Todas ({max})
-            </label>
-            {!todos && (
-              <Input
-                type="number"
-                min={1}
-                max={max}
-                value={qtd}
-                onChange={(e) => setQtd(Number(e.target.value))}
-                className="h-8 w-24"
-              />
-            )}
+        {/* lista de subtipos (multi) — o que vai ser distribuído */}
+        {!single && (
+          <div className="max-h-28 space-y-1 overflow-y-auto rounded-lg border p-2">
+            {itens.map((it) => (
+              <div key={it.subtipo} className="flex items-center justify-between gap-2 text-xs">
+                <span className="truncate" title={it.subtipo}>{it.subtipo}</span>
+                <span className="shrink-0 font-semibold tabular-nums text-muted-foreground">{it.max}</span>
+              </div>
+            ))}
           </div>
-        </div>
+        )}
+
+        {/* quantas (só single — em multi é sempre Todas de cada) */}
+        {single && (
+          <div className="space-y-2 rounded-lg border p-3">
+            <div className="text-xs font-medium text-muted-foreground">Quantas distribuir?</div>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1.5 text-sm">
+                <Checkbox checked={todos} onCheckedChange={(c) => setTodos(!!c)} /> Todas ({itens[0].max})
+              </label>
+              {!todos && (
+                <Input
+                  type="number"
+                  min={1}
+                  max={itens[0].max}
+                  value={qtd}
+                  onChange={(e) => setQtd(Number(e.target.value))}
+                  className="h-8 w-24"
+                />
+              )}
+            </div>
+          </div>
+        )}
 
         {/* pra quem (multiselect da tabela + busca de qualquer colaborador) */}
         <div className="space-y-2 rounded-lg border p-3">
@@ -215,35 +274,27 @@ export default function DistribuicaoFilaDialog({
         </div>
 
         {/* prévia da fila */}
-        {dist.length > 0 && (
-          <div className="rounded-lg border bg-muted/20 p-3 text-xs">
-            <div className="mb-1 font-medium">Prévia da fila ({n} tarefa/s):</div>
-            <div className="flex flex-wrap gap-x-3 gap-y-1">
-              {dist.map((d) => (
-                <span key={d.toId} className="tabular-nums">
-                  <span className="font-semibold">{d.qtd}×</span> {d.toNome}
-                </span>
-              ))}
-            </div>
+        {resultado.length > 0 && (
+          <div className="space-y-2 rounded-lg border bg-muted/20 p-3 text-xs">
+            <div className="font-medium">Prévia da fila ({totalDistribuido} tarefa/s):</div>
+            {resultado.map((r) => (
+              <div key={r.subtipo}>
+                {!single && <div className="truncate text-[11px] font-medium" title={r.subtipo}>{r.subtipo}</div>}
+                <div className="flex flex-wrap gap-x-3 gap-y-1">
+                  {r.dist.map((d) => (
+                    <span key={d.toId} className="tabular-nums">
+                      <span className="font-semibold">{d.qtd}×</span> {d.toNome}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancelar</Button>
-          <Button
-            className="gap-1.5"
-            disabled={dist.length === 0}
-            onClick={() => {
-              // aprende os destinos dessa (origem, subtipo) pra sugerir no topo depois
-              registrarFilaPref(
-                team,
-                fromPessoa.id,
-                subtipo,
-                dist.map((d) => ({ id: d.toId, nome: d.toNome })),
-              ).catch(() => undefined);
-              onConfirm(dist);
-            }}
-          >
+          <Button className="gap-1.5" disabled={resultado.length === 0} onClick={confirmar}>
             Distribuir <ArrowRight className="h-4 w-4" />
           </Button>
         </DialogFooter>

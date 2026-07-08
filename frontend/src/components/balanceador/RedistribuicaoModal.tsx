@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Check, FlaskConical, Info, Loader2, RotateCcw, Split, Trash2, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -74,7 +75,9 @@ export default function RedistribuicaoModal({
   const [dropCtx, setDropCtx] = useState<DropCtx>(null);
   const [qtd, setQtd] = useState<number>(0);
   const [detalhe, setDetalhe] = useState<{ fromPessoa: Pessoa; subtipo: string } | null>(null);
-  const [filaCtx, setFilaCtx] = useState<{ fromPessoa: Pessoa; subtipo: string; max: number } | null>(null);
+  const [filaCtx, setFilaCtx] = useState<{ fromPessoa: Pessoa; itens: { subtipo: string; max: number }[] } | null>(null);
+  // Seleção de vários subtipos (de UMA pessoa) pra distribuir em fila de uma vez.
+  const [filaSel, setFilaSel] = useState<{ fromId: number; subs: Record<string, number> } | null>(null);
   const [exec, setExec] = useState<ExecState | null>(null);
   const dragged = useRef<Dragged>(null);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -112,6 +115,7 @@ export default function RedistribuicaoModal({
     setTarefas(tar);
     setTotais(tot);
     setNaoResolvidos(naoRes);
+    setFilaSel(null);
     setProgresso(null);
     setLoading(false);
   }, [team, pessoas, dias, incluirAtrasadas]);
@@ -154,6 +158,24 @@ export default function RedistribuicaoModal({
   const registrar = (m: Omit<MovePendente, "id">) => {
     setMoves((prev) => [{ ...m, id: `mv${++_moveSeq}` }, ...prev]);
     applyMove(m.fromId, m.toId, m.subtipo, m.qtd);
+  };
+
+  // Multiselect de subtipos pra fila: seleção é sempre de UMA pessoa (a fila sai
+  // de uma origem). Marcar card de outra pessoa reinicia a seleção nela.
+  const toggleFilaSel = (fromId: number, subtipo: string, total: number) => {
+    setFilaSel((cur) => {
+      const subs = cur && cur.fromId === fromId ? { ...cur.subs } : {};
+      if (subs[subtipo] != null) delete subs[subtipo];
+      else subs[subtipo] = total;
+      return Object.keys(subs).length ? { fromId, subs } : null;
+    });
+  };
+  const filaSelCount = (fromId: number) =>
+    filaSel && filaSel.fromId === fromId ? Object.keys(filaSel.subs).length : 0;
+  const abrirFilaMulti = (p: Pessoa) => {
+    if (!filaSel || filaSel.fromId !== p.id) return;
+    const itens = Object.entries(filaSel.subs).map(([subtipo, max]) => ({ subtipo, max: max as number }));
+    if (itens.length) setFilaCtx({ fromPessoa: p, itens });
   };
 
   const onDrop = (toId: number) => {
@@ -320,9 +342,10 @@ export default function RedistribuicaoModal({
           </DialogHeader>
           <p className="text-xs text-muted-foreground">
             Arraste um tipo de tarefa de uma pessoa para outra e informe a quantidade — ou clique no{" "}
-            <Info className="inline h-3 w-3" /> pra escolher tarefa a tarefa. Troca <b>responsável + executante</b>,
-            mantém o solicitante. <span className="text-emerald-700">Leitura e escrita ao vivo no L1 · use “Simular” pra
-            conferir antes.</span>
+            <Info className="inline h-3 w-3" /> pra escolher tarefa a tarefa, no <Split className="inline h-3 w-3" /> pra
+            distribuir em fila, ou <b>marque vários tipos</b> e distribua todos de uma vez. Troca
+            <b> responsável + executante</b>, mantém o solicitante.{" "}
+            <span className="text-emerald-700">Leitura e escrita ao vivo no L1 · use “Simular” pra conferir antes.</span>
           </p>
 
           {naoResolvidos.length > 0 && (
@@ -363,7 +386,7 @@ export default function RedistribuicaoModal({
                       onDrop={() => onDrop(p.id)}
                       className="flex w-64 shrink-0 flex-col rounded-lg border bg-muted/20"
                     >
-                      <div className="sticky top-0 rounded-t-lg border-b bg-background/95 px-3 py-2">
+                      <div className="sticky top-0 z-10 rounded-t-lg border-b bg-background/95 px-3 py-2">
                         <div className="truncate text-sm font-semibold" title={p.nome}>{p.nome}</div>
                         <div className="text-[11px] text-muted-foreground">
                           {totalP} tarefa(s) · {cards.length} tipos
@@ -371,6 +394,14 @@ export default function RedistribuicaoModal({
                             <span className="text-amber-700"> · mais urgentes (de {totais[p.id]!.total} c/ prazo)</span>
                           )}
                         </div>
+                        {filaSelCount(p.id) > 0 && (
+                          <button
+                            onClick={() => abrirFilaMulti(p)}
+                            className="mt-1.5 flex w-full items-center justify-center gap-1 rounded-md bg-[hsl(var(--dunatech-blue))] px-2 py-1 text-[11px] font-medium text-white transition-opacity hover:opacity-90"
+                          >
+                            <Split className="h-3 w-3" /> Distribuir {filaSelCount(p.id)} tipo(s) em fila
+                          </button>
+                        )}
                       </div>
                       <div className="flex-1 space-y-1.5 overflow-y-auto p-2">
                         {cards.length === 0 && (
@@ -384,14 +415,28 @@ export default function RedistribuicaoModal({
                             className="group cursor-grab rounded-md border bg-background p-2 shadow-sm active:cursor-grabbing"
                           >
                             <div className="flex items-start justify-between gap-1">
-                              <span className="text-xs font-medium leading-tight" title={c.subtipo}>
-                                {c.subtipo}
-                              </span>
+                              <div className="flex min-w-0 items-start gap-1.5">
+                                <span
+                                  className="mt-0.5 shrink-0"
+                                  onClick={(e) => e.stopPropagation()}
+                                  onMouseDown={(e) => e.stopPropagation()}
+                                >
+                                  <Checkbox
+                                    className="h-3.5 w-3.5"
+                                    checked={filaSel?.fromId === p.id && filaSel.subs[c.subtipo] != null}
+                                    onCheckedChange={() => toggleFilaSel(p.id, c.subtipo, c.total)}
+                                    title="Selecionar pra distribuir vários em fila de uma vez"
+                                  />
+                                </span>
+                                <span className="text-xs font-medium leading-tight" title={c.subtipo}>
+                                  {c.subtipo}
+                                </span>
+                              </div>
                               <div className="flex shrink-0 items-center gap-1">
                                 <button
                                   className="text-muted-foreground hover:text-[hsl(var(--dunatech-blue))]"
                                   title="Distribuir em fila (round-robin) entre vários"
-                                  onClick={() => setFilaCtx({ fromPessoa: p, subtipo: c.subtipo, max: c.total })}
+                                  onClick={() => setFilaCtx({ fromPessoa: p, itens: [{ subtipo: c.subtipo, max: c.total }] })}
                                 >
                                   <Split className="h-3.5 w-3.5" />
                                 </button>
@@ -544,23 +589,25 @@ export default function RedistribuicaoModal({
         />
       )}
 
-      {/* distribuição em fila (round-robin) */}
+      {/* distribuição em fila (round-robin) — 1 ou vários subtipos */}
       {filaCtx && (
         <DistribuicaoFilaDialog
           team={team}
           fromPessoa={filaCtx.fromPessoa}
-          subtipo={filaCtx.subtipo}
-          max={filaCtx.max}
+          itens={filaCtx.itens}
           alvos={pessoas}
           onClose={() => setFilaCtx(null)}
-          onConfirm={(dist) => {
-            dist.forEach((d) =>
-              registrar({
-                fromId: filaCtx.fromPessoa.id, fromNome: filaCtx.fromPessoa.nome,
-                toId: d.toId, toNome: d.toNome, subtipo: filaCtx.subtipo, qtd: d.qtd, individual: false,
-              }),
+          onConfirm={(resultado) => {
+            resultado.forEach((r) =>
+              r.dist.forEach((d) =>
+                registrar({
+                  fromId: filaCtx.fromPessoa.id, fromNome: filaCtx.fromPessoa.nome,
+                  toId: d.toId, toNome: d.toNome, subtipo: r.subtipo, qtd: d.qtd, individual: false,
+                }),
+              ),
             );
             setFilaCtx(null);
+            setFilaSel(null);
           }}
         />
       )}
