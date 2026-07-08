@@ -119,6 +119,8 @@ type LawsuitInfo = {
 
 type OverrideField = { proposto: unknown; enviado: unknown };
 
+type SystemAdjustment = { antes: unknown; depois: unknown; motivo?: string };
+
 type TaskAudit = {
   id: number;
   publication_record_id: number | null;
@@ -126,6 +128,7 @@ type TaskAudit = {
   subtype_id: number | null;
   override_detected: boolean;
   override_fields: Record<string, OverrideField> | null;
+  system_adjustments?: Record<string, SystemAdjustment> | null;
   scheduled_by_name: string | null;
   scheduled_by_email: string | null;
   scheduled_at: string | null;
@@ -225,6 +228,22 @@ const OVERRIDE_FIELD_LABELS: Record<string, string> = {
   responsibleOfficeId: "Escritório responsável",
   responsavel_contact_id: "Responsável (contact id)",
 };
+
+const SYSTEM_FIELD_LABELS: Record<string, string> = {
+  endDateTime: "Data de conclusão",
+  startDateTime: "Data de início",
+  description: "Descrição",
+  status: "Status",
+  responsibleOfficeId: "Escritório responsável",
+  originOfficeId: "Escritório de origem",
+  publishDate: "Data de publicação",
+};
+
+function fmtVal(v: unknown): string {
+  if (v === null || v === undefined || v === "") return "—";
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
 
 /* ─── Components ──────────────────────────────────────────────────── */
 
@@ -426,6 +445,7 @@ function Timeline({ events }: { events: TimelineEvent[] }) {
 function TaskAuditCard({ audit }: { audit: TaskAudit }) {
   const [showPayloads, setShowPayloads] = useState(false);
   const overrides = Object.entries(audit.override_fields || {});
+  const adjustments = Object.entries(audit.system_adjustments || {});
 
   return (
     <div className="border rounded-lg p-4 space-y-3">
@@ -444,6 +464,11 @@ function TaskAuditCard({ audit }: { audit: TaskAudit }) {
         ) : (
           <Badge variant="outline" className="bg-green-100 text-green-800">
             conforme proposta
+          </Badge>
+        )}
+        {adjustments.length > 0 && (
+          <Badge variant="outline" className="bg-sky-100 text-sky-800">
+            ajuste automático do sistema
           </Badge>
         )}
         {audit.l1_task_url && (
@@ -472,9 +497,28 @@ function TaskAuditCard({ audit }: { audit: TaskAudit }) {
           {overrides.map(([field, diff]) => (
             <div key={field} className="flex items-center gap-2 flex-wrap">
               <span className="text-muted-foreground">{OVERRIDE_FIELD_LABELS[field] || field}:</span>
-              <code className="bg-white px-1 rounded border">{String(diff.proposto ?? "—")}</code>
+              <code className="bg-white px-1 rounded border">{fmtVal(diff.proposto)}</code>
               <ArrowRight className="h-3 w-3 text-amber-600" />
-              <code className="bg-white px-1 rounded border font-semibold">{String(diff.enviado ?? "—")}</code>
+              <code className="bg-white px-1 rounded border font-semibold">{fmtVal(diff.enviado)}</code>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {adjustments.length > 0 && (
+        <div className="text-xs bg-sky-50 border border-sky-200 rounded p-2 space-y-1.5">
+          <div className="font-semibold text-sky-800">
+            O que o sistema ajustou automaticamente antes de enviar (não foi o operador):
+          </div>
+          {adjustments.map(([field, adj]) => (
+            <div key={field} className="space-y-0.5">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-muted-foreground">{SYSTEM_FIELD_LABELS[field] || field}:</span>
+                <code className="bg-white px-1 rounded border">{fmtVal(adj.antes)}</code>
+                <ArrowRight className="h-3 w-3 text-sky-600" />
+                <code className="bg-white px-1 rounded border font-semibold">{fmtVal(adj.depois)}</code>
+              </div>
+              {adj.motivo && <div className="text-sky-700 pl-1">↳ {adj.motivo}</div>}
             </div>
           ))}
         </div>
@@ -836,7 +880,8 @@ const LookupByCnjPage = () => {
                 </CardTitle>
                 <CardDescription>
                   O que foi <strong>efetivamente enviado</strong> ao Legal One — não a proposta. Cada tarefa mostra o
-                  operador que agendou e, quando ele alterou subtipo, escritório ou responsável, o antes/depois campo a campo.
+                  operador que agendou, o antes/depois quando ele alterou subtipo, escritório ou responsável, e — em
+                  azul — o que o <strong>sistema</strong> ajustou sozinho (ex.: data vencida movida pro próximo dia útil).
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">

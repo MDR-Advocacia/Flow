@@ -33,6 +33,11 @@ class PublicationTaskAudit(Base):
     override_detected = Column(Boolean, nullable=False, server_default="false", index=True)
     override_fields = Column(jsonb(), nullable=True)  # {campo: {proposto, enviado}}
 
+    # O que o SISTEMA mudou mecanicamente antes do envio (bump de data pra
+    # dia útil, defaults obrigatórios, corte de descrição) — categoria
+    # separada do override humano (pub005). {campo: {antes, depois, motivo}}.
+    system_adjustments = Column(jsonb(), nullable=True)
+
     # Quem agendou (snapshot do operador — o L1 só guarda "Sistema").
     scheduled_by_user_id = Column(Integer, nullable=True, index=True)
     scheduled_by_name = Column(String, nullable=True)

@@ -1049,6 +1049,7 @@ def scheduled_audit(
             "subtype_id": a.subtype_id,
             "override_detected": a.override_detected,
             "override_fields": a.override_fields,
+            "system_adjustments": a.system_adjustments,
             "scheduled_by_name": a.scheduled_by_name,
             "scheduled_by_email": a.scheduled_by_email,
             "scheduled_at": a.scheduled_at.isoformat() if a.scheduled_at else None,

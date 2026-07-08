@@ -2905,6 +2905,7 @@ class PublicationSearchService:
                     "subtype_id": a.subtype_id,
                     "override_detected": a.override_detected,
                     "override_fields": a.override_fields,
+                    "system_adjustments": a.system_adjustments,
                     "scheduled_by_name": a.scheduled_by_name,
                     "scheduled_by_email": a.scheduled_by_email,
                     "scheduled_at": a.scheduled_at.isoformat() if a.scheduled_at else None,
@@ -3050,13 +3051,21 @@ class PublicationSearchService:
             if not audit.get("scheduled_at"):
                 continue
             override = audit.get("override_fields") or {}
-            override_summary = None
+            adjustments = audit.get("system_adjustments") or {}
+            summary_parts = []
             if override:
-                override_summary = (
+                summary_parts.append(
                     "Operador alterou "
                     + ", ".join(_override_labels.get(k, k) for k in override)
                     + " em relação à proposta automática."
                 )
+            if adjustments:
+                summary_parts.append(
+                    "Sistema ajustou automaticamente: "
+                    + ", ".join(sorted(adjustments))
+                    + "."
+                )
+            override_summary = " ".join(summary_parts) or None
             timeline.append({
                 "timestamp": audit["scheduled_at"],
                 "event": "tarefa_criada",
@@ -3372,6 +3381,40 @@ class PublicationSearchService:
         block = nl + nl + mark + nl + text
         payload["notes"] = (current + block) if current else (mark + nl + text)
 
+    _SYSTEM_ADJUSTMENT_REASONS = {
+        "endDateTime": "Data de conclusão no passado ao confirmar — sistema moveu pro próximo dia útil (regra do L1).",
+        "startDateTime": "Data de início ajustada junto com a conclusão (próximo dia útil).",
+        "description": "Descrição ajustada automaticamente ao limite de 250 caracteres do L1.",
+        "status": "Status obrigatório preenchido automaticamente.",
+        "responsibleOfficeId": "Escritório responsável preenchido automaticamente (campo obrigatório).",
+        "originOfficeId": "Escritório de origem herdado automaticamente (campo obrigatório).",
+        "publishDate": "Data de publicação preenchida automaticamente (campo obrigatório).",
+    }
+
+    @classmethod
+    def _diff_system_adjustments(cls, before: dict, after: dict) -> dict:
+        """Diff campo a campo entre o payload como o operador confirmou e o
+        payload após os ajustes mecânicos do backend (_enforce_description_limit,
+        _apply_required_task_defaults, _ensure_endtime_in_future). Alimenta a
+        categoria "ajuste automático do sistema" da auditoria — separada do
+        override humano, pra diagnosticar divergência operador × Legal One."""
+        adjustments: dict = {}
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            return adjustments
+        for key in set(before.keys()) | set(after.keys()):
+            antes = before.get(key)
+            depois = after.get(key)
+            if antes == depois:
+                continue
+            adjustments[key] = {
+                "antes": antes,
+                "depois": depois,
+                "motivo": cls._SYSTEM_ADJUSTMENT_REASONS.get(
+                    key, "Ajuste automático do sistema antes do envio ao L1."
+                ),
+            }
+        return adjustments
+
     def _record_scheduled_task_audit(
         self,
         *,
@@ -3384,6 +3427,7 @@ class PublicationSearchService:
         sb_email: Optional[str],
         sb_name: Optional[str],
         when,
+        system_adjustments: Optional[list] = None,
     ) -> None:
         """Persiste auditoria por tarefa criada: payload EXATO enviado ao L1 +
         quem agendou + diff vs. a proposta automática (flag de override humano).
@@ -3407,9 +3451,12 @@ class PublicationSearchService:
                 return None
 
             rec_id = records[0].id if records else None
-            for sent, task_id in zip(sent_payloads, created_task_ids):
+            for idx, (sent, task_id) in enumerate(zip(sent_payloads, created_task_ids)):
                 if not isinstance(sent, dict):
                     continue
+                adjustments = None
+                if system_adjustments and idx < len(system_adjustments):
+                    adjustments = system_adjustments[idx] or None
                 sub = sent.get("subTypeId")
                 prop = prop_by_sub.get(int(sub)) if sub is not None else None
                 if prop is None and len(prop_by_sub) <= 1:
@@ -3422,6 +3469,10 @@ class PublicationSearchService:
                         "responsavel_contact_id": (_contact(prop), _contact(sent)),
                     }
                     for field, (proposto, enviado) in checks.items():
+                        # Campo mudado pelo SISTEMA (ex.: office default) não é
+                        # override do operador — fica só em system_adjustments.
+                        if adjustments and field in adjustments:
+                            continue
                         if proposto is not None and proposto != enviado:
                             override_fields[field] = {"proposto": proposto, "enviado": enviado}
                 self.db.add(PublicationTaskAudit(
@@ -3433,6 +3484,7 @@ class PublicationSearchService:
                     proposed_payload=prop,
                     override_detected=bool(override_fields),
                     override_fields=override_fields or None,
+                    system_adjustments=adjustments,
                     scheduled_by_user_id=sb_user_id,
                     scheduled_by_name=sb_name,
                     scheduled_by_email=sb_email,
@@ -3543,13 +3595,22 @@ class PublicationSearchService:
             next(iter(office_candidates)) if len(office_candidates) == 1 else None
         )
 
+        import copy as _copy
+
         created_task_ids: list[int] = []
+        system_adjustments_per_payload: list[dict] = []
         for payload in payloads:
+            # Snapshot do payload como o operador confirmou — o diff contra o
+            # payload pós-ajustes vira a trilha "ajuste automático do sistema".
+            confirmed_by_operator = _copy.deepcopy(payload)
             self._enforce_description_limit(payload)
             self._apply_required_task_defaults(
                 payload, fallback_office_id=fallback_office_id,
             )
             self._ensure_endtime_in_future(payload)
+            system_adjustments_per_payload.append(
+                self._diff_system_adjustments(confirmed_by_operator, payload)
+            )
             created = self.client.create_task(payload)
             if not created or not created.get("id"):
                 # Se o client conseguiu extrair o que o L1 reclamou, usa
@@ -3585,6 +3646,7 @@ class PublicationSearchService:
             lawsuit_id=lawsuit_id, records=records, proposals=proposals,
             sent_payloads=payloads, created_task_ids=created_task_ids,
             sb_user_id=sb_user_id, sb_email=sb_email, sb_name=sb_name, when=now_utc,
+            system_adjustments=system_adjustments_per_payload,
         )
         self.db.commit()
 
@@ -3655,13 +3717,22 @@ class PublicationSearchService:
             next(iter(office_candidates)) if len(office_candidates) == 1 else None
         )
 
+        import copy as _copy
+
         created_task_ids: list[int] = []
+        system_adjustments_per_payload: list[dict] = []
         for payload in payloads:
+            # Snapshot do payload como o operador confirmou — o diff contra o
+            # payload pós-ajustes vira a trilha "ajuste automático do sistema".
+            confirmed_by_operator = _copy.deepcopy(payload)
             self._enforce_description_limit(payload)
             self._apply_required_task_defaults(
                 payload, fallback_office_id=fallback_office_id,
             )
             self._ensure_endtime_in_future(payload)
+            system_adjustments_per_payload.append(
+                self._diff_system_adjustments(confirmed_by_operator, payload)
+            )
             created = self.client.create_task(payload)
             if not created or not created.get("id"):
                 # Se o client conseguiu extrair o que o L1 reclamou, usa
@@ -3690,6 +3761,7 @@ class PublicationSearchService:
             lawsuit_id=None, records=records, proposals=proposals,
             sent_payloads=payloads, created_task_ids=created_task_ids,
             sb_user_id=sb_user_id, sb_email=sb_email, sb_name=sb_name, when=now_utc,
+            system_adjustments=system_adjustments_per_payload,
         )
         self.db.commit()
 
