@@ -2762,6 +2762,99 @@ class PublicationSearchService:
     # Busca por CNJ (diagnóstico)
     # ──────────────────────────────────────────────
 
+    def _build_audit_labels(self, task_audits: list) -> dict[str, Any]:
+        """Resolve os IDs crus da auditoria de agendamento (subtipo, tipo,
+        contato/responsável, escritório, status) em nomes legíveis — o
+        operador não sabe o que é "subtipo 932" ou "contact 65696". Varre os
+        payloads enviados/propostos + diffs de override/ajuste do sistema e
+        faz UMA query por catálogo local (sem tocar no L1)."""
+        subtype_ids: set[int] = set()
+        type_ids: set[int] = set()
+        contact_ids: set[int] = set()
+        office_ids: set[int] = set()
+
+        def _add(bucket: set[int], value: Any) -> None:
+            if isinstance(value, bool):
+                return
+            if isinstance(value, int):
+                bucket.add(value)
+            elif isinstance(value, str) and value.lstrip("-").isdigit():
+                bucket.add(int(value))
+
+        def _collect_from_payload(payload: Any) -> None:
+            if not isinstance(payload, dict):
+                return
+            _add(subtype_ids, payload.get("subTypeId"))
+            _add(type_ids, payload.get("typeId"))
+            _add(office_ids, payload.get("responsibleOfficeId"))
+            _add(office_ids, payload.get("originOfficeId"))
+            for part in payload.get("participants") or []:
+                if isinstance(part, dict):
+                    _add(contact_ids, (part.get("contact") or {}).get("id"))
+
+        field_buckets = {
+            "subTypeId": subtype_ids,
+            "responsavel_contact_id": contact_ids,
+            "responsibleOfficeId": office_ids,
+            "originOfficeId": office_ids,
+        }
+        for audit in task_audits or []:
+            _add(subtype_ids, audit.get("subtype_id"))
+            _collect_from_payload(audit.get("sent_payload"))
+            _collect_from_payload(audit.get("proposed_payload"))
+            for diff_map in (audit.get("override_fields"), audit.get("system_adjustments")):
+                for field, diff in (diff_map or {}).items():
+                    bucket = field_buckets.get(field)
+                    if bucket is None or not isinstance(diff, dict):
+                        continue
+                    for side in ("proposto", "enviado", "antes", "depois"):
+                        _add(bucket, diff.get(side))
+
+        from app.models.legal_one import (
+            LegalOneOffice as _Office,
+            LegalOneTaskSubType as _SubType,
+            LegalOneTaskType as _TaskType,
+            LegalOneUser as _User,
+        )
+
+        labels: dict[str, Any] = {
+            "subtypes": {},
+            "types": {},
+            "contacts": {},
+            "offices": {},
+            "statuses": {str(k): v for k, v in L1_STATUS_LABELS_FULL.items()},
+        }
+        if subtype_ids:
+            rows = (
+                self.db.query(_SubType.external_id, _SubType.name)
+                .filter(_SubType.external_id.in_(subtype_ids))
+                .all()
+            )
+            labels["subtypes"] = {str(r[0]): r[1] for r in rows}
+        if type_ids:
+            rows = (
+                self.db.query(_TaskType.external_id, _TaskType.name)
+                .filter(_TaskType.external_id.in_(type_ids))
+                .all()
+            )
+            labels["types"] = {str(r[0]): r[1] for r in rows}
+        if contact_ids:
+            rows = (
+                self.db.query(_User.external_id, _User.name)
+                .filter(_User.external_id.in_(contact_ids))
+                .all()
+            )
+            labels["contacts"] = {str(r[0]): r[1] for r in rows}
+        if office_ids:
+            # path (hierarquia completa) > name (folha) — convenção da casa.
+            rows = (
+                self.db.query(_Office.external_id, _Office.path, _Office.name)
+                .filter(_Office.external_id.in_(office_ids))
+                .all()
+            )
+            labels["offices"] = {str(r[0]): (r[1] or r[2]) for r in rows}
+        return labels
+
     def lookup_by_cnj(self, cnj: str) -> dict[str, Any]:
         """
         Dado um CNJ (com ou sem formatação), retorna tudo que o sistema tem
@@ -2917,6 +3010,36 @@ class PublicationSearchService:
                         else None
                     ),
                 })
+
+        # Link direto pro template que gerou cada proposta: casa o subtipo da
+        # auditoria com os _proposed_tasks dos registros (template_id vive lá).
+        # Deixa o operador pular da auditoria pra configuração do template e
+        # conferir se a regra está batendo.
+        template_by_subtype: dict[int, dict[str, Any]] = {}
+        for r in records:
+            rr = r.raw_relationships if isinstance(r.raw_relationships, dict) else {}
+            props = rr.get("_proposed_tasks")
+            if not isinstance(props, list):
+                single = rr.get("_proposed_task")
+                props = [single] if single else []
+            for p in props:
+                if not isinstance(p, dict) or not p.get("template_id"):
+                    continue
+                sub = (p.get("payload") or {}).get("subTypeId")
+                if sub is None:
+                    continue
+                template_by_subtype.setdefault(int(sub), {
+                    "template_id": p.get("template_id"),
+                    "template_name": p.get("template_name"),
+                })
+        for audit in task_audits:
+            tpl = (
+                template_by_subtype.get(int(audit["subtype_id"]))
+                if audit.get("subtype_id") is not None
+                else None
+            )
+            audit["template_id"] = (tpl or {}).get("template_id")
+            audit["template_name"] = (tpl or {}).get("template_name")
 
         # Mapeia search_id → requested_by_email para cada publicação
         search_by_id = {s["id"]: s for s in searches}
@@ -3100,6 +3223,7 @@ class PublicationSearchService:
             "searches": searches,
             "records": records_payload,
             "task_audits": task_audits,
+            "task_audit_labels": self._build_audit_labels(task_audits),
         }
 
     def update_record_status(
@@ -3239,6 +3363,8 @@ class PublicationSearchService:
         payloads: list[dict],
         proposals: list,
         lawsuit_id: int,
+        operator_locked: Optional[list] = None,
+        routing_notes: Optional[list] = None,
     ) -> None:
         """
         Aplica `target_role` / `target_squad_id` do template (gravado em
@@ -3280,8 +3406,18 @@ class PublicationSearchService:
 
         from app.services.squad_assistant_resolver import resolve_target
 
-        for payload in payloads:
+        for payload_idx, payload in enumerate(payloads):
             if not isinstance(payload, dict):
+                continue
+            # Trava do operador: ele mexeu no responsável no modal (mesmo
+            # re-escolhendo a mesma pessoa) — decisão final dele, regra
+            # automática NUNCA sobrepõe.
+            if operator_locked and payload_idx < len(operator_locked) and operator_locked[payload_idx]:
+                logger.info(
+                    "publications.routing lawsuit=%s payload=%s SKIP "
+                    "responsavel travado pelo operador (decisao final).",
+                    lawsuit_id, payload_idx,
+                )
                 continue
             sub = payload.get("subTypeId")
             if sub is None:
@@ -3350,6 +3486,17 @@ class PublicationSearchService:
                 "isExecuter": True,
                 "isRequester": True,
             }]
+            if routing_notes is not None and payload_idx < len(routing_notes):
+                routing_notes[payload_idx] = {
+                    "antes": int(current_id) if current_id is not None else None,
+                    "depois": int(result.user_external_id),
+                    "motivo": (
+                        "Roteado pela regra do template (target_role="
+                        + repr(target_role)
+                        + (f", squad de suporte #{target_squad_id}" if target_squad_id else "")
+                        + ") — não foi alteração do operador."
+                    ),
+                }
             logger.info(
                 "publications.routing lawsuit=%s subType=%s "
                 "template_target_role=%s target_squad_id=%s "
@@ -3539,6 +3686,17 @@ class PublicationSearchService:
         if not payloads:
             raise ValueError("Proposta de tarefa inexistente. Configure um template.")
 
+        # Regra de negócio: a decisão FINAL do operador vence qualquer regra
+        # automática. O modal marca `_responsible_overridden` quando o
+        # operador mexeu no responsável — inclusive re-escolhendo a MESMA
+        # pessoa da proposta (antes esse caso era indistinguível de "não
+        # mexeu" e o squad routing atropelava a escolha). O marcador trava o
+        # routing abaixo e é removido aqui pra nunca vazar pro L1.
+        operator_locked = [
+            bool(p.pop("_responsible_overridden", False)) if isinstance(p, dict) else False
+            for p in payloads
+        ]
+
         self._apply_lawsuit_responsible_to_missing_payloads(payloads, lawsuit_id)
 
         # ── Squad routing (target_role/target_squad_id) — server-side ──
@@ -3557,8 +3715,10 @@ class PublicationSearchService:
         # original (do template). Se diferente, respeita — significa que
         # (a) operador trocou no modal OU (b) o frontend ja' resolveu
         # via /claim. Em ambos, queremos manter quem o frontend mandou.
+        routing_notes: list[Optional[dict]] = [None] * len(payloads)
         self._apply_squad_routing_server_side(
             payloads=payloads, proposals=proposals, lawsuit_id=lawsuit_id,
+            operator_locked=operator_locked, routing_notes=routing_notes,
         )
 
         # Defesa em profundidade: mesmo que o frontend não tenha feito o
@@ -3599,7 +3759,7 @@ class PublicationSearchService:
 
         created_task_ids: list[int] = []
         system_adjustments_per_payload: list[dict] = []
-        for payload in payloads:
+        for payload_idx, payload in enumerate(payloads):
             # Snapshot do payload como o operador confirmou — o diff contra o
             # payload pós-ajustes vira a trilha "ajuste automático do sistema".
             confirmed_by_operator = _copy.deepcopy(payload)
@@ -3608,9 +3768,13 @@ class PublicationSearchService:
                 payload, fallback_office_id=fallback_office_id,
             )
             self._ensure_endtime_in_future(payload)
-            system_adjustments_per_payload.append(
-                self._diff_system_adjustments(confirmed_by_operator, payload)
-            )
+            adjustments_entry = self._diff_system_adjustments(confirmed_by_operator, payload)
+            # Roteamento de squad é regra do TEMPLATE — nem ajuste mecânico,
+            # nem override do operador. Entra na trilha azul com motivo
+            # próprio (e tira o campo da conta de override humano no audit).
+            if routing_notes[payload_idx]:
+                adjustments_entry["responsavel_contact_id"] = routing_notes[payload_idx]
+            system_adjustments_per_payload.append(adjustments_entry)
             created = self.client.create_task(payload)
             if not created or not created.get("id"):
                 # Se o client conseguiu extrair o que o L1 reclamou, usa
@@ -3705,6 +3869,12 @@ class PublicationSearchService:
 
         if not payloads:
             raise ValueError("Proposta de tarefa inexistente. Configure um template global (sem escritório).")
+
+        # Marcador do modal (decisão final do operador) — fluxo avulso não
+        # tem squad routing, mas o campo frontend-only não pode ir pro L1.
+        for p in payloads:
+            if isinstance(p, dict):
+                p.pop("_responsible_overridden", None)
 
         # Fallback de office pra tarefas avulsas: embora esse fluxo seja
         # explicitamente "sem processo vinculado", alguns records ainda

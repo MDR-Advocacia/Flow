@@ -135,6 +135,8 @@ type TaskAudit = {
   sent_payload: Record<string, unknown> | null;
   proposed_payload: Record<string, unknown> | null;
   l1_task_url: string | null;
+  template_id?: number | null;
+  template_name?: string | null;
 };
 
 type LookupResponse = {
@@ -155,6 +157,15 @@ type LookupResponse = {
   searches: SearchInfo[];
   records: RecordDetail[];
   task_audits?: TaskAudit[];
+  task_audit_labels?: AuditLabels;
+};
+
+type AuditLabels = {
+  subtypes: Record<string, string>;
+  types: Record<string, string>;
+  contacts: Record<string, string>;
+  offices: Record<string, string>;
+  statuses: Record<string, string>;
 };
 
 /* ─── Helpers ─────────────────────────────────────────────────────── */
@@ -243,6 +254,108 @@ function fmtVal(v: unknown): string {
   if (v === null || v === undefined || v === "") return "—";
   if (typeof v === "object") return JSON.stringify(v);
   return String(v);
+}
+
+function labelFor(map: Record<string, string> | undefined, id: unknown): string {
+  if (id === null || id === undefined || id === "") return "—";
+  const name = map?.[String(id)];
+  return name ? `${name} (#${id})` : `#${id}`;
+}
+
+function translateDiffValue(field: string, value: unknown, labels?: AuditLabels): string {
+  if (value === null || value === undefined || value === "") return "—";
+  if (!labels) return fmtVal(value);
+  if (field === "subTypeId") return labelFor(labels.subtypes, value);
+  if (field === "responsavel_contact_id") return labelFor(labels.contacts, value);
+  if (field === "responsibleOfficeId" || field === "originOfficeId") return labelFor(labels.offices, value);
+  if (field === "endDateTime" || field === "startDateTime" || field === "publishDate") return formatDateTime(String(value));
+  if (field === "status" && typeof value === "object") {
+    return labelFor(labels.statuses, (value as { id?: unknown }).id);
+  }
+  return fmtVal(value);
+}
+
+function PayloadFicha({
+  title,
+  payload,
+  labels,
+  accent,
+}: {
+  title: string;
+  payload: Record<string, unknown> | null;
+  labels?: AuditLabels;
+  accent?: boolean;
+}) {
+  const titleClass = `text-xs font-semibold mb-1 ${accent ? "text-emerald-700" : "text-muted-foreground"}`;
+  if (!payload) {
+    return (
+      <div>
+        <div className={titleClass}>{title}</div>
+        <div className="text-xs text-muted-foreground bg-white p-2 rounded border">— sem payload registrado —</div>
+      </div>
+    );
+  }
+  const participants = Array.isArray(payload.participants)
+    ? (payload.participants as Array<Record<string, unknown>>)
+    : [];
+  const participantLine = (p: Record<string, unknown>) => {
+    const cid = (p.contact as { id?: unknown } | undefined)?.id;
+    const papeis: string[] = [];
+    if (p.isResponsible) papeis.push("responsável");
+    if (p.isExecuter) papeis.push("executante");
+    if (p.isRequester) papeis.push("solicitante");
+    return `${labelFor(labels?.contacts, cid)}${papeis.length ? ` — ${papeis.join(", ")}` : ""}`;
+  };
+  const rows: Array<[string, string]> = [];
+  if (payload.typeId != null) rows.push(["Tipo de tarefa", labelFor(labels?.types, payload.typeId)]);
+  if (payload.subTypeId != null) rows.push(["Subtipo", labelFor(labels?.subtypes, payload.subTypeId)]);
+  participants.forEach((p, i) =>
+    rows.push([participants.length > 1 ? `Envolvido ${i + 1}` : "Envolvido", participantLine(p)]),
+  );
+  if (payload.responsibleOfficeId != null)
+    rows.push(["Escritório responsável", labelFor(labels?.offices, payload.responsibleOfficeId)]);
+  if (payload.originOfficeId != null)
+    rows.push(["Escritório de origem", labelFor(labels?.offices, payload.originOfficeId)]);
+  if (payload.startDateTime) rows.push(["Início", formatDateTime(String(payload.startDateTime))]);
+  if (payload.endDateTime) rows.push(["Conclusão", formatDateTime(String(payload.endDateTime))]);
+  if (payload.publishDate) rows.push(["Data de publicação", formatDateTime(String(payload.publishDate))]);
+  if (payload.priority) rows.push(["Prioridade", String(payload.priority)]);
+  const statusVal = payload.status as { id?: unknown } | undefined;
+  if (statusVal && statusVal.id != null) rows.push(["Status", labelFor(labels?.statuses, statusVal.id)]);
+
+  return (
+    <div>
+      <div className={titleClass}>{title}</div>
+      <div className="bg-white rounded border divide-y">
+        {rows.map(([k, v]) => (
+          <div key={k} className="flex items-start gap-2 px-2 py-1.5 text-xs">
+            <span className="text-muted-foreground w-40 shrink-0">{k}</span>
+            <span className="font-medium break-words min-w-0">{v}</span>
+          </div>
+        ))}
+        {typeof payload.description === "string" && payload.description && (
+          <div className="px-2 py-1.5 text-xs">
+            <span className="text-muted-foreground">Descrição</span>
+            <p className="mt-0.5 whitespace-pre-wrap">{payload.description}</p>
+          </div>
+        )}
+        {typeof payload.notes === "string" && payload.notes && (
+          <details className="px-2 py-1.5 text-xs">
+            <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+              Notas (texto da publicação)
+            </summary>
+            <pre className="mt-1 whitespace-pre-wrap font-sans max-h-48 overflow-y-auto">{String(payload.notes)}</pre>
+          </details>
+        )}
+        <details className="px-2 py-1.5 text-xs">
+          <summary className="cursor-pointer text-muted-foreground hover:text-foreground">Ver JSON bruto</summary>
+          <pre className="mt-1 whitespace-pre-wrap font-mono text-[11px] max-h-72 overflow-y-auto">
+            {JSON.stringify(payload, null, 2)}
+          </pre>
+        </details>
+      </div>
+    </div>
+  );
 }
 
 /* ─── Components ──────────────────────────────────────────────────── */
@@ -442,7 +555,7 @@ function Timeline({ events }: { events: TimelineEvent[] }) {
   );
 }
 
-function TaskAuditCard({ audit }: { audit: TaskAudit }) {
+function TaskAuditCard({ audit, labels }: { audit: TaskAudit; labels?: AuditLabels }) {
   const [showPayloads, setShowPayloads] = useState(false);
   const overrides = Object.entries(audit.override_fields || {});
   const adjustments = Object.entries(audit.system_adjustments || {});
@@ -455,8 +568,20 @@ function TaskAuditCard({ audit }: { audit: TaskAudit }) {
           Tarefa {audit.created_task_id ? `#${audit.created_task_id}` : "—"}
         </span>
         {audit.subtype_id != null && (
-          <span className="text-xs text-muted-foreground">subtipo {audit.subtype_id}</span>
+          <span className="text-xs text-muted-foreground">{labelFor(labels?.subtypes, audit.subtype_id)}</span>
         )}
+        {audit.template_id ? (
+          <a
+            href={`/publications/templates?template_id=${audit.template_id}`}
+            target="_blank"
+            rel="noreferrer"
+            className="text-xs inline-flex items-center gap-1 text-blue-600 hover:underline"
+            title="Abrir a configuração do template que gerou esta proposta"
+          >
+            template: {audit.template_name || `#${audit.template_id}`}
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        ) : null}
         {audit.override_detected ? (
           <Badge variant="outline" className="bg-amber-100 text-amber-800">
             override do operador
@@ -497,9 +622,9 @@ function TaskAuditCard({ audit }: { audit: TaskAudit }) {
           {overrides.map(([field, diff]) => (
             <div key={field} className="flex items-center gap-2 flex-wrap">
               <span className="text-muted-foreground">{OVERRIDE_FIELD_LABELS[field] || field}:</span>
-              <code className="bg-white px-1 rounded border">{fmtVal(diff.proposto)}</code>
+              <code className="bg-white px-1 rounded border">{translateDiffValue(field, diff.proposto, labels)}</code>
               <ArrowRight className="h-3 w-3 text-amber-600" />
-              <code className="bg-white px-1 rounded border font-semibold">{fmtVal(diff.enviado)}</code>
+              <code className="bg-white px-1 rounded border font-semibold">{translateDiffValue(field, diff.enviado, labels)}</code>
             </div>
           ))}
         </div>
@@ -514,9 +639,9 @@ function TaskAuditCard({ audit }: { audit: TaskAudit }) {
             <div key={field} className="space-y-0.5">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-muted-foreground">{SYSTEM_FIELD_LABELS[field] || field}:</span>
-                <code className="bg-white px-1 rounded border">{fmtVal(adj.antes)}</code>
+                <code className="bg-white px-1 rounded border">{translateDiffValue(field, adj.antes, labels)}</code>
                 <ArrowRight className="h-3 w-3 text-sky-600" />
-                <code className="bg-white px-1 rounded border font-semibold">{fmtVal(adj.depois)}</code>
+                <code className="bg-white px-1 rounded border font-semibold">{translateDiffValue(field, adj.depois, labels)}</code>
               </div>
               {adj.motivo && <div className="text-sky-700 pl-1">↳ {adj.motivo}</div>}
             </div>
@@ -529,22 +654,21 @@ function TaskAuditCard({ audit }: { audit: TaskAudit }) {
         className="text-xs text-muted-foreground hover:text-foreground font-semibold uppercase tracking-wide flex items-center gap-1"
       >
         {showPayloads ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        Payload enviado × proposta automática
+        Tarefa enviada × proposta automática (detalhe traduzido)
       </button>
       {showPayloads && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-          <div>
-            <div className="text-xs font-semibold text-emerald-700 mb-1">ENVIADO AO LEGAL ONE (efetivo)</div>
-            <pre className="whitespace-pre-wrap font-mono text-[11px] bg-white p-2 rounded border max-h-72 overflow-y-auto">
-              {JSON.stringify(audit.sent_payload, null, 2)}
-            </pre>
-          </div>
-          <div>
-            <div className="text-xs font-semibold text-muted-foreground mb-1">PROPOSTA AUTOMÁTICA</div>
-            <pre className="whitespace-pre-wrap font-mono text-[11px] bg-white p-2 rounded border max-h-72 overflow-y-auto">
-              {audit.proposed_payload ? JSON.stringify(audit.proposed_payload, null, 2) : "— sem proposta registrada —"}
-            </pre>
-          </div>
+          <PayloadFicha
+            title="ENVIADO AO LEGAL ONE (efetivo)"
+            payload={audit.sent_payload}
+            labels={labels}
+            accent
+          />
+          <PayloadFicha
+            title="PROPOSTA AUTOMÁTICA"
+            payload={audit.proposed_payload}
+            labels={labels}
+          />
         </div>
       )}
     </div>
@@ -557,6 +681,16 @@ function RecordCard({ record }: { record: RecordDetail }) {
   const cls = Array.isArray(record.classifications) && record.classifications.length > 0
     ? record.classifications[0]
     : null;
+
+  // Templates que geraram as propostas — link direto pra configuração
+  // (conferir/corrigir a regra da classificação sem caçar na listagem).
+  const proposalTemplates: Array<{ template_id: number; template_name?: string | null }> = (
+    Array.isArray(record.raw_relationships?._proposed_tasks)
+      ? record.raw_relationships._proposed_tasks
+      : record.proposal
+        ? [record.proposal]
+        : []
+  ).filter((p: any) => p && p.template_id);
 
   return (
     <div className="border rounded-lg overflow-hidden">
@@ -655,6 +789,26 @@ function RecordCard({ record }: { record: RecordDetail }) {
                   <div className="sm:col-span-2">
                     <span className="text-muted-foreground">Justificativa IA:</span>
                     <p className="mt-1 text-xs bg-white p-2 rounded border">{cls.justificativa}</p>
+                  </div>
+                )}
+                {proposalTemplates.length > 0 && (
+                  <div className="sm:col-span-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <span className="text-muted-foreground">
+                      Template{proposalTemplates.length > 1 ? "s" : ""} do agendamento:
+                    </span>
+                    {proposalTemplates.map((p: any) => (
+                      <a
+                        key={p.template_id}
+                        href={`/publications/templates?template_id=${p.template_id}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-blue-600 hover:underline"
+                        title="Abrir a configuração deste template"
+                      >
+                        {p.template_name || `#${p.template_id}`}
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    ))}
                   </div>
                 )}
               </div>
@@ -886,7 +1040,7 @@ const LookupByCnjPage = () => {
               </CardHeader>
               <CardContent className="space-y-3">
                 {result.task_audits!.map((a) => (
-                  <TaskAuditCard key={a.id} audit={a} />
+                  <TaskAuditCard key={a.id} audit={a} labels={result.task_audit_labels} />
                 ))}
               </CardContent>
             </Card>

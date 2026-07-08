@@ -760,6 +760,11 @@ const PublicationsPage = () => {
   // Indexado pelo idx no `editedPayloads`. Diferenca entre original e atual
   // = override manual → regra do assistente nao se aplica.
   const [originalResponsibleByIndex, setOriginalResponsibleByIndex] = useState<Map<number, number | null>>(new Map());
+  // Índices (em editedPayloads) onde o OPERADOR mexeu no responsável —
+  // inclusive re-escolhendo a MESMA pessoa da proposta. Regra de negócio:
+  // a decisão final do operador SEMPRE vence a regra automática de
+  // squad/assistente (comparar ids não detecta a re-escolha deliberada).
+  const [touchedResponsible, setTouchedResponsible] = useState<Set<number>>(new Set());
   const [scheduling, setScheduling] = useState(false);
   // Checagem de duplicatas (tarefa pendente no L1) — Onda 1.
   // Estrutura: { [subTypeId]: [{task_id, description, status_label, end_date_time, l1_url}] }
@@ -1639,6 +1644,7 @@ const PublicationsPage = () => {
       snap.set(idx, id);
     });
     setOriginalResponsibleByIndex(snap);
+    setTouchedResponsible(new Set());
 
     // ── Pre-resolve assistente da squad ANTES de mostrar o modal ──
     // Quando o template marca target_role='assistente' (ou aponta pra squad
@@ -1913,9 +1919,16 @@ const PublicationsPage = () => {
       // Encontra o indice REAL no editedPayloads (activeTasks pula removed).
       const realIdx = editedPayloads.findIndex((p) => p === t);
       const originalId = originalResponsibleByIndex.get(realIdx) ?? null;
+      if (touchedResponsible.has(realIdx)) {
+        // Operador mexeu no responsável (mesmo re-escolhendo a mesma
+        // pessoa) — decisão final dele. Marcador avisa o backend pra
+        // também não re-rotear (regra de negócio: operador sempre vence).
+        resolvedTasks.push({ ...t, _responsible_overridden: true });
+        continue;
+      }
       if (responsibleId && originalId !== null && originalId !== responsibleId) {
         // Operador overrideu — pula regra. Operador na ponta vence.
-        resolvedTasks.push(t);
+        resolvedTasks.push({ ...t, _responsible_overridden: true });
         continue;
       }
       try {
@@ -4837,6 +4850,7 @@ const PublicationsPage = () => {
                                           : [],
                                       };
                                       setEditedPayloads(next);
+                                      setTouchedResponsible((prev) => new Set(prev).add(idx));
                                     }}
                                     placeholder="Selecione um usuário"
                                     showEmail
@@ -4858,6 +4872,7 @@ const PublicationsPage = () => {
                                             }],
                                           };
                                           setEditedPayloads(next);
+                                          setTouchedResponsible((prev) => new Set(prev).add(idx));
                                         }}
                                       >
                                         Usar sugerido: {payload.suggested_responsible.name}

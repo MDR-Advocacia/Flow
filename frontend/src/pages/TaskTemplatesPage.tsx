@@ -10,7 +10,7 @@
  */
 
 import { useEffect, useRef, useState, useMemo } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
   AlertTriangle,
@@ -300,6 +300,10 @@ const TaskTemplatesPageLegacy = () => {
 
   // Form dialog
   const [dialogOpen, setDialogOpen] = useState(false);
+  // Deep-link vindo da Auditoria de Processo (?template_id=N) — consumido
+  // uma única vez após o load pra abrir direto o modal do template auditado.
+  const [searchParams] = useSearchParams();
+  const deepLinkConsumedRef = useRef(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState({ ...BLANK_FORM });
 
@@ -804,6 +808,23 @@ const TaskTemplatesPageLegacy = () => {
     });
     setDialogOpen(true);
   };
+
+  // Deep-link da Auditoria de Processo: /publications/templates?template_id=N
+  // abre direto o modal de edição do template que gerou a proposta auditada,
+  // pra conferir/corrigir a configuração sem caçar na listagem.
+  useEffect(() => {
+    if (deepLinkConsumedRef.current || loading) return;
+    const tid = searchParams.get("template_id");
+    if (!tid) return;
+    deepLinkConsumedRef.current = true;
+    const target = templates.find((t) => t.id === Number(tid));
+    if (target) {
+      openEdit(target);
+    } else {
+      setError(`Template #${tid} não encontrado — pode ter sido excluído ou recriado.`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, templates]);
 
   const handleSave = async () => {
     // Pre-flight: detecta subtypes duplicados ENTRE blocos do form, e entre
