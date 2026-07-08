@@ -619,6 +619,18 @@ export default function RedistribuicaoModal({
           if (pollTimer.current) clearTimeout(pollTimer.current);
           setExec(null);
         }}
+        onBackground={() => {
+          // O job é server-backed: minimizar NÃO interrompe nada. Zera os
+          // movimentos (a escrita real já foi disparada — evita re-aplicar) e
+          // deixa o resultado consolidado na aba Relatórios / próximo reload.
+          if (pollTimer.current) clearTimeout(pollTimer.current);
+          const real = !exec?.resultado?.dry_run;
+          if (real) {
+            setMoves([]);
+            onAplicado?.();
+          }
+          setExec(null);
+        }}
       />
     </>
   );

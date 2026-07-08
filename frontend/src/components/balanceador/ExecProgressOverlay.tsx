@@ -25,7 +25,16 @@ export interface ExecState {
   resultado?: ExecResultado | null; // breakdown real ao concluir (aplicar)
 }
 
-export default function ExecProgressOverlay({ exec, onClose }: { exec: ExecState | null; onClose: () => void }) {
+export default function ExecProgressOverlay({
+  exec,
+  onClose,
+  onBackground,
+}: {
+  exec: ExecState | null;
+  onClose: () => void;
+  // Minimiza o overlay COM o job rodando (server-backed — continua sozinho).
+  onBackground?: () => void;
+}) {
   if (!exec) return null;
   const pct = exec.total > 0 ? Math.round((exec.done / exec.total) * 100) : 100;
   const reverter = exec.mode === "reverter";
@@ -94,10 +103,18 @@ export default function ExecProgressOverlay({ exec, onClose }: { exec: ExecState
           </div>
         )}
 
-        {exec.finished && (
+        {exec.finished ? (
           <div className="mt-4 flex justify-end">
             <Button size="sm" onClick={onClose}>Fechar</Button>
           </div>
+        ) : (
+          exec.mode === "aplicar" && onBackground && (
+            <div className="mt-4 flex justify-end">
+              <Button size="sm" variant="outline" onClick={onBackground}>
+                Continuar em 2º plano
+              </Button>
+            </div>
+          )
         )}
       </div>
     </div>,
