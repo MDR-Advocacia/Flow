@@ -1,11 +1,14 @@
 // Log de redistribuições do time — vive na aba "Relatórios" do Minha Equipe.
 // Cada entrada é uma execução de "Aplicar": data, autor, totais, e o detalhe
-// expandível (cada movimento: N× subtipo · DE → PARA).
+// expandível (cada movimento: N× subtipo · DE → PARA). Paginado (padrão da casa).
 
 import { useCallback, useEffect, useState } from "react";
 import { ArrowRight, ChevronDown, History, Loader2 } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { type RedistribuicaoLog, listarLogs } from "@/services/balanceador";
+
+const PAGE = 10;
 
 const p2 = (n: number) => String(n).padStart(2, "0");
 function fmtDataHora(iso: string | null): string {
@@ -17,29 +20,40 @@ function fmtDataHora(iso: string | null): string {
 
 export default function RedistribuicoesLog({ team, reloadKey }: { team: string; reloadKey?: number }) {
   const [logs, setLogs] = useState<RedistribuicaoLog[]>([]);
+  const [total, setTotal] = useState(0);
+  const [pagina, setPagina] = useState(0);
   const [loading, setLoading] = useState(false);
   const [aberto, setAberto] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setLogs(await listarLogs(team));
+      const r = await listarLogs(team, PAGE, pagina * PAGE);
+      setLogs(r.logs);
+      setTotal(r.total);
     } catch {
       /* silencioso */
     } finally {
       setLoading(false);
     }
-  }, [team]);
+  }, [team, pagina]);
 
   useEffect(() => {
     load();
   }, [load, reloadKey]);
 
+  // Nova aplicação (reloadKey muda) volta pra 1ª página, onde ela aparece.
+  useEffect(() => {
+    setPagina(0);
+  }, [reloadKey, team]);
+
+  const totalPaginas = Math.max(1, Math.ceil(total / PAGE));
+
   return (
     <div className="space-y-2 border-t pt-3">
       <div className="flex items-center gap-1.5 text-sm font-semibold">
         <History className="h-4 w-4 text-muted-foreground" /> Redistribuições
-        <span className="text-xs font-normal text-muted-foreground">({logs.length})</span>
+        <span className="text-xs font-normal text-muted-foreground">({total})</span>
       </div>
 
       {loading ? (
@@ -96,6 +110,28 @@ export default function RedistribuicoesLog({ team, reloadKey }: { team: string; 
               )}
             </div>
           ))}
+        </div>
+      )}
+
+      {total > PAGE && (
+        <div className="flex items-center justify-between pt-1 text-xs text-muted-foreground">
+          <span>
+            Página {pagina + 1} de {totalPaginas} · {total} registro(s)
+          </span>
+          <div className="flex items-center gap-1.5">
+            <Button size="sm" variant="outline" className="h-7 text-xs" disabled={pagina === 0} onClick={() => setPagina((p) => p - 1)}>
+              Anterior
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs"
+              disabled={pagina + 1 >= totalPaginas}
+              onClick={() => setPagina((p) => p + 1)}
+            >
+              Próxima
+            </Button>
+          </div>
         </div>
       )}
     </div>

@@ -3,7 +3,7 @@
 // MOCK (2026-06-29): leitura real do pool; escrita simulada.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, ArrowLeftRight, CalendarClock, Clock, Loader2, Star, X } from "lucide-react";
+import { Activity, AlertTriangle, ArrowLeftRight, CalendarClock, Clock, Loader2, Star, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -16,7 +16,8 @@ import {
 } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
-import { type Colaborador, getDiagnostico } from "@/services/balanceador";
+import { type Colaborador, getDiagnostico, listarExecucoes } from "@/services/balanceador";
+import ExecucoesDialog from "@/components/balanceador/ExecucoesDialog";
 import RedistribuicaoModal from "@/components/balanceador/RedistribuicaoModal";
 
 const PERIODOS = [
@@ -56,6 +57,24 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
   const [incluirAtrasadas, setIncluirAtrasadas] = useState(true);
   const [cargo, setCargo] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const [execucoesOpen, setExecucoesOpen] = useState(false);
+  const [temRodando, setTemRodando] = useState(false);
+
+  // Sinaliza no botão "Execuções" se há redistribuição rodando em 2º plano
+  // (poll leve de 20s — o acompanhamento fino é dentro do painel).
+  useEffect(() => {
+    let vivo = true;
+    const check = () =>
+      listarExecucoes(team, 1, 0)
+        .then((r) => vivo && setTemRodando(r.items.some((j) => j.status !== "done")))
+        .catch(() => undefined);
+    check();
+    const t = setInterval(check, 20_000);
+    return () => {
+      vivo = false;
+      clearInterval(t);
+    };
+  }, [team]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -101,10 +120,21 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
 
   return (
     <div className="space-y-3">
-      <p className="text-xs text-muted-foreground">
-        Carga pendente de cada colaborador. Selecione quem quer rebalancear + o período e clique em Redistribuir.
-        <span className="ml-1 text-emerald-700">Leitura e escrita ao vivo no L1.</span>
-      </p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-muted-foreground">
+          Carga pendente de cada colaborador. Selecione quem quer rebalancear + o período e clique em Redistribuir.
+          <span className="ml-1 text-emerald-700">Leitura e escrita ao vivo no L1.</span>
+        </p>
+        <Button size="sm" variant="outline" className="relative h-7 gap-1.5 text-xs" onClick={() => setExecucoesOpen(true)}>
+          <Activity className="h-3.5 w-3.5" /> Execuções
+          {temRodando && (
+            <span className="absolute -right-1 -top-1 flex h-2.5 w-2.5">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-blue-500" />
+            </span>
+          )}
+        </Button>
+      </div>
 
       {/* KPIs do time */}
       <div className="grid grid-cols-3 gap-2">
@@ -242,6 +272,8 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
           onAplicado={onAplicado}
         />
       )}
+
+      {execucoesOpen && <ExecucoesDialog team={team} onClose={() => setExecucoesOpen(false)} />}
     </div>
   );
 }

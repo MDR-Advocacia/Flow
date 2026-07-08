@@ -190,9 +190,71 @@ export async function registrarLog(team: string, movimentos: MovePendente[]): Pr
   if (!res.ok) throw new Error(`Erro ${res.status} ao registrar o log`);
 }
 
-export async function listarLogs(team: string): Promise<RedistribuicaoLog[]> {
-  const r = await json<{ logs: RedistribuicaoLog[] }>(await apiFetch(`${BASE}/logs?team=${team}`));
-  return r.logs;
+export async function listarLogs(
+  team: string,
+  limit = 10,
+  offset = 0,
+): Promise<{ total: number; logs: RedistribuicaoLog[] }> {
+  const qs = new URLSearchParams({ team, limit: String(limit), offset: String(offset) });
+  return json(await apiFetch(`${BASE}/logs?${qs.toString()}`));
+}
+
+// ── Execuções de reatribuição (jobs) — acompanhamento + histórico ──
+export interface ExecucaoJob {
+  job_id: string;
+  status: "running" | "aborting" | "done";
+  dry_run: boolean;
+  total: number;
+  feito: number;
+  reatribuidas: number;
+  workflow_bloqueadas: number;
+  falhas: number;
+  criado_por_nome: string | null;
+  iniciado_em: string | null;
+  terminado_em: string | null;
+}
+
+export interface ExecucaoTarefa {
+  task_id: number;
+  to_id: number | null;
+  to_nome: string | null;
+  reason: string;
+  resultado: string; // motivo legível (vem do backend)
+  http: number | null;
+  subtipo?: string | null;
+  pasta?: string | null;
+  cnj?: string | null;
+}
+
+export async function listarExecucoes(
+  team: string,
+  limit = 10,
+  offset = 0,
+): Promise<{ total: number; items: ExecucaoJob[] }> {
+  const qs = new URLSearchParams({ team, limit: String(limit), offset: String(offset) });
+  return json(await apiFetch(`${BASE}/reatribuir/jobs?${qs.toString()}`));
+}
+
+export async function getExecucaoDetalhe(team: string, jobId: string): Promise<ExecucaoTarefa[]> {
+  const r = await json<{ tarefas: ExecucaoTarefa[] }>(
+    await apiFetch(`${BASE}/reatribuir/jobs/${jobId}/detalhe?team=${team}`),
+  );
+  return r.tarefas;
+}
+
+export async function downloadExecucaoExcel(team: string, jobId: string): Promise<void> {
+  const res = await apiFetch(`${BASE}/reatribuir/jobs/${jobId}/excel?team=${team}`);
+  if (!res.ok) throw new Error(`Erro ${res.status} ao gerar o Excel`);
+  const blob = await res.blob();
+  const cd = res.headers.get("Content-Disposition") || "";
+  const m = /filename="?([^";]+)"?/.exec(cd);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = m?.[1] || `redistribuicao_${jobId}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
 }
 
 // ── Reatribuição REAL no L1 (job server-backed com progresso) ──

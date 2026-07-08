@@ -224,17 +224,18 @@ class BalanceadorService:
                     break
         return out
 
-    def listar_logs(self, team: str, limit: int = 50) -> list:
+    def listar_logs(self, team: str, limit: int = 10, offset: int = 0) -> dict:
         from app.models.performance import BalanceadorLog
 
+        base = self.db.query(BalanceadorLog).filter(BalanceadorLog.team == team)
+        total = base.count()
         rows = (
-            self.db.query(BalanceadorLog)
-            .filter(BalanceadorLog.team == team)
-            .order_by(BalanceadorLog.criado_em.desc())
-            .limit(limit)
+            base.order_by(BalanceadorLog.criado_em.desc())
+            .offset(max(0, offset))
+            .limit(max(1, min(limit, 100)))
             .all()
         )
-        return [
+        logs = [
             {
                 "id": r.id,
                 "criado_em": r.criado_em.isoformat() if r.criado_em else None,
@@ -246,6 +247,7 @@ class BalanceadorService:
             }
             for r in rows
         ]
+        return {"total": total, "logs": logs}
 
     # ── Destinos recorrentes da distribuição em fila (preferência aprendida) ──
     def sugestoes_fila(self, team: str, origem_pessoa_id: int, subtipo: str, limit: int = 8) -> list:
