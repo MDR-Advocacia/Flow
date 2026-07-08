@@ -78,7 +78,7 @@ export default function ExecProgressOverlay({ exec, onClose }: { exec: ExecState
               </div>
               <div className="rounded-md bg-amber-50 px-2 py-1.5">
                 <div className="text-lg font-bold tabular-nums text-amber-700">{exec.resultado.workflow_bloqueadas}</div>
-                <div className="text-[10px] text-amber-700">de Workflow</div>
+                <div className="text-[10px] text-amber-700">p/ manual</div>
               </div>
               <div className="rounded-md bg-rose-50 px-2 py-1.5">
                 <div className="text-lg font-bold tabular-nums text-rose-700">{exec.resultado.falhas}</div>
@@ -87,8 +87,8 @@ export default function ExecProgressOverlay({ exec, onClose }: { exec: ExecState
             </div>
             {exec.resultado.workflow_bloqueadas > 0 && (
               <p className="rounded-md bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800">
-                {exec.resultado.workflow_bloqueadas} tarefa(s) de <b>Workflow</b> não confirmaram a troca nem pelo
-                caminho web — reatribua manualmente pela tela do L1 (envolvimento em lote).
+                {exec.resultado.workflow_bloqueadas} tarefa(s) não confirmaram a troca nem pelo caminho web —
+                reatribua manualmente pela tela do L1 (envolvimento em lote).
               </p>
             )}
           </div>

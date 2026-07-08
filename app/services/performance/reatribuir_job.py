@@ -106,7 +106,8 @@ def _reatribuir_uma(c, task_id: int, cid: int) -> dict:
 
 
 def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
-    """Fase 2 — reatribui as travadas de Workflow pelo POST web (fura o lock).
+    """Fase 2 — reatribui pelo POST web tudo que a API travou com 400 (lock de
+    Workflow E validação de tarefa atrasada — endDateTime no passado).
 
     Agrupa por (exec_atual, resp_atual, destino) e posta em LOTE: CampoId 3
     (executante) e 4 (responsável), DE→PARA. Solicitante intocado. A troca é
@@ -139,7 +140,7 @@ def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
         if (need_exec and not exec_de) or (need_resp and not resp_de):
             for it in itens:
                 job.workflow_bloqueadas = (job.workflow_bloqueadas or 0) + 1
-                detalhe[it["idx"]]["reason"] = "workflow_sem_papel_atual"
+                detalhe[it["idx"]]["reason"] = "web_sem_papel_atual"
             db.commit()
             continue
         if not need_exec and not need_resp:
@@ -170,7 +171,7 @@ def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
             )
             for it in itens:
                 job.workflow_bloqueadas = (job.workflow_bloqueadas or 0) + 1
-                detalhe[it["idx"]]["reason"] = "workflow_web_erro"
+                detalhe[it["idx"]]["reason"] = "web_erro"
             db.commit()
 
     # Verificação assíncrona: o L1 enfileira a troca; confere via API.
@@ -198,7 +199,7 @@ def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
 
     for it in pendentes:  # o web não refletiu — fica no bucket manual
         job.workflow_bloqueadas = (job.workflow_bloqueadas or 0) + 1
-        detalhe[it["idx"]]["reason"] = "workflow_web_nao_refletiu"
+        detalhe[it["idx"]]["reason"] = "web_nao_refletiu"
     job.detalhe = list(detalhe)
     db.commit()
 
@@ -288,16 +289,20 @@ def _run(job_id: str, team: str, itens: list, movimentos: list, dry_run: bool) -
 
             if reason in ("reassigned", "dry_ok"):
                 job.reatribuidas = (job.reatribuidas or 0) + 1
-            elif reason == "workflow_locked":
-                # Não conta bucket ainda: a fase 2 tenta pelo POST web.
-                reason = "workflow_web_pendente"
+            elif reason == "workflow_locked" or (reason == "error" and http == 400 and papeis is not None):
+                # 400 no PATCH = lock de Workflow OU validação do modelo (ex.:
+                # tarefa ATRASADA — endDateTime no passado reprova a edição via
+                # API: "status 'Pendente' com data de conclusão anterior à
+                # atual"). AMBOS furam pelo POST web (fase 2) — validado em prod
+                # 2026-07-08 (no-op na task 372560, atrasada, Success:true).
+                reason = "web_pendente"
             else:
                 job.falhas = (job.falhas or 0) + 1
 
             detalhe.append(
                 {"task_id": task_id, "to_id": to_id, "to_nome": to_nome, "reason": reason, "http": http}
             )
-            if reason == "workflow_web_pendente":
+            if reason == "web_pendente":
                 wf_queue.append(
                     {
                         "task_id": int(task_id), "cid": int(cid), "idx": len(detalhe) - 1,
