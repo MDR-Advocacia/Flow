@@ -531,6 +531,101 @@ class LegacyTaskHttpCancellationService:
             return {"ok": True, "count": len(task_ids), "raw": payload}
         raise _CancelHttpError("loop de retry HTTP (batch) esgotado", category="runner_error")
 
+    # ── Reatribuição de envolvidos (Balanceador) — mesmo endpoint, CampoId 3/4 ──
+
+    def post_reassign(
+        self,
+        *,
+        task_ids: list[int],
+        campo_id: int,
+        campo_text: str,
+        de_id: int,
+        de_text: str,
+        para_id: int,
+        para_text: str,
+    ) -> dict[str, Any]:
+        """POST de troca de envolvido DE→PARA em lote no ModalEnvolvimentoEmLote.
+
+        Fura o lock de Workflow (a API REST trava o PATCH; o endpoint web não).
+        CampoId: 3=Executante, 4=Responsável, 5=Solicitante (nunca enviamos o 5 —
+        o solicitante fica intocado). Payload validado em prod 2026-06-26
+        (change+revert real na task 339218, ver
+        docs/legalone-reatribuir-responsavel-executante-tarefa.md e memória
+        reference_l1_reatribuir_workflow). Assíncrono como o cancelamento:
+        200 Success = enfileirado; a confirmação real é GET participants depois.
+        Reusa a mesma sessão `.ASPXAUTH`/retry de re-login do cancelamento.
+        """
+        if not task_ids:
+            return {"ok": True, "count": 0, "raw": None}
+        url = f"{self._web_base_url()}{CANCEL_ENDPOINT_PATH}?parentId=0&tipoVinculo=1"
+        headers = {"X-Requested-With": "XMLHttpRequest", "Accept": "*/*"}
+        body_base: list[tuple[str, str]] = [
+            ("ParentId", "0"),
+            ("TipoVinculo", "1"),
+            ("CampoText", campo_text),
+            ("CampoId", str(int(campo_id))),
+            ("DeEnvolvidoId", str(int(de_id))),
+            ("DeEnvolvidoText", de_text or ""),
+            ("ParaEnvolvidoId", str(int(para_id))),
+            ("ParaEnvolvidoText", para_text or ""),
+            ("IsRecalculateDeadline", "false"),
+            ("ShouldOpenReschedulingRequest", "false"),
+            ("TipoLote", "0"),
+            ("SubstituirLembretesDeEnvolvidos", "false"),
+            ("selectionViewModel[SelectAll]", "false"),
+            ("selectionViewModel[UseStringIds]", "false"),
+        ]
+        for attempt in range(2):
+            cookies = self._ensure_session()
+            body = list(body_base)
+            for tid in task_ids:
+                body.append(("selectionViewModel[SelectedIds][]", str(int(tid))))
+            try:
+                response = self._http.post(
+                    url, data=body, cookies=cookies, headers=headers, timeout=30
+                )
+            except requests.exceptions.RequestException as exc:
+                raise _CancelHttpError(
+                    f"erro de rede no POST reassign: {exc}", category="timeout"
+                ) from exc
+            if self._is_session_invalid(response):
+                self._invalidate_session()
+                if attempt == 0:
+                    logger.info(
+                        "legacy_task_http.session_invalid: re-login (reassign n=%s)",
+                        len(task_ids),
+                    )
+                    continue
+                raise _CancelHttpError(
+                    "sessao invalida persistente apos re-login (403)", category="auth_failure"
+                )
+            if response.status_code >= 500:
+                raise _CancelHttpError(
+                    f"L1 retornou {response.status_code}", category="timeout"
+                )
+            if response.status_code != 200:
+                raise _CancelHttpError(
+                    f"L1 retornou {response.status_code}: {(response.text or '')[:256]}",
+                    category="runner_error",
+                )
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise _CancelHttpError(
+                    f"resposta L1 nao e JSON: {(response.text or '')[:256]}",
+                    category="runner_error",
+                ) from exc
+            if not payload.get("Success"):
+                err = payload.get("ErrorMessage") or payload.get("Message") or "Success=false"
+                raise _CancelHttpError(f"L1 rejeitou reassign: {err}", category="runner_error")
+            logger.info(
+                "legacy_task_http.post_reassign_ok campo=%s n=%s de=%s para=%s elapsed_ms=%s",
+                campo_text, len(task_ids), de_id, para_id,
+                int(response.elapsed.total_seconds() * 1000),
+            )
+            return {"ok": True, "count": len(task_ids), "raw": payload}
+        raise _CancelHttpError("loop de retry HTTP (reassign) esgotado", category="runner_error")
+
     # ── Interface publica (compat com LegacyTaskHelper (legacy_task_helpers)) ──
 
     def cancel_task(

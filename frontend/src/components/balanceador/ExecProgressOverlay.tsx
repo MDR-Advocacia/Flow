@@ -87,8 +87,8 @@ export default function ExecProgressOverlay({ exec, onClose }: { exec: ExecState
             </div>
             {exec.resultado.workflow_bloqueadas > 0 && (
               <p className="rounded-md bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800">
-                {exec.resultado.workflow_bloqueadas} tarefa(s) são de <b>Workflow</b> (Modelo de Procedimento) — a API do
-                L1 trava a troca. Reatribua essas pela tela do L1 (envolvimento em lote) ou via RPA.
+                {exec.resultado.workflow_bloqueadas} tarefa(s) de <b>Workflow</b> não confirmaram a troca nem pelo
+                caminho web — reatribua manualmente pela tela do L1 (envolvimento em lote).
               </p>
             )}
           </div>
