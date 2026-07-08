@@ -3,7 +3,7 @@
 // MOCK (2026-06-29): leitura real do pool; escrita simulada.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, ArrowLeftRight, CalendarClock, Clock, Loader2, Star } from "lucide-react";
+import { AlertTriangle, ArrowLeftRight, CalendarClock, Clock, Loader2, Star, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -124,8 +124,18 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
 
       {/* controles de redistribuição */}
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/30 px-3 py-2">
-        <span className="text-xs font-medium text-muted-foreground">
+        <span className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
           {sel.size > 0 ? `${sel.size} colaborador(es) selecionado(s)` : "Selecione colaboradores na tabela"}
+          {sel.size > 0 && (
+            <button
+              type="button"
+              onClick={() => setSel(new Set())}
+              className="inline-flex items-center gap-0.5 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              title="Desmarca todos os colaboradores selecionados"
+            >
+              <X className="h-3 w-3" /> Limpar seleção
+            </button>
+          )}
         </span>
         <div className="flex items-center gap-2">
           <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground" title="Inclui as vencidas junto com o período escolhido">

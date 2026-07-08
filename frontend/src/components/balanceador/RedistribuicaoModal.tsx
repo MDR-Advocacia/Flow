@@ -6,7 +6,7 @@
 // "Simular" faz um dry-run (lê participantes, não grava).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Check, FlaskConical, Info, Loader2, RotateCcw, Split, Trash2, Users } from "lucide-react";
+import { ArrowRight, Check, FlaskConical, Info, Loader2, RotateCcw, Split, Trash2, Users, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -395,12 +395,21 @@ export default function RedistribuicaoModal({
                           )}
                         </div>
                         {filaSelCount(p.id) > 0 && (
-                          <button
-                            onClick={() => abrirFilaMulti(p)}
-                            className="mt-1.5 flex w-full items-center justify-center gap-1 rounded-md bg-[hsl(var(--dunatech-blue))] px-2 py-1 text-[11px] font-medium text-white transition-opacity hover:opacity-90"
-                          >
-                            <Split className="h-3 w-3" /> Distribuir {filaSelCount(p.id)} tipo(s) em fila
-                          </button>
+                          <div className="mt-1.5 flex items-center gap-1">
+                            <button
+                              onClick={() => abrirFilaMulti(p)}
+                              className="flex flex-1 items-center justify-center gap-1 rounded-md bg-[hsl(var(--dunatech-blue))] px-2 py-1 text-[11px] font-medium text-white transition-opacity hover:opacity-90"
+                            >
+                              <Split className="h-3 w-3" /> Distribuir {filaSelCount(p.id)} tipo(s) em fila
+                            </button>
+                            <button
+                              onClick={() => setFilaSel(null)}
+                              className="rounded-md border px-1.5 py-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                              title="Limpar seleção de tipos"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
                         )}
                       </div>
                       <div className="flex-1 space-y-1.5 overflow-y-auto p-2">
