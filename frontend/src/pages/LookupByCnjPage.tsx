@@ -6,6 +6,7 @@ import {
   ExternalLink,
   ChevronDown,
   ChevronRight,
+  ClipboardCheck,
   Clock,
   Bot,
   Tag,
@@ -62,6 +63,12 @@ type RecordDetail = {
   linked_office_id: number | null;
   status: string;
   is_duplicate?: boolean;
+  scheduled_by_name?: string | null;
+  scheduled_by_email?: string | null;
+  scheduled_at?: string | null;
+  ignored_by_name?: string | null;
+  ignored_by_email?: string | null;
+  ignored_at?: string | null;
   category: string | null;
   subcategory: string | null;
   polo: string | null;
@@ -110,6 +117,23 @@ type LawsuitInfo = {
   responsible_office_name: string | null;
 };
 
+type OverrideField = { proposto: unknown; enviado: unknown };
+
+type TaskAudit = {
+  id: number;
+  publication_record_id: number | null;
+  created_task_id: number | null;
+  subtype_id: number | null;
+  override_detected: boolean;
+  override_fields: Record<string, OverrideField> | null;
+  scheduled_by_name: string | null;
+  scheduled_by_email: string | null;
+  scheduled_at: string | null;
+  sent_payload: Record<string, unknown> | null;
+  proposed_payload: Record<string, unknown> | null;
+  l1_task_url: string | null;
+};
+
 type LookupResponse = {
   cnj_input: string;
   cnj_normalized: string;
@@ -127,6 +151,7 @@ type LookupResponse = {
   timeline: TimelineEvent[];
   searches: SearchInfo[];
   records: RecordDetail[];
+  task_audits?: TaskAudit[];
 };
 
 /* ─── Helpers ─────────────────────────────────────────────────────── */
@@ -188,10 +213,18 @@ function eventIcon(event: string) {
       return <CheckCircle2 className="h-4 w-4 text-green-500" />;
     case "rpa_erro":
       return <XCircle className="h-4 w-4 text-red-500" />;
+    case "tarefa_criada":
+      return <ClipboardCheck className="h-4 w-4 text-emerald-600" />;
     default:
       return <Calendar className="h-4 w-4 text-slate-400" />;
   }
 }
+
+const OVERRIDE_FIELD_LABELS: Record<string, string> = {
+  subTypeId: "Tipo de tarefa (subtipo)",
+  responsibleOfficeId: "Escritório responsável",
+  responsavel_contact_id: "Responsável (contact id)",
+};
 
 /* ─── Components ──────────────────────────────────────────────────── */
 
@@ -390,6 +423,90 @@ function Timeline({ events }: { events: TimelineEvent[] }) {
   );
 }
 
+function TaskAuditCard({ audit }: { audit: TaskAudit }) {
+  const [showPayloads, setShowPayloads] = useState(false);
+  const overrides = Object.entries(audit.override_fields || {});
+
+  return (
+    <div className="border rounded-lg p-4 space-y-3">
+      <div className="flex items-center gap-2 flex-wrap">
+        <ClipboardCheck className="h-4 w-4 text-emerald-600 shrink-0" />
+        <span className="font-semibold text-sm">
+          Tarefa {audit.created_task_id ? `#${audit.created_task_id}` : "—"}
+        </span>
+        {audit.subtype_id != null && (
+          <span className="text-xs text-muted-foreground">subtipo {audit.subtype_id}</span>
+        )}
+        {audit.override_detected ? (
+          <Badge variant="outline" className="bg-amber-100 text-amber-800">
+            override do operador
+          </Badge>
+        ) : (
+          <Badge variant="outline" className="bg-green-100 text-green-800">
+            conforme proposta
+          </Badge>
+        )}
+        {audit.l1_task_url && (
+          <a
+            href={audit.l1_task_url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-xs inline-flex items-center gap-1 text-blue-600 hover:underline ml-auto"
+          >
+            Abrir no Legal One <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
+      </div>
+
+      <div className="text-sm text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
+        <span className="flex items-center gap-1">
+          <User className="h-3 w-3" />
+          {audit.scheduled_by_name || audit.scheduled_by_email || "operador não registrado"}
+        </span>
+        <span>{formatDateTime(audit.scheduled_at)}</span>
+      </div>
+
+      {overrides.length > 0 && (
+        <div className="text-xs bg-amber-50 border border-amber-200 rounded p-2 space-y-1">
+          <div className="font-semibold text-amber-800">O que o operador mudou em relação à proposta automática:</div>
+          {overrides.map(([field, diff]) => (
+            <div key={field} className="flex items-center gap-2 flex-wrap">
+              <span className="text-muted-foreground">{OVERRIDE_FIELD_LABELS[field] || field}:</span>
+              <code className="bg-white px-1 rounded border">{String(diff.proposto ?? "—")}</code>
+              <ArrowRight className="h-3 w-3 text-amber-600" />
+              <code className="bg-white px-1 rounded border font-semibold">{String(diff.enviado ?? "—")}</code>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <button
+        onClick={() => setShowPayloads(!showPayloads)}
+        className="text-xs text-muted-foreground hover:text-foreground font-semibold uppercase tracking-wide flex items-center gap-1"
+      >
+        {showPayloads ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        Payload enviado × proposta automática
+      </button>
+      {showPayloads && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+          <div>
+            <div className="text-xs font-semibold text-emerald-700 mb-1">ENVIADO AO LEGAL ONE (efetivo)</div>
+            <pre className="whitespace-pre-wrap font-mono text-[11px] bg-white p-2 rounded border max-h-72 overflow-y-auto">
+              {JSON.stringify(audit.sent_payload, null, 2)}
+            </pre>
+          </div>
+          <div>
+            <div className="text-xs font-semibold text-muted-foreground mb-1">PROPOSTA AUTOMÁTICA</div>
+            <pre className="whitespace-pre-wrap font-mono text-[11px] bg-white p-2 rounded border max-h-72 overflow-y-auto">
+              {audit.proposed_payload ? JSON.stringify(audit.proposed_payload, null, 2) : "— sem proposta registrada —"}
+            </pre>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RecordCard({ record }: { record: RecordDetail }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -425,6 +542,18 @@ function RecordCard({ record }: { record: RecordDetail }) {
               <span>Busca #{record.search_id}</span>
               {record.requested_by_email && (
                 <span className="flex items-center gap-1"><User className="h-3 w-3" />{record.requested_by_email}</span>
+              )}
+              {record.status === "AGENDADO" && (record.scheduled_by_name || record.scheduled_by_email) && (
+                <span className="flex items-center gap-1 text-green-700">
+                  <User className="h-3 w-3" />
+                  agendou: {record.scheduled_by_name || record.scheduled_by_email}
+                </span>
+              )}
+              {record.status === "IGNORADO" && (record.ignored_by_name || record.ignored_by_email) && (
+                <span className="flex items-center gap-1 text-amber-700">
+                  <User className="h-3 w-3" />
+                  ciência: {record.ignored_by_name || record.ignored_by_email}
+                </span>
               )}
             </div>
           </div>
@@ -498,6 +627,35 @@ function RecordCard({ record }: { record: RecordDetail }) {
                 <pre className="whitespace-pre-wrap font-sans text-xs">
                   {typeof record.proposal === "object" ? JSON.stringify(record.proposal, null, 2) : String(record.proposal)}
                 </pre>
+              </div>
+            </div>
+          )}
+
+          {/* Tratamento humano — quem agendou / deu ciência */}
+          {(record.scheduled_by_name || record.scheduled_by_email || record.ignored_by_name || record.ignored_by_email) && (
+            <div>
+              <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Tratamento humano</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                {(record.scheduled_by_name || record.scheduled_by_email) && (
+                  <div className="flex items-center gap-1.5">
+                    <User className="h-3.5 w-3.5 text-green-600" />
+                    <span className="text-muted-foreground">Agendado por:</span>{" "}
+                    <strong>{record.scheduled_by_name || record.scheduled_by_email}</strong>
+                    {record.scheduled_at && (
+                      <span className="text-xs text-muted-foreground">em {formatDateTime(record.scheduled_at)}</span>
+                    )}
+                  </div>
+                )}
+                {(record.ignored_by_name || record.ignored_by_email) && (
+                  <div className="flex items-center gap-1.5">
+                    <User className="h-3.5 w-3.5 text-amber-600" />
+                    <span className="text-muted-foreground">Ciência dada por:</span>{" "}
+                    <strong>{record.ignored_by_name || record.ignored_by_email}</strong>
+                    {record.ignored_at && (
+                      <span className="text-xs text-muted-foreground">em {formatDateTime(record.ignored_at)}</span>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -667,6 +825,27 @@ const LookupByCnjPage = () => {
 
           {/* Timeline de eventos */}
           <Timeline events={result.timeline} />
+
+          {/* Tarefas efetivamente criadas no Legal One (auditoria de agendamento) */}
+          {(result.task_audits?.length ?? 0) > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <ClipboardCheck className="h-4 w-4 text-emerald-600" />
+                  Tarefas criadas no Legal One ({result.task_audits!.length})
+                </CardTitle>
+                <CardDescription>
+                  O que foi <strong>efetivamente enviado</strong> ao Legal One — não a proposta. Cada tarefa mostra o
+                  operador que agendou e, quando ele alterou subtipo, escritório ou responsável, o antes/depois campo a campo.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {result.task_audits!.map((a) => (
+                  <TaskAuditCard key={a.id} audit={a} />
+                ))}
+              </CardContent>
+            </Card>
+          )}
 
           {/* Resumos por status / classificação / RPA */}
           <StatusSummary totals={result.totals} />

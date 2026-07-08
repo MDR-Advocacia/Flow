@@ -2878,6 +2878,45 @@ class PublicationSearchService:
             raw,
         )
 
+        # Auditoria de agendamento (publicacao_tarefa_audit): payload EXATO
+        # enviado ao L1 por tarefa criada + quem agendou + diff vs. a proposta
+        # automática. A proposta sozinha não conta o que o operador
+        # EFETIVAMENTE agendou — é isso que fecha a lacuna de auditoria.
+        from app.models.publication_task_audit import PublicationTaskAudit
+
+        audit_filters = []
+        if lawsuit_id is not None:
+            audit_filters.append(PublicationTaskAudit.lawsuit_id == lawsuit_id)
+        if record_ids:
+            audit_filters.append(PublicationTaskAudit.publication_record_id.in_(record_ids))
+        task_audits: list[dict[str, Any]] = []
+        if audit_filters:
+            audit_rows = (
+                self.db.query(PublicationTaskAudit)
+                .filter(or_(*audit_filters))
+                .order_by(PublicationTaskAudit.id.desc())
+                .all()
+            )
+            for a in audit_rows:
+                task_audits.append({
+                    "id": a.id,
+                    "publication_record_id": a.publication_record_id,
+                    "created_task_id": a.created_task_id,
+                    "subtype_id": a.subtype_id,
+                    "override_detected": a.override_detected,
+                    "override_fields": a.override_fields,
+                    "scheduled_by_name": a.scheduled_by_name,
+                    "scheduled_by_email": a.scheduled_by_email,
+                    "scheduled_at": a.scheduled_at.isoformat() if a.scheduled_at else None,
+                    "sent_payload": a.sent_payload,
+                    "proposed_payload": a.proposed_payload,
+                    "l1_task_url": (
+                        self._build_l1_task_url(a.created_task_id, lawsuit_id)
+                        if a.created_task_id and lawsuit_id
+                        else None
+                    ),
+                })
+
         # Mapeia search_id → requested_by_email para cada publicação
         search_by_id = {s["id"]: s for s in searches}
         for rec in records_payload:
@@ -2948,15 +2987,25 @@ class PublicationSearchService:
             if status in ("AGENDADO", "IGNORADO", "DESCARTADO_OBSOLETA") and rec.get("updated_at"):
                 label_map = {
                     "AGENDADO": "Tarefa agendada no Legal One",
-                    "IGNORADO": "Publicação ignorada pelo operador",
+                    "IGNORADO": "Publicação ignorada pelo operador (ciência)",
                     "DESCARTADO_OBSOLETA": "Descartada como obsoleta (anterior à criação da pasta)",
                 }
+                # Autoria real (pub002/pub003) + timestamp dedicado da ação —
+                # updated_at muda em qualquer edição e mentiria a hora.
+                event_user = None
+                event_ts = rec["updated_at"]
+                if status == "AGENDADO":
+                    event_user = rec.get("scheduled_by_name") or rec.get("scheduled_by_email")
+                    event_ts = rec.get("scheduled_at") or event_ts
+                elif status == "IGNORADO":
+                    event_user = rec.get("ignored_by_name") or rec.get("ignored_by_email")
+                    event_ts = rec.get("ignored_at") or event_ts
                 timeline.append({
-                    "timestamp": rec["updated_at"],
+                    "timestamp": event_ts,
                     "event": "status_change",
                     "label": label_map.get(status, f"Status → {status}"),
                     "detail": None,
-                    "user": None,
+                    "user": event_user,
                     "record_id": pub_id,
                 })
             # 4) Tratamento RPA
@@ -2990,6 +3039,37 @@ class PublicationSearchService:
                         "record_id": pub_id,
                     })
 
+        # Tarefas efetivamente criadas no L1 (auditoria de agendamento) —
+        # inclui o "quem" e sinaliza override humano vs. proposta automática.
+        _override_labels = {
+            "subTypeId": "tipo de tarefa",
+            "responsibleOfficeId": "escritório",
+            "responsavel_contact_id": "responsável",
+        }
+        for audit in task_audits:
+            if not audit.get("scheduled_at"):
+                continue
+            override = audit.get("override_fields") or {}
+            override_summary = None
+            if override:
+                override_summary = (
+                    "Operador alterou "
+                    + ", ".join(_override_labels.get(k, k) for k in override)
+                    + " em relação à proposta automática."
+                )
+            timeline.append({
+                "timestamp": audit["scheduled_at"],
+                "event": "tarefa_criada",
+                "label": (
+                    f"Tarefa #{audit['created_task_id']} criada no Legal One"
+                    if audit.get("created_task_id")
+                    else "Tarefa criada no Legal One"
+                ),
+                "detail": override_summary,
+                "user": audit.get("scheduled_by_name") or audit.get("scheduled_by_email"),
+                "record_id": audit.get("publication_record_id"),
+            })
+
         # Ordena timeline cronologicamente (mais recente primeiro)
         timeline.sort(key=lambda e: e.get("timestamp") or "", reverse=True)
 
@@ -3010,6 +3090,7 @@ class PublicationSearchService:
             "timeline": timeline,
             "searches": searches,
             "records": records_payload,
+            "task_audits": task_audits,
         }
 
     def update_record_status(
@@ -4008,6 +4089,11 @@ class PublicationSearchService:
             "scheduled_by_email": record.scheduled_by_email,
             "scheduled_by_name": record.scheduled_by_name,
             "scheduled_at": record.scheduled_at.isoformat() if record.scheduled_at else None,
+            # Autoria da ciência (pub003). Só tem valor quando status=IGNORADO.
+            "ignored_by_user_id": record.ignored_by_user_id,
+            "ignored_by_email": record.ignored_by_email,
+            "ignored_by_name": record.ignored_by_name,
+            "ignored_at": record.ignored_at.isoformat() if record.ignored_at else None,
             "created_at": record.created_at.isoformat() if record.created_at else None,
             "updated_at": record.updated_at.isoformat() if record.updated_at else None,
         }
