@@ -148,6 +148,12 @@ export interface PublicationTreatmentRun {
   error_log_file_path?: string | null;
 }
 
+export interface PublicationTreatmentAutorun {
+  enabled: boolean;
+  cron_expression: string | null;
+  next_run_at: string | null;
+}
+
 export interface PublicationTreatmentMonitor {
   summary: PublicationTreatmentSummary;
   active_run: PublicationTreatmentRun | null;
@@ -156,6 +162,7 @@ export interface PublicationTreatmentMonitor {
   control_signal: string;
   recent_items: PublicationTreatmentItem[];
   recent_failures: PublicationTreatmentItem[];
+  autorun?: PublicationTreatmentAutorun | null;
 }
 
 export interface PublicationTreatmentStartResponse {

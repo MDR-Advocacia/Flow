@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     publication_treatment_pause_seconds: int = 5
     publication_treatment_max_attempts: int = 3
     publication_treatment_monitor_poll_seconds: int = 5
+    # Autorun recorrente do Tratamento Web: dispara start_run no cron abaixo
+    # (timezone America/Sao_Paulo). Default: 01h, 04h, 12h e 22h.
+    publication_treatment_autorun_enabled: bool = True
+    publication_treatment_autorun_cron: str = "0 1,4,12,22 * * *"
+    # Run ativo sem heartbeat (status.json parado) ha mais que isso e
+    # considerado zumbi e marcado como FALHA pra destravar o proximo ciclo.
+    publication_treatment_stale_run_minutes: int = 30
 
     smtp_server: str | None = None
     smtp_port: int = 587

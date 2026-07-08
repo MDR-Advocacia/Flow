@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, ExternalLink, Loader2, Pause, Play, RefreshCw, Rocket, RotateCw, Workflow } from "lucide-react";
+import { AlertCircle, CalendarClock, ExternalLink, Loader2, Pause, Play, RefreshCw, Rocket, RotateCw, Workflow } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -373,10 +373,19 @@ export default function PublicationTreatmentPage() {
             ) : (
               <Badge variant="outline">Sem execução ativa</Badge>
             )}
+            {monitor?.autorun?.enabled ? (
+              <Badge variant="outline" className="gap-1 font-normal">
+                <CalendarClock className="h-3.5 w-3.5" />
+                Automático · próxima {formatDateTime(monitor.autorun.next_run_at)}
+              </Badge>
+            ) : null}
           </div>
           <p className="text-muted-foreground">
             Cada tratamento usa o `publicationId` exato retornado pela API do Legal One, então a execução fica segura
             mesmo quando há multiplicidade no mesmo processo e na mesma data.
+            {monitor?.autorun?.enabled
+              ? " As pendências também são tratadas automaticamente algumas vezes ao dia — o botão continua disponível pra rodadas extras."
+              : ""}
           </p>
         </div>
 
@@ -528,7 +537,12 @@ export default function PublicationTreatmentPage() {
               runs.slice(0, 6).map((run) => (
                 <div key={run.id} className="rounded-xl border border-border/70 p-4 space-y-2">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="font-semibold">Run #{run.id}</div>
+                    <div className="flex items-center gap-2">
+                      <div className="font-semibold">Run #{run.id}</div>
+                      <Badge variant="outline" className="text-xs font-normal">
+                        {run.trigger_type === "MANUAL" ? "Manual" : "Automática"}
+                      </Badge>
+                    </div>
                     <Badge className={statusBadge(run.status)}>{runStatusLabel(run.status)}</Badge>
                   </div>
                   <div className="grid gap-1 text-sm text-muted-foreground">

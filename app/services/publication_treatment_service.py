@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -615,6 +615,10 @@ class PublicationTreatmentService:
         triggered_by_email: Optional[str] = None,
         automation_id: Optional[int] = None,
     ) -> dict[str, Any]:
+        # Auto-heal: um run zumbi (runner morto sem gravar estado final)
+        # travaria todo inicio novo com "already_running" para sempre —
+        # tanto o botao manual quanto o autorun recorrente.
+        self.recover_stale_runs(reason="pre-start")
         # Retries direcionados (item_ids) pulam o backfill global para evitar
         # reabrir itens FALHA de outros processos sem intencao explicita.
         if item_ids:
@@ -952,6 +956,108 @@ class PublicationTreatmentService:
             "run": self._run_to_dict(run),
         }
 
+    def get_autorun_info(self) -> dict[str, Any]:
+        """Config do autorun recorrente exposta pro painel (proxima execucao automatica)."""
+        info: dict[str, Any] = {
+            "enabled": bool(settings.publication_treatment_autorun_enabled),
+            "cron_expression": settings.publication_treatment_autorun_cron,
+            "next_run_at": None,
+        }
+        if not info["enabled"]:
+            return info
+        try:
+            from zoneinfo import ZoneInfo
+
+            from apscheduler.triggers.cron import CronTrigger
+
+            tz = ZoneInfo("America/Sao_Paulo")
+            trigger = CronTrigger.from_crontab(
+                settings.publication_treatment_autorun_cron, timezone=tz
+            )
+            next_fire = trigger.get_next_fire_time(None, datetime.now(tz))
+            info["next_run_at"] = next_fire.isoformat() if next_fire else None
+        except Exception:  # noqa: BLE001 — cron invalida nao pode derrubar o monitor
+            logger.warning(
+                "tratamento: cron do autorun invalida (%s) — painel fica sem proxima execucao.",
+                settings.publication_treatment_autorun_cron,
+            )
+        return info
+
+    def recover_stale_runs(
+        self,
+        *,
+        threshold_minutes: Optional[int] = None,
+        reason: str = "tick",
+    ) -> int:
+        """
+        Marca como FALHA runs ativos cujo runner morreu sem gravar estado final
+        (SIGKILL/OOM/restart de container mata o subprocess Node e o status.json
+        congela em "running"). Sem isso, get_active_run devolve o zumbi pra
+        sempre e todo start_run — manual ou do autorun — responde
+        "already_running", travando o modulo ate intervencao manual.
+
+        Criterio: sem heartbeat (generatedAt do status.json) ha mais de
+        `threshold_minutes`, ignorando runs pausados de proposito (acao do
+        operador) e runners dormindo entre lotes (sleep_until ainda no futuro).
+        Itens presos em PROCESSANDO voltam pra PENDENTE e entram no proximo ciclo.
+        """
+        threshold = max(5, threshold_minutes or settings.publication_treatment_stale_run_minutes)
+        now = self._utcnow()
+        cutoff = now - timedelta(minutes=threshold)
+
+        active_runs = (
+            self.db.query(PublicationTreatmentRun)
+            .filter(PublicationTreatmentRun.status.in_(tuple(ACTIVE_RUN_STATUSES)))
+            .all()
+        )
+        recovered = 0
+        for run in active_runs:
+            # Releitura do artefato: o runner pode ter finalizado sem o banco refletir.
+            self._sync_run_from_status_file(run, commit=False)
+            if run.status not in ACTIVE_RUN_STATUSES:
+                continue
+            if run.status == RUN_STATUS_PAUSED or self._read_control_signal(run) == "pause":
+                continue
+
+            heartbeat = run.generated_at or run.started_at
+            if heartbeat is None:
+                continue
+            if heartbeat.tzinfo is None:
+                heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+            sleep_until = run.sleep_until
+            if sleep_until is not None and sleep_until.tzinfo is None:
+                sleep_until = sleep_until.replace(tzinfo=timezone.utc)
+            last_sign_of_life = max(heartbeat, sleep_until) if sleep_until else heartbeat
+            if last_sign_of_life >= cutoff:
+                continue
+
+            run.status = RUN_STATUS_FAILED
+            run.finished_at = now
+            run.error_message = (
+                f"Execucao zumbi detectada ({reason}): sem heartbeat do runner ha mais de "
+                f"{threshold} min. O processo Playwright provavelmente morreu "
+                "(OOM/restart/deploy) sem gravar estado final. Itens em PROCESSANDO "
+                "voltaram pra fila e serao tratados no proximo ciclo."
+            )
+            stuck_items = (
+                self.db.query(PublicationTreatmentItem)
+                .filter(PublicationTreatmentItem.last_run_id == run.id)
+                .filter(PublicationTreatmentItem.queue_status == QUEUE_STATUS_PROCESSING)
+                .all()
+            )
+            for item in stuck_items:
+                item.queue_status = QUEUE_STATUS_PENDING
+                item.updated_at = now
+            recovered += 1
+            logger.warning(
+                "tratamento: run #%s reapado como zumbi (%s) — %d item(ns) devolvido(s) pra fila.",
+                run.id, reason, len(stuck_items),
+            )
+
+        if active_runs:
+            self.db.commit()
+        return recovered
+
     def get_monitor(self, *, office_ids: Optional[list[int]] = None) -> dict[str, Any]:
         active_run = self.get_active_run()
         latest_run = active_run
@@ -982,6 +1088,7 @@ class PublicationTreatmentService:
             "control_signal": control_signal,
             "recent_items": recent_items,
             "recent_failures": recent_failures,
+            "autorun": self.get_autorun_info(),
         }
 
     def wait_for_run_completion(

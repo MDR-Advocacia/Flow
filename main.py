@@ -359,6 +359,20 @@ async def lifespan(_: FastAPI):
     except Exception:
         logger.exception("Falha ao registrar o auto-worker da Análise Recursal no startup.")
 
+    # Tratamento Web de publicações: autorun recorrente — cron configurável
+    # (default 01h/04h/12h/22h BRT) que dispara o runner Playwright pra zerar
+    # a fila de pendências sem depender do operador clicar "Iniciar execução".
+    try:
+        from app.services.publication_treatment_autorun import (
+            register_publication_treatment_autorun_job,
+        )
+
+        register_publication_treatment_autorun_job(scheduler)
+    except Exception:
+        logger.exception(
+            "Falha ao registrar o autorun do Tratamento Web de publicações no startup."
+        )
+
     try:
         yield
     finally:
