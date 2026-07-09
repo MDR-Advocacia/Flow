@@ -11,11 +11,16 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
+from datetime import datetime
 from typing import Any, Optional
 
 from app.services.contatos_legalone import l1_contacts
 
 logger = logging.getLogger("distribuidos_bb.cadastro")
+
+# Status (LitigationStatus) — mapa fixo do tenant (do handoff).
+STATUS_MAP = {"ativo": 1, "suspenso": 2, "baixado": 3, "arquivado": 4}
 
 # Posições de participante (LitigationParticipantPositions) — do handoff/cobaia.
 POSICAO_CLIENTE = 2        # Customer
@@ -176,9 +181,242 @@ def resolver_nature_id(client: Any, natureza: Optional[str]) -> Optional[int]:
         try:
             resp = client._authenticated_request("GET", f"{client.base_url}/LitigationNatures")
             for it in resp.json().get("value", []):
-                nome = (it.get("name") or "").strip().lower()
+                nome = it.get("name")
                 if nome:
-                    _NATURES_CACHE[nome] = it.get("id")
+                    _NATURES_CACHE[_chave(nome)] = it.get("id")
         except Exception:  # noqa: BLE001
             logger.exception("Cadastro: falha ao carregar /LitigationNatures.")
-    return _NATURES_CACHE.get(natureza.strip().lower())
+    return _NATURES_CACHE.get(_chave(natureza))
+
+
+# ─── Resolvers de catálogo genéricos (nome → id), cacheados ──────────────
+
+_CACHE_CATALOGO: dict[str, dict[str, int]] = {}
+_CACHE_AREAS: Optional[dict[str, int]] = None
+
+
+def _chave(s: Optional[str]) -> str:
+    """Normaliza (sem acento, minúsculo, espaços colapsados) pra comparar."""
+    t = unicodedata.normalize("NFKD", s or "")
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    return " ".join(t.strip().lower().split())
+
+
+def _chave_path(s: Optional[str]) -> str:
+    """Normaliza um path (cada segmento entre '/'), pra casar escritório."""
+    t = unicodedata.normalize("NFKD", s or "")
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    return "/".join(seg.strip().lower() for seg in t.split("/"))
+
+
+def _catalogo_por_nome(client: Any, recurso: str) -> dict[str, int]:
+    """Carrega GET /{recurso} → {nome_normalizado: id} (cacheado)."""
+    if recurso not in _CACHE_CATALOGO:
+        mapa: dict[str, int] = {}
+        try:
+            resp = client._authenticated_request("GET", f"{client.base_url}/{recurso}")
+            for it in resp.json().get("value", []):
+                nome = it.get("name")
+                if nome and it.get("id") is not None:
+                    mapa[_chave(nome)] = it["id"]
+        except Exception:  # noqa: BLE001
+            logger.exception("Cadastro: falha ao carregar /%s.", recurso)
+        _CACHE_CATALOGO[recurso] = mapa
+    return _CACHE_CATALOGO[recurso]
+
+
+def resolver_office_por_path(client: Any, path: Optional[str]) -> Optional[int]:
+    """Escritório responsável/origem: casa o path completo com uma área do L1."""
+    global _CACHE_AREAS
+    if not path:
+        return None
+    if _CACHE_AREAS is None:
+        _CACHE_AREAS = {}
+        try:
+            for a in client.get_all_allocatable_areas():
+                if a.get("path"):
+                    _CACHE_AREAS[_chave_path(a["path"])] = a.get("id")
+        except Exception:  # noqa: BLE001
+            logger.exception("Cadastro: falha ao carregar /areas.")
+    return _CACHE_AREAS.get(_chave_path(path))
+
+
+def resolver_state_id(client: Any, uf_ou_nome: Optional[str]) -> Optional[int]:
+    """UF (sigla) ou nome do estado → stateId."""
+    if not uf_ou_nome:
+        return None
+    alvo = _chave(uf_ou_nome)
+    try:
+        resp = client._authenticated_request("GET", f"{client.base_url}/States")
+        for it in resp.json().get("value", []):
+            if _chave(it.get("name")) == alvo or _chave(it.get("stateCode")) == alvo:
+                return it.get("id")
+    except Exception:  # noqa: BLE001
+        logger.exception("Cadastro: falha ao resolver estado %s.", uf_ou_nome)
+    return None
+
+
+def resolver_justice_id(client: Any, nome: Optional[str]) -> Optional[int]:
+    return _catalogo_por_nome(client, "LitigationJustices").get(_chave(nome)) if nome else None
+
+
+def resolver_action_type_id(client: Any, nome: Optional[str]) -> Optional[int]:
+    if not nome:
+        return None
+    return _catalogo_por_nome(client, "LitigationActionAppealProceduralIssueTypes").get(_chave(nome))
+
+
+def resolver_status_id(nome: Optional[str]) -> Optional[int]:
+    return STATUS_MAP.get(_chave(nome)) if nome else None
+
+
+def resolver_position_id(client: Any, nome: Optional[str]) -> Optional[int]:
+    """Posição do participante (Réu/Autor/Parte…) → positionId."""
+    if not nome:
+        return None
+    return _catalogo_por_nome(client, "LitigationParticipantPositions").get(_chave(nome))
+
+
+# ─── Parse da Tramitação (BB) → cidade / UF / órgão ──────────────────────
+
+
+def parse_tramitacao(tramitacao: Optional[str]) -> dict[str, Optional[str]]:
+    """'Pimenta Bueno/RO - TJE-JECC - 01 Juizado...' → {cidade, uf, orgao}."""
+    if not tramitacao:
+        return {"cidade": None, "uf": None, "orgao": None}
+    partes = [p.strip() for p in str(tramitacao).split(" - ")]
+    cidade = uf = None
+    if partes and "/" in partes[0]:
+        cidade, uf = partes[0].rsplit("/", 1)
+        cidade, uf = cidade.strip(), uf.strip()
+    orgao = partes[-1] if len(partes) > 1 else None
+    return {"cidade": cidade, "uf": uf, "orgao": orgao}
+
+
+def _data_iso(valor: Optional[str]) -> Optional[str]:
+    """'DD/MM/AAAA' ou 'AAAA-MM-DD…' → ISO com Z (pro L1)."""
+    if not valor:
+        return None
+    v = str(valor).strip()
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(v[:10], fmt).strftime("%Y-%m-%dT00:00:00Z")
+        except ValueError:
+            continue
+    return None
+
+
+def _config(db, chave: str) -> Optional[str]:
+    from app.models.distribuidos_bb import BbConfig
+
+    c = db.get(BbConfig, chave)
+    return c.valor if c else None
+
+
+def montar_payload_lawsuit(db, client: Any, processo, *, criar_contatos: bool = False) -> dict[str, Any]:
+    """Monta o LawsuitModel a partir do distribuído + config + envolvidos.
+
+    Devolve {payload, resolucao, avisos}. `resolucao` reporta cada campo
+    resolvido (valor) ou faltando (motivo) — é o que o dry-run mostra.
+    `criar_contatos=False` (dry-run) só RESOLVE contatos (não cria).
+    """
+    from app.models.distribuidos_bb import BbEnvolvido
+
+    resolucao: dict[str, Any] = {}
+    avisos: list[str] = []
+
+    tram = parse_tramitacao(processo.tramitacao)
+    cidade, uf = tram["cidade"], tram["uf"]
+
+    office_id = resolver_office_por_path(client, processo.escritorio_path)
+    origem_id = resolver_office_por_path(client, _config(db, "escritorio_origem")) or 1
+    nature_id = resolver_nature_id(client, processo.natureza)
+    action_id = resolver_action_type_id(client, processo.acao)
+    state_id = resolver_state_id(client, uf)
+    city_id = None
+    if cidade and uf:
+        city_id, _ = l1_contacts.resolve_city_id(client, cidade, uf)
+    status_id = resolver_status_id(_config(db, "status") or "Ativo")
+    valor = float(processo.valor_causa) if processo.valor_causa is not None else None
+
+    # Participantes
+    participantes: list[dict[str, Any]] = []
+    # Customer (BB)
+    cliente_contact_id = _config(db, "cliente_contact_id")
+    pos_cliente = resolver_position_id(client, processo.posicao) or POSICAO_CLIENTE
+    if cliente_contact_id:
+        participantes.append({"type": "Customer", "contactId": int(cliente_contact_id),
+                              "isMainParticipant": True, "positionId": pos_cliente})
+        resolucao["cliente"] = {"contactId": int(cliente_contact_id), "positionId": pos_cliente}
+    else:
+        avisos.append("cliente_contact_id não configurado (Valores Padrão).")
+
+    # PersonInCharge (responsável) — resolução user→contato ainda pendente
+    resolucao["responsavel"] = {"user_id": processo.responsavel_user_id, "contactId": None,
+                                "motivo": "mapeamento responsável→contato ainda não definido"}
+    avisos.append("PersonInCharge (responsável) sem contactId — definir como responsável vira contato no L1.")
+
+    # OtherParty: envolvidos reais com CPF/CNPJ — EXCETO o próprio cliente (BB).
+    doc_cliente = _digitos(_config(db, "cliente_cpf_cnpj"))
+    envolvidos = db.query(BbEnvolvido).filter(BbEnvolvido.processo_id == processo.id).all()
+    partes_report = []
+    for e in envolvidos:
+        if not e.cpf_cnpj:
+            continue
+        if doc_cliente and _digitos(e.cpf_cnpj) == doc_cliente:
+            continue  # é o Banco do Brasil (já entra como Customer)
+        res = resolver_ou_criar_contato(client, nome=e.nome, cpf_cnpj=e.cpf_cnpj, criar_se_faltar=criar_contatos)
+        if cliente_contact_id and res.get("contact_id") == int(cliente_contact_id):
+            continue  # resolveu pro contato do cliente — não é adverso
+        partes_report.append({"nome": e.nome, "cpf_cnpj": e.cpf_cnpj, **{k: res[k] for k in ("status", "contact_id")}})
+        if res.get("contact_id"):
+            participantes.append({"type": "OtherParty", "contactId": res["contact_id"],
+                                  "isMainParticipant": False, "positionId": POSICAO_PARTE_CONTRARIA})
+    resolucao["partes_contrarias"] = partes_report
+
+    payload: dict[str, Any] = {
+        "type": _config(db, "tipo") or "Judicial",
+        "title": processo.npj,
+        "identifierNumber": processo.cnj,
+        "statusId": status_id,
+        "natureId": nature_id,
+        "actionTypeId": action_id,
+        "originOfficeId": origem_id,
+        "responsibleOfficeId": office_id,
+        "stateId": state_id,
+        "cityId": city_id,
+        "distributionDate": _data_iso(processo.data_ajuizamento),
+        "notes": processo.observacao,  # ← gatilho do workflow no L1
+        "monetaryAmount": {"value": valor, "code": "BRL"} if valor is not None else None,
+        "customFields": [
+            {"customFieldId": CF_NPJ, "textValue": processo.npj or ""},
+            {"customFieldId": CF_DATA_TERCEIRIZACAO,
+             "dateValue": _data_iso(processo.created_at.isoformat() if processo.created_at else None)
+             or datetime.utcnow().strftime("%Y-%m-%dT00:00:00Z")},
+        ],
+        "participants": participantes,
+    }
+    # remove chaves None (o L1 não gosta de nulos em alguns campos)
+    payload = {k: v for k, v in payload.items() if v is not None}
+
+    resolucao.update({
+        "responsibleOfficeId": {"path": processo.escritorio_path, "id": office_id},
+        "originOfficeId": origem_id,
+        "natureId": {"nome": processo.natureza, "id": nature_id},
+        "actionTypeId": {"nome": processo.acao, "id": action_id},
+        "stateId": {"uf": uf, "id": state_id},
+        "cityId": {"cidade": cidade, "id": city_id},
+        "statusId": status_id,
+        "valor_causa": valor,
+        "observacao_notes": processo.observacao,
+        "comarca_tramitacao": tram,
+    })
+    # Campos que faltaram (pra alertar no dry-run)
+    faltando = [nome for nome, val in [
+        ("responsibleOfficeId", office_id), ("natureId", nature_id), ("actionTypeId", action_id),
+        ("stateId", state_id), ("cityId", city_id), ("statusId", status_id),
+    ] if val is None]
+    if faltando:
+        avisos.append("Não resolvidos: " + ", ".join(faltando))
+
+    return {"payload": payload, "resolucao": resolucao, "avisos": avisos}
