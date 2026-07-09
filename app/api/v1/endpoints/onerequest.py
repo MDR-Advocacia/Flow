@@ -425,7 +425,12 @@ class SugestaoResponse(BaseModel):
     responsavel_user_id: Optional[int] = None
     responsavel_nome: Optional[str] = None
     responsavel_confianca: Optional[int] = None
+    # "trabalhista" = regra determinística do dígito J=5 do CNJ (não é o modal do setor).
+    responsavel_regra: Optional[str] = None
     data_agendamento: Optional[str] = None
+    # Responsável da PASTA no Legal One (informativo — o operador escolhe usar).
+    pasta_responsavel_nome: Optional[str] = None
+    pasta_responsavel_user_id: Optional[int] = None
 
 
 @router.get(
@@ -439,7 +444,30 @@ def sugestao(solicitacao_id: int, db: Session = Depends(get_db)):
     row = service.get(solicitacao_id)
     if not row:
         raise HTTPException(status_code=404, detail="Solicitação não encontrada.")
-    return suggestions.sugerir(db, titulo=row.titulo, polo=row.polo, prazo=row.prazo)
+    out = suggestions.sugerir(
+        db, titulo=row.titulo, polo=row.polo, prazo=row.prazo,
+        numero_processo=row.numero_processo,
+    )
+    # Responsável da PASTA no L1 (ao vivo, quando a pasta já foi resolvida).
+    # NÃO pré-preenche nada: vai como informação + opção de 1 clique na UI.
+    if row.linked_lawsuit_id:
+        try:
+            from sqlalchemy import func as _f
+
+            resp = LegalOneApiClient().get_lawsuit_responsible_user(int(row.linked_lawsuit_id))
+            nome = (resp or {}).get("name")
+            if nome:
+                out["pasta_responsavel_nome"] = nome
+                u = (
+                    db.query(LegalOneUser)
+                    .filter(_f.lower(LegalOneUser.name) == nome.strip().lower())
+                    .first()
+                )
+                if u:
+                    out["pasta_responsavel_user_id"] = u.id
+        except Exception:  # noqa: BLE001 — sugestão nunca quebra por causa do L1
+            logger.warning("sugestao: falha ao buscar responsável da pasta (DMI %s)", solicitacao_id)
+    return out
 
 
 # ── Tarefas na pasta (Legal One, sob demanda) ──────────────────────────

@@ -84,7 +84,12 @@ export interface Sugestao {
   responsavel_user_id: number | null;
   responsavel_nome: string | null;
   responsavel_confianca: number | null;
+  // "trabalhista" = regra determinística (dígito J=5 do CNJ → Antônio Uemerson).
+  responsavel_regra: string | null;
   data_agendamento: string | null;
+  // Responsável da PASTA no L1 (informativo; opção de 1 clique — não pré-preenche).
+  pasta_responsavel_nome: string | null;
+  pasta_responsavel_user_id: number | null;
 }
 
 export interface L1Task {

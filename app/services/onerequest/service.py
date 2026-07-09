@@ -383,6 +383,7 @@ class OnerequestService:
             ("Responsável", 24, lambda i: i.get("responsavel_nome")),
             ("Setor", 18, lambda i: i.get("setor")),
             ("Agendada para", 14, lambda i: i.get("data_agendamento")),
+            ("Agendada em", 18, lambda i: _fmt_iso_brt(i.get("scheduled_at"))),
             ("Status no L1", 14, lambda i: i.get("l1_dmi_status_label")),
             ("Tarefa L1", 12, lambda i: i.get("created_task_id")),
             ("Anotação", 50, lambda i: i.get("anotacao")),

@@ -69,6 +69,7 @@ import {
   Play,
   RefreshCw,
   Search,
+  UserCheck,
   X,
 } from "lucide-react";
 import {
@@ -1267,6 +1268,7 @@ export default function OnerequestPage() {
                   <TableHead>Polo</TableHead>
                   <TableHead className="whitespace-nowrap">Disponibilizada</TableHead>
                   <TableHead>Prazo BB</TableHead>
+                  <TableHead className="whitespace-nowrap">Agendada em</TableHead>
                   <TableHead>Responsável</TableHead>
                   <TableHead>Setor</TableHead>
                   <TableHead>Status</TableHead>
@@ -1277,13 +1279,13 @@ export default function OnerequestPage() {
               <TableBody>
                 {loading && items.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={12} className="py-10 text-center">
+                    <TableCell colSpan={13} className="py-10 text-center">
                       <Loader2 className="mx-auto h-6 w-6 animate-spin text-muted-foreground" />
                     </TableCell>
                   </TableRow>
                 ) : items.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={12} className="py-10 text-center text-muted-foreground">
+                    <TableCell colSpan={13} className="py-10 text-center text-muted-foreground">
                       Nenhuma solicitação encontrada.
                     </TableCell>
                   </TableRow>
@@ -1382,6 +1384,25 @@ export default function OnerequestPage() {
                           </span>
                         ) : (
                           sol.prazo
+                        )}
+                      </TableCell>
+                      <TableCell
+                        className="whitespace-nowrap text-xs text-muted-foreground"
+                        title={
+                          sol.scheduled_at
+                            ? `Agendamento realizado em ${fmtDateTime(sol.scheduled_at)}${sol.data_agendamento ? ` · tarefa para ${sol.data_agendamento}` : ""}${sol.scheduled_by_nome ? ` · por ${sol.scheduled_by_nome}` : ""}`
+                            : "Ainda não agendada"
+                        }
+                      >
+                        {sol.scheduled_at ? (
+                          <span>
+                            {fmtDataBR(sol.scheduled_at)}
+                            {sol.data_agendamento && (
+                              <span className="block text-[10px]">tarefa p/ {sol.data_agendamento}</span>
+                            )}
+                          </span>
+                        ) : (
+                          "—"
                         )}
                       </TableCell>
                       <TableCell className="text-sm">
@@ -1544,10 +1565,49 @@ export default function OnerequestPage() {
                   <div>
                     <span className="font-medium">{sugerido ? "Sugestão pré-preenchida" : "Sugestão"}:</span>{" "}
                     setor <b>{sugestao.setor}</b> ({sugestao.setor_confianca})
-                    {sugestao.responsavel_nome && <> · resp. <b>{sugestao.responsavel_nome}</b>{sugestao.responsavel_confianca ? ` (${sugestao.responsavel_confianca}%)` : ""}</>}
+                    {sugestao.responsavel_nome && (
+                      <>
+                        {" "}· resp. <b>{sugestao.responsavel_nome}</b>
+                        {sugestao.responsavel_regra === "trabalhista"
+                          ? " (processo trabalhista — regra fixa)"
+                          : sugestao.responsavel_confianca
+                            ? ` (${sugestao.responsavel_confianca}%)`
+                            : ""}
+                      </>
+                    )}
                     {sugestao.data_agendamento && <> · data <b>{sugestao.data_agendamento}</b></>}
                     . Confira e ajuste antes de agendar.
                   </div>
+                </div>
+              )}
+
+              {/* Responsável da PASTA no L1 — informativo, com opção de 1 clique
+                  (nunca pré-preenche sozinho). */}
+              {sugestao?.pasta_responsavel_nome && (
+                <div className="flex items-center gap-2 rounded-md border border-indigo-200 bg-indigo-50 p-2 text-xs text-indigo-900">
+                  <UserCheck className="h-4 w-4 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    Responsável da <b>pasta</b> no Legal One: <b>{sugestao.pasta_responsavel_nome}</b>
+                  </div>
+                  {(() => {
+                    const pu = sugestao.pasta_responsavel_user_id
+                      ? users.find((x) => x.id === sugestao.pasta_responsavel_user_id)
+                      : null;
+                    return pu ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 shrink-0 border-indigo-300 px-2 text-[11px] text-indigo-800 hover:bg-indigo-100"
+                        onClick={() => setEditResponsavelExt(String(pu.external_id))}
+                      >
+                        Usar como responsável
+                      </Button>
+                    ) : (
+                      <span className="shrink-0 text-[10px] text-indigo-700/70" title="Esse nome não está no catálogo de usuários do Flow">
+                        fora do catálogo
+                      </span>
+                    );
+                  })()}
                 </div>
               )}
 

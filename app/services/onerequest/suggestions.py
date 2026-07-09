@@ -41,6 +41,17 @@ RESPONSAVEL_POR_SETOR: dict[str, tuple[str, int]] = {
 # data_agendamento sugerida = prazo do BB − N dias (moda do histórico).
 DATA_OFFSET_DIAS = 4
 
+# Regra DETERMINÍSTICA (2026-07-09): processo TRABALHISTA (dígito J=5 do CNJ,
+# NNNNNNN-DD.AAAA.J.TR.OOOO) é sempre direcionado pro Antônio Uemerson —
+# sobrepõe o responsável modal do setor. Busca tolerante a acento/caixa.
+RESPONSAVEL_TRABALHISTA_LIKE = "%uemerson%"
+_CNJ_JUSTICA_RX = re.compile(r"\d{7}-?\d{2}\.?\d{4}\.?(\d)\.")
+
+
+def _cnj_trabalhista(numero_processo: Optional[str]) -> bool:
+    m = _CNJ_JUSTICA_RX.search((numero_processo or "").strip())
+    return bool(m) and m.group(1) == "5"
+
 
 def sugerir_setor(titulo: Optional[str], polo: Optional[str]) -> tuple[str, bool]:
     """Retorna (setor, confianca_alta)."""
@@ -71,20 +82,41 @@ def sugerir_data(prazo: Optional[str]) -> Optional[str]:
     return max(sugerida, hoje).strftime("%d/%m/%Y")
 
 
-def sugerir(db: Session, *, titulo: Optional[str], polo: Optional[str], prazo: Optional[str]) -> dict:
+def sugerir(
+    db: Session,
+    *,
+    titulo: Optional[str],
+    polo: Optional[str],
+    prazo: Optional[str],
+    numero_processo: Optional[str] = None,
+) -> dict:
     setor, setor_forte = sugerir_setor(titulo, polo)
-    resp_id = resp_nome = resp_conf = None
-    regra_resp = RESPONSAVEL_POR_SETOR.get(setor)
-    if regra_resp:
-        nome, conf = regra_resp
-        u = db.query(LegalOneUser).filter(LegalOneUser.name == nome).first()
+    resp_id = resp_nome = resp_conf = resp_regra = None
+
+    # Regra determinística primeiro: trabalhista (J=5) → Antônio Uemerson.
+    if _cnj_trabalhista(numero_processo):
+        u = (
+            db.query(LegalOneUser)
+            .filter(LegalOneUser.name.ilike(RESPONSAVEL_TRABALHISTA_LIKE), LegalOneUser.is_active.is_(True))
+            .first()
+        )
         if u:
-            resp_id, resp_nome, resp_conf = u.id, u.name, conf
+            resp_id, resp_nome, resp_conf, resp_regra = u.id, u.name, 100, "trabalhista"
+
+    if resp_id is None:
+        regra_resp = RESPONSAVEL_POR_SETOR.get(setor)
+        if regra_resp:
+            nome, conf = regra_resp
+            u = db.query(LegalOneUser).filter(LegalOneUser.name == nome).first()
+            if u:
+                resp_id, resp_nome, resp_conf = u.id, u.name, conf
+
     return {
         "setor": setor,
         "setor_confianca": "alta" if setor_forte else "baixa",
         "responsavel_user_id": resp_id,
         "responsavel_nome": resp_nome,
         "responsavel_confianca": resp_conf,
+        "responsavel_regra": resp_regra,
         "data_agendamento": sugerir_data(prazo),
     }
