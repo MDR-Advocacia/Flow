@@ -45,6 +45,15 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
 import UserSelector, { SelectableUser } from "@/components/ui/UserSelector";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
@@ -645,18 +654,42 @@ export default function OnerequestPage() {
     }
   };
 
-  const enviarTeams = async (g: AlertaResponsavel) => {
-    if (g.responsavel_user_id == null) return;
-    setEnviandoTeams(g.responsavel_user_id);
+  // Picker "Alerta Teams": pra quem notificar (multiselect; default = o
+  // responsável principal do grupo, quando endereçável).
+  const [teamsPickerFor, setTeamsPickerFor] = useState<string | null>(null);
+  const [teamsSel, setTeamsSel] = useState<Set<number>>(new Set());
+
+  const grupoKey = (g: AlertaResponsavel) => String(g.responsavel_user_id ?? g.responsavel_nome);
+
+  const abrirTeamsPicker = (g: AlertaResponsavel) => {
+    const k = grupoKey(g);
+    if (teamsPickerFor === k) {
+      setTeamsPickerFor(null);
+      return;
+    }
+    // Default: o responsável principal já marcado (se dá pra mandar pra ele).
+    setTeamsSel(new Set(g.responsavel_user_id && g.teams_disponivel ? [g.responsavel_user_id] : []));
+    setTeamsPickerFor(k);
+  };
+
+  const teamsEnderecavel = (g: AlertaResponsavel, email?: string | null) => {
+    const dom = (g.teams_email_domain || "").toLowerCase();
+    return !!dom && !!email && email.trim().toLowerCase().endsWith("@" + dom);
+  };
+
+  const enviarTeams = async (g: AlertaResponsavel, destinatarios: number[]) => {
+    if (!destinatarios.length) return;
+    setEnviandoTeams(g.responsavel_user_id ?? -1);
     try {
       // Token do Graph no nome da operadora logada (MSAL, silencioso quando possível).
       const token = await getGraphTokenForTeams(user?.email ?? "");
-      const r = await enviarAlertaTeams(g.responsavel_user_id, token);
+      const r = await enviarAlertaTeams(g.responsavel_user_id, token, destinatarios);
       toast({
-        title: r.ok ? "Enviado no Teams" : "Não enviado",
+        title: r.ok ? "Enviado no Teams" : r.resultados?.some((x) => x.ok) ? "Enviado parcialmente" : "Não enviado",
         description: r.mensagem,
         variant: r.ok ? undefined : "destructive",
       });
+      if (r.resultados?.some((x) => x.ok)) setTeamsPickerFor(null);
     } catch (e) {
       toast({
         title: "Erro no Teams",
@@ -1390,7 +1423,7 @@ export default function OnerequestPage() {
                         className="whitespace-nowrap text-xs text-muted-foreground"
                         title={
                           sol.scheduled_at
-                            ? `Agendamento realizado em ${fmtDateTime(sol.scheduled_at)}${sol.data_agendamento ? ` · tarefa para ${sol.data_agendamento}` : ""}${sol.scheduled_by_nome ? ` · por ${sol.scheduled_by_nome}` : ""}`
+                            ? `Agendamento realizado em ${fmtDateTime(sol.scheduled_at)}${sol.data_agendamento ? ` · tarefa para ${toBRDate(sol.data_agendamento)}` : ""}${sol.scheduled_by_nome ? ` · por ${sol.scheduled_by_nome}` : ""}`
                             : "Ainda não agendada"
                         }
                       >
@@ -1398,14 +1431,14 @@ export default function OnerequestPage() {
                           <span>
                             {fmtDataBR(sol.scheduled_at)}
                             {sol.data_agendamento && (
-                              <span className="block text-[10px]">tarefa p/ {sol.data_agendamento}</span>
+                              <span className="block text-[10px]">tarefa p/ {toBRDate(sol.data_agendamento)}</span>
                             )}
                           </span>
                         ) : sol.data_agendamento ? (
                           // DMI antiga (agendada fora do Flow): a fonte não registra
                           // QUANDO o agendamento foi feito — mostra a data da tarefa.
                           <span title="Agendada antes do Flow registrar o horário do ato — mostrando a data da tarefa agendada">
-                            tarefa p/ {sol.data_agendamento}
+                            tarefa p/ {toBRDate(sol.data_agendamento)}
                           </span>
                         ) : (
                           "—"
@@ -1989,19 +2022,16 @@ export default function OnerequestPage() {
                       {g.responsavel_nome} <span className="text-xs text-muted-foreground">· {g.count} DMI(s)</span>
                     </span>
                     <div className="flex gap-2">
-                      {g.teams_disponivel && (
+                      {(g.teams_enabled ?? g.teams_disponivel) && (
                         <Button
                           size="sm"
-                          onClick={() => enviarTeams(g)}
-                          disabled={enviandoTeams === g.responsavel_user_id}
-                          title={`Manda DM no Teams para ${g.responsavel_email}`}
+                          variant={teamsPickerFor === grupoKey(g) ? "secondary" : "default"}
+                          onClick={() => abrirTeamsPicker(g)}
+                          disabled={enviandoTeams != null}
+                          title="Escolher quem notificar no Teams (o responsável já vem marcado)"
                         >
-                          {enviandoTeams === g.responsavel_user_id ? (
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          ) : (
-                            <Bell className="mr-2 h-4 w-4" />
-                          )}
-                          Enviar no Teams
+                          <Bell className="mr-2 h-4 w-4" />
+                          Alerta Teams
                         </Button>
                       )}
                       <Button size="sm" variant="outline" onClick={() => copiarMensagem(g.mensagem)}>
@@ -2010,6 +2040,78 @@ export default function OnerequestPage() {
                       </Button>
                     </div>
                   </div>
+
+                  {/* Picker de destinatários (multiselect; default = responsável) */}
+                  {teamsPickerFor === grupoKey(g) && (
+                    <div className="mb-2 rounded-md border bg-muted/20 p-2">
+                      <div className="mb-1 text-xs font-medium text-muted-foreground">
+                        Notificar no Teams ({teamsSel.size} selecionado/s) — a DM sai no seu nome
+                      </div>
+                      <Command className="rounded-md border bg-background">
+                        <CommandInput placeholder="Buscar colaborador…" />
+                        <CommandList className="max-h-44">
+                          <CommandEmpty>Ninguém encontrado.</CommandEmpty>
+                          <CommandGroup>
+                            {[...users]
+                              .sort((a, b) => {
+                                const ea = teamsEnderecavel(g, a.email) ? 0 : 1;
+                                const eb = teamsEnderecavel(g, b.email) ? 0 : 1;
+                                return ea - eb || a.name.localeCompare(b.name);
+                              })
+                              .map((u) => {
+                                const ok = teamsEnderecavel(g, u.email);
+                                const marcado = teamsSel.has(u.id);
+                                return (
+                                  <CommandItem
+                                    key={u.id}
+                                    value={u.name}
+                                    disabled={!ok}
+                                    onSelect={() =>
+                                      setTeamsSel((s) => {
+                                        const n = new Set(s);
+                                        n.has(u.id) ? n.delete(u.id) : n.add(u.id);
+                                        return n;
+                                      })
+                                    }
+                                  >
+                                    <Checkbox checked={marcado} className="mr-2" />
+                                    <span className="min-w-0 flex-1 truncate">
+                                      {u.name}
+                                      {g.responsavel_user_id === u.id && (
+                                        <span className="ml-1 text-[10px] text-sky-700">(responsável)</span>
+                                      )}
+                                    </span>
+                                    {!ok && (
+                                      <span className="ml-2 shrink-0 text-[10px] text-muted-foreground">
+                                        sem Teams corporativo
+                                      </span>
+                                    )}
+                                  </CommandItem>
+                                );
+                              })}
+                          </CommandGroup>
+                        </CommandList>
+                      </Command>
+                      <div className="mt-2 flex justify-end gap-2">
+                        <Button size="sm" variant="ghost" onClick={() => setTeamsPickerFor(null)}>
+                          Cancelar
+                        </Button>
+                        <Button
+                          size="sm"
+                          disabled={teamsSel.size === 0 || enviandoTeams != null}
+                          onClick={() => enviarTeams(g, [...teamsSel])}
+                        >
+                          {enviandoTeams === (g.responsavel_user_id ?? -1) ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <Bell className="mr-2 h-4 w-4" />
+                          )}
+                          Enviar ({teamsSel.size})
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
                   <pre className="whitespace-pre-wrap break-words rounded bg-muted/50 p-2 text-xs">{g.mensagem}</pre>
                 </div>
               ))}

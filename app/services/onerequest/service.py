@@ -72,6 +72,14 @@ def _brt_date(dt: Optional[datetime]) -> Optional[date]:
     return dt.astimezone(_BRT).date()
 
 
+def _data_br(s: Optional[str]) -> Optional[str]:
+    """Data solta em texto → DD/MM/YYYY. A fonte grava data_agendamento ora
+    como ISO (2026-02-20), ora já em BR — normaliza pro padrão da casa."""
+    t = (s or "").strip()
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", t)
+    return f"{m.group(3)}/{m.group(2)}/{m.group(1)}" if m else (t or None)
+
+
 def _fmt_iso_brt(iso: Optional[str]) -> Optional[str]:
     if not iso:
         return None
@@ -382,7 +390,7 @@ class OnerequestService:
             ("Desfecho", 12, lambda i: desfecho_lbl.get(i.get("desfecho") or "", "")),
             ("Responsável", 24, lambda i: i.get("responsavel_nome")),
             ("Setor", 18, lambda i: i.get("setor")),
-            ("Agendada para", 14, lambda i: i.get("data_agendamento")),
+            ("Agendada para", 14, lambda i: _data_br(i.get("data_agendamento"))),
             ("Agendada em", 18, lambda i: _fmt_iso_brt(i.get("scheduled_at"))),
             ("Status no L1", 14, lambda i: i.get("l1_dmi_status_label")),
             ("Tarefa L1", 12, lambda i: i.get("created_task_id")),
@@ -1211,12 +1219,18 @@ class OnerequestService:
                 "DMI pra justificar. Obrigada!"
             )
             email = emails.get(key)
+            from app.core.config import settings as _s
+
             out.append(
                 {
                     "responsavel_user_id": key or None,
                     "responsavel_nome": nome,
                     "responsavel_email": email,
                     "teams_disponivel": self._teams_disponivel(email),
+                    # Flag global + domínio: o front usa pra exibir o botão
+                    # "Alerta Teams" (multiselect) e marcar não-endereçáveis.
+                    "teams_enabled": bool(_s.teams_alert_enabled),
+                    "teams_email_domain": (_s.teams_corporate_email_domain or "").strip().lower() or None,
                     "count": len(lst),
                     "mensagem": mensagem,
                 }
@@ -1235,10 +1249,20 @@ class OnerequestService:
         dominio = (settings.teams_corporate_email_domain or "").strip().lower()
         return bool(email) and bool(dominio) and email.strip().lower().endswith("@" + dominio)
 
-    def enviar_alerta_teams(self, responsavel_user_id: int, graph_token: str) -> dict:
+    def enviar_alerta_teams(
+        self,
+        responsavel_user_id: Optional[int],
+        graph_token: str,
+        destinatarios_user_ids: Optional[list[int]] = None,
+    ) -> dict:
         """Manda a DM de alerta 'vence hoje' no Teams via Microsoft Graph, com o
         token DELEGADO da operadora (a mensagem sai NO NOME dela). Recalcula a
-        mensagem no servidor (não confia no texto do cliente). Passos: /me ->
+        mensagem no servidor (não confia no texto do cliente).
+
+        MULTISELECT: `destinatarios_user_ids` permite notificar OUTRAS pessoas
+        além do responsável do grupo (ex.: supervisora) — default = o próprio
+        responsável. A mensagem é a do GRUPO (as DMIs daquele responsável); cada
+        destinatário recebe a mesma DM. Passos por destinatário:
         /users/{email} -> POST /chats (1:1) -> POST /chats/{id}/messages."""
         import html
 
@@ -1257,80 +1281,110 @@ class OnerequestService:
         g = grupos.get(responsavel_user_id)
         if not g:
             return {"ok": False, "mensagem": "Nenhuma DMI vencendo hoje para esse responsável."}
-        if not g.get("teams_disponivel"):
-            return {
-                "ok": False,
-                "mensagem": "Responsável sem e-mail corporativo M365 — use Copiar e envie manualmente.",
-            }
 
-        email = g["responsavel_email"]
+        dest_ids = [int(x) for x in (destinatarios_user_ids or []) if x]
+        if not dest_ids and responsavel_user_id:
+            dest_ids = [int(responsavel_user_id)]
+        if not dest_ids:
+            return {"ok": False, "mensagem": "Escolha ao menos um destinatário."}
+
+        # Resolve nome/e-mail locais dos destinatários (uma query).
+        dest_rows = {
+            u.id: (u.name, u.email)
+            for u in self.db.query(LegalOneUser.id, LegalOneUser.name, LegalOneUser.email)
+            .filter(LegalOneUser.id.in_(dest_ids))
+        }
+
         headers = {
             "Authorization": f"Bearer {graph_token}",
             "Content-Type": "application/json",
         }
+        content = html.escape(g["mensagem"]).replace("\n", "<br>")
+
+        # /me uma vez só (a operadora que envia).
         try:
             me = requests.get(f"{GRAPH}/me?$select=id", headers=headers, timeout=15)
             me.raise_for_status()
             my_id = me.json().get("id")
+        except Exception as e:  # noqa: BLE001
+            logger.error("OneRequest Teams/Graph: falha no /me: %s", e)
+            return {"ok": False, "mensagem": "Sessão do Teams inválida/expirada. Tente de novo."}
 
-            usr = requests.get(
-                f"{GRAPH}/users/{email}?$select=id", headers=headers, timeout=15
-            )
-            if usr.status_code == 404:
-                return {
-                    "ok": False,
-                    "mensagem": f"{g['responsavel_nome']} não tem conta no Teams da empresa.",
-                }
-            usr.raise_for_status()
-            target_id = usr.json().get("id")
+        resultados: list[dict] = []
+        for uid in dest_ids:
+            nome, email = dest_rows.get(uid, (f"#{uid}", None))
+            if not self._teams_disponivel(email):
+                resultados.append(
+                    {"user_id": uid, "nome": nome, "ok": False,
+                     "mensagem": "sem e-mail corporativo M365 — use Copiar"}
+                )
+                continue
+            try:
+                usr = requests.get(
+                    f"{GRAPH}/users/{email}?$select=id", headers=headers, timeout=15
+                )
+                if usr.status_code == 404:
+                    resultados.append(
+                        {"user_id": uid, "nome": nome, "ok": False,
+                         "mensagem": "não tem conta no Teams da empresa"}
+                    )
+                    continue
+                usr.raise_for_status()
+                target_id = usr.json().get("id")
 
-            chat = requests.post(
-                f"{GRAPH}/chats",
-                headers=headers,
-                json={
-                    "chatType": "oneOnOne",
-                    "members": [
-                        {
-                            "@odata.type": "#microsoft.graph.aadUserConversationMember",
-                            "roles": ["owner"],
-                            "user@odata.bind": f"{GRAPH}/users('{my_id}')",
-                        },
-                        {
-                            "@odata.type": "#microsoft.graph.aadUserConversationMember",
-                            "roles": ["owner"],
-                            "user@odata.bind": f"{GRAPH}/users('{target_id}')",
-                        },
-                    ],
-                },
-                timeout=20,
-            )
-            chat.raise_for_status()
-            chat_id = chat.json().get("id")
+                chat = requests.post(
+                    f"{GRAPH}/chats",
+                    headers=headers,
+                    json={
+                        "chatType": "oneOnOne",
+                        "members": [
+                            {
+                                "@odata.type": "#microsoft.graph.aadUserConversationMember",
+                                "roles": ["owner"],
+                                "user@odata.bind": f"{GRAPH}/users('{my_id}')",
+                            },
+                            {
+                                "@odata.type": "#microsoft.graph.aadUserConversationMember",
+                                "roles": ["owner"],
+                                "user@odata.bind": f"{GRAPH}/users('{target_id}')",
+                            },
+                        ],
+                    },
+                    timeout=20,
+                )
+                chat.raise_for_status()
+                chat_id = chat.json().get("id")
 
-            content = html.escape(g["mensagem"]).replace("\n", "<br>")
-            msg = requests.post(
-                f"{GRAPH}/chats/{chat_id}/messages",
-                headers=headers,
-                json={"body": {"contentType": "html", "content": content}},
-                timeout=20,
-            )
-            msg.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            detalhe = e.response.text[:300] if e.response is not None else str(e)
-            logger.error("OneRequest Teams/Graph erro p/ %s: %s", email, detalhe)
-            return {"ok": False, "mensagem": f"Falha no Teams (Graph): {detalhe[:160]}"}
-        except Exception as e:
-            logger.error("OneRequest Teams/Graph erro inesperado p/ %s: %s", email, e)
-            return {"ok": False, "mensagem": f"Falha ao enviar pelo Teams: {e}"}
+                msg = requests.post(
+                    f"{GRAPH}/chats/{chat_id}/messages",
+                    headers=headers,
+                    json={"body": {"contentType": "html", "content": content}},
+                    timeout=20,
+                )
+                msg.raise_for_status()
+                resultados.append({"user_id": uid, "nome": nome, "ok": True, "mensagem": "enviado"})
+            except requests.exceptions.HTTPError as e:
+                detalhe = e.response.text[:300] if e.response is not None else str(e)
+                logger.error("OneRequest Teams/Graph erro p/ %s: %s", email, detalhe)
+                resultados.append(
+                    {"user_id": uid, "nome": nome, "ok": False, "mensagem": f"Graph: {detalhe[:120]}"}
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error("OneRequest Teams/Graph erro inesperado p/ %s: %s", email, e)
+                resultados.append({"user_id": uid, "nome": nome, "ok": False, "mensagem": str(e)[:120]})
 
+        enviados = [r["nome"] for r in resultados if r["ok"]]
+        falhas = [f"{r['nome']} ({r['mensagem']})" for r in resultados if not r["ok"]]
+        partes = []
+        if enviados:
+            partes.append(f"Enviado no Teams para: {', '.join(enviados)}.")
+        if falhas:
+            partes.append(f"Falhou: {'; '.join(falhas)}.")
         logger.info(
-            "OneRequest: alerta Teams (Graph) enviado p/ %s (%s DMIs).",
-            email, g["count"],
+            "OneRequest: alerta Teams (Graph) grupo %s — %s ok, %s falha(s).",
+            g["responsavel_nome"], len(enviados), len(falhas),
         )
-        return {
-            "ok": True,
-            "mensagem": f"Alerta enviado no Teams para {g['responsavel_nome']}.",
-        }
+        return {"ok": bool(enviados) and not falhas, "mensagem": " ".join(partes), "resultados": resultados}
 
     def estado(self) -> dict:
         """Heartbeat da última ingestão + farol GLOBAL das DMIs abertas.

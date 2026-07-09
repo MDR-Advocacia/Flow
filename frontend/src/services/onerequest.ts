@@ -189,6 +189,10 @@ export interface AlertaResponsavel {
   responsavel_nome: string;
   responsavel_email: string | null;
   teams_disponivel: boolean;
+  // Flag global + domínio corporativo (mostra o botão "Alerta Teams" e marca
+  // destinatários não-endereçáveis no multiselect).
+  teams_enabled?: boolean;
+  teams_email_domain?: string | null;
   count: number;
   mensagem: string;
 }
@@ -406,14 +410,22 @@ export async function getAlertasVenceHoje(): Promise<AlertaResponsavel[]> {
 
 // Envia o alerta do responsável via Teams (Microsoft Graph). O token delegado
 // (MSAL, no nome da operadora) vai junto e o backend faz a chamada ao Graph.
+export interface EnviarTeamsResultado {
+  user_id: number;
+  nome: string;
+  ok: boolean;
+  mensagem: string;
+}
+
 export async function enviarAlertaTeams(
-  responsavel_user_id: number,
+  responsavel_user_id: number | null,
   graph_token: string,
-): Promise<{ ok: boolean; mensagem: string }> {
+  destinatarios_user_ids?: number[],
+): Promise<{ ok: boolean; mensagem: string; resultados?: EnviarTeamsResultado[] }> {
   return json(
     await apiFetch(`${BASE}/alertas/enviar-teams`, {
       method: "POST",
-      body: JSON.stringify({ responsavel_user_id, graph_token }),
+      body: JSON.stringify({ responsavel_user_id, graph_token, destinatarios_user_ids }),
     }),
   );
 }

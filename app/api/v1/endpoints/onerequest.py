@@ -746,6 +746,10 @@ class AlertaResponsavel(BaseModel):
     responsavel_nome: str
     responsavel_email: Optional[str] = None
     teams_disponivel: bool = False
+    # Flag global + domínio corporativo (o front exibe o botão "Alerta Teams"
+    # e marca destinatários não-endereçáveis).
+    teams_enabled: bool = False
+    teams_email_domain: Optional[str] = None
     count: int
     mensagem: str
 
@@ -761,23 +765,35 @@ def alertas_vence_hoje(db: Session = Depends(get_db)):
 
 
 class EnviarTeamsRequest(BaseModel):
-    responsavel_user_id: int
+    responsavel_user_id: Optional[int] = None
     # Token delegado do Graph (MSAL no front), pra mandar a DM no nome da operadora.
     graph_token: str
+    # MULTISELECT: quem notificar (default = o próprio responsável do grupo).
+    destinatarios_user_ids: Optional[List[int]] = None
+
+
+class EnviarTeamsResultado(BaseModel):
+    user_id: int
+    nome: str
+    ok: bool
+    mensagem: str
 
 
 class EnviarTeamsResponse(BaseModel):
     ok: bool
     mensagem: str
+    resultados: Optional[List[EnviarTeamsResultado]] = None
 
 
 @router.post(
     "/alertas/enviar-teams",
     response_model=EnviarTeamsResponse,
-    summary="Envia o alerta 'vence hoje' do responsável via Teams (Microsoft Graph, no nome da operadora)",
+    summary="Envia o alerta 'vence hoje' do grupo via Teams (Graph, no nome da operadora; multiselect de destinatários)",
     dependencies=[_perm],
 )
 def enviar_alerta_teams(payload: EnviarTeamsRequest, db: Session = Depends(get_db)):
     return OnerequestService(db).enviar_alerta_teams(
-        payload.responsavel_user_id, payload.graph_token
+        payload.responsavel_user_id,
+        payload.graph_token,
+        destinatarios_user_ids=payload.destinatarios_user_ids,
     )

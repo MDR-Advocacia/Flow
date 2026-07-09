@@ -167,6 +167,9 @@ class UserForTaskForm(BaseModel):
     external_id: Optional[int] = None
     name: str
     squads: List[Dict[str, Any]]
+    # E-mail: o OneRequest usa pra marcar quem é endereçável no Teams
+    # (multiselect do "Alerta Teams").
+    email: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -499,6 +502,7 @@ def get_data_for_task_form(db: Session = Depends(get_db)):
             external_id=user.external_id,
             name=user.name,
             squads=[{"id": member.squad.id, "name": member.squad.name} for member in user.squad_members],
+            email=user.email,
         )
         for user in users
     ]
