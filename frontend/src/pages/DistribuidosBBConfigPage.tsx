@@ -20,6 +20,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import EquipesTab from "@/components/distribuidos-bb/EquipesTab";
 import RegrasObservacaoTab from "@/components/distribuidos-bb/RegrasObservacaoTab";
+import GruposAjuizamentoTab from "@/components/distribuidos-bb/GruposAjuizamentoTab";
+import ClassificacoesTab from "@/components/distribuidos-bb/ClassificacoesTab";
+import ValoresPadraoTab from "@/components/distribuidos-bb/ValoresPadraoTab";
 import {
   Escritorio,
   EscritorioPayload,
@@ -264,10 +267,13 @@ export default function DistribuidosBBConfigPage() {
       </div>
 
       <Tabs defaultValue="escritorios">
-        <TabsList>
+        <TabsList className="flex-wrap">
           <TabsTrigger value="escritorios">Escritórios &amp; Filas</TabsTrigger>
           <TabsTrigger value="equipes">Equipes / Envolvidos</TabsTrigger>
           <TabsTrigger value="regras">Regras de Observação</TabsTrigger>
+          <TabsTrigger value="grupos">Grupos de Ajuizamento</TabsTrigger>
+          <TabsTrigger value="classificacoes">Classificações</TabsTrigger>
+          <TabsTrigger value="valores">Valores Padrão</TabsTrigger>
         </TabsList>
 
         <TabsContent value="equipes" className="mt-4">
@@ -276,6 +282,18 @@ export default function DistribuidosBBConfigPage() {
 
         <TabsContent value="regras" className="mt-4">
           <RegrasObservacaoTab />
+        </TabsContent>
+
+        <TabsContent value="grupos" className="mt-4">
+          <GruposAjuizamentoTab />
+        </TabsContent>
+
+        <TabsContent value="classificacoes" className="mt-4">
+          <ClassificacoesTab />
+        </TabsContent>
+
+        <TabsContent value="valores" className="mt-4">
+          <ValoresPadraoTab />
         </TabsContent>
 
         <TabsContent value="escritorios" className="mt-4">

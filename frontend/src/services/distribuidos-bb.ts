@@ -339,3 +339,76 @@ export async function editarRegraObservacao(id: number, payload: RegraObservacao
 export async function removerRegraObservacao(id: number): Promise<{ ok: boolean }> {
   return json(await apiFetch(`${BASE}/config/regras-observacao/${id}`, { method: "DELETE" }));
 }
+
+// ── Classificações / Posições (catálogo) ───────────────────────────────────
+export interface ClassificacaoPayload {
+  nome?: string;
+  situacao?: string | null;
+  participante_tipo?: string | null;
+  position_id_l1?: number | null;
+  ativo?: boolean;
+  ordem?: number;
+}
+export interface ClassificacaoFull extends Classificacao {
+  ativo: boolean;
+  ordem: number;
+}
+export async function criarClassificacao(payload: ClassificacaoPayload): Promise<ClassificacaoFull> {
+  return json(await apiFetch(`${BASE}/config/classificacoes`, { method: "POST", body: JSON.stringify(payload) }));
+}
+export async function editarClassificacao(id: number, payload: ClassificacaoPayload): Promise<ClassificacaoFull> {
+  return json(await apiFetch(`${BASE}/config/classificacoes/${id}`, { method: "PATCH", body: JSON.stringify(payload) }));
+}
+export async function removerClassificacao(id: number): Promise<{ ok: boolean }> {
+  return json(await apiFetch(`${BASE}/config/classificacoes/${id}`, { method: "DELETE" }));
+}
+
+// ── Grupos de Ajuizamento ──────────────────────────────────────────────────
+export interface GrupoMembro {
+  id: number;
+  membro_user_id: number;
+  nome: string | null;
+  classificacao: string;
+}
+export interface GrupoAjuizamento {
+  id: number;
+  nome: string;
+  ativo: boolean;
+  ordem: number;
+  membros: GrupoMembro[];
+}
+export async function listarGruposAjuizamento(): Promise<GrupoAjuizamento[]> {
+  return json(await apiFetch(`${BASE}/config/grupos-ajuizamento`));
+}
+export async function criarGrupoAjuizamento(nome: string): Promise<GrupoAjuizamento> {
+  return json(await apiFetch(`${BASE}/config/grupos-ajuizamento`, { method: "POST", body: JSON.stringify({ nome }) }));
+}
+export async function editarGrupoAjuizamento(id: number, payload: { nome?: string; ativo?: boolean }): Promise<GrupoAjuizamento> {
+  return json(await apiFetch(`${BASE}/config/grupos-ajuizamento/${id}`, { method: "PATCH", body: JSON.stringify(payload) }));
+}
+export async function removerGrupoAjuizamento(id: number): Promise<{ ok: boolean }> {
+  return json(await apiFetch(`${BASE}/config/grupos-ajuizamento/${id}`, { method: "DELETE" }));
+}
+export async function adicionarMembroGrupo(payload: {
+  grupo_id: number;
+  membro_user_id: number;
+  classificacao: string;
+}): Promise<GrupoAjuizamento> {
+  return json(await apiFetch(`${BASE}/config/grupos-ajuizamento/membros`, { method: "POST", body: JSON.stringify(payload) }));
+}
+export async function removerMembroGrupo(id: number): Promise<{ ok: boolean }> {
+  return json(await apiFetch(`${BASE}/config/grupo-membros/${id}`, { method: "DELETE" }));
+}
+
+// ── Valores Padrão ─────────────────────────────────────────────────────────
+export interface ValorPadrao {
+  chave: string;
+  valor: string | null;
+  descricao: string | null;
+}
+export async function listarValores(): Promise<ValorPadrao[]> {
+  return json(await apiFetch(`${BASE}/config/valores`));
+}
+export async function atualizarValores(valores: Record<string, string | null>): Promise<ValorPadrao[]> {
+  return json(await apiFetch(`${BASE}/config/valores`, { method: "PATCH", body: JSON.stringify({ valores }) }));
+}

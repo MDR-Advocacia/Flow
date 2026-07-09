@@ -24,8 +24,11 @@ from app.core.config import settings
 from app.core.dependencies import get_db
 from app.models.distribuidos_bb import (
     BbClassificacao,
+    BbConfig,
     BbEquipeMembro,
     BbEscritorio,
+    BbGrupoAjuizamento,
+    BbGrupoAjuizamentoMembro,
     BbRegraObservacao,
     BbResponsavel,
     BbRun,
@@ -91,6 +94,32 @@ class RegraObservacaoPayload(BaseModel):
     texto: Optional[str] = None
     ativo: Optional[bool] = None
     ordem: Optional[int] = None
+
+
+class ClassificacaoPayload(BaseModel):
+    nome: Optional[str] = None
+    situacao: Optional[str] = None
+    participante_tipo: Optional[str] = None   # Customer | PersonInCharge | OtherParty | ""
+    position_id_l1: Optional[int] = None
+    ativo: Optional[bool] = None
+    ordem: Optional[int] = None
+
+
+class GrupoAjuizamentoPayload(BaseModel):
+    nome: Optional[str] = None
+    ativo: Optional[bool] = None
+    ordem: Optional[int] = None
+
+
+class GrupoMembroPayload(BaseModel):
+    grupo_id: int
+    membro_user_id: int
+    classificacao: str = Field(..., min_length=1)
+    ordem: Optional[int] = None
+
+
+class ValoresPayload(BaseModel):
+    valores: dict[str, Optional[str]] = Field(..., description="Mapa chave→valor a atualizar.")
 
 
 class IngerirPayload(BaseModel):
@@ -579,6 +608,247 @@ def listar_responsaveis_distintos(
         ],
         key=lambda x: (x["nome"] or "").lower(),
     )
+
+
+# ── Classificações / posições (catálogo) ────────────────────────────────
+def _classif_dto(c: BbClassificacao) -> dict[str, Any]:
+    return {
+        "id": c.id, "nome": c.nome, "situacao": c.situacao,
+        "participante_tipo": c.participante_tipo, "position_id_l1": c.position_id_l1,
+        "ativo": c.ativo, "ordem": c.ordem,
+    }
+
+
+@router.post("/config/classificacoes", status_code=201, summary="Cria classificação/posição")
+def criar_classificacao(
+    payload: ClassificacaoPayload,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    if not (payload.nome or "").strip():
+        raise HTTPException(status_code=400, detail="Nome é obrigatório.")
+    maior = db.query(func.max(BbClassificacao.ordem)).scalar()
+    c = BbClassificacao(
+        nome=payload.nome.strip(),
+        situacao=(payload.situacao or "Outros"),
+        participante_tipo=(payload.participante_tipo or None) or None,
+        position_id_l1=payload.position_id_l1,
+        ativo=payload.ativo if payload.ativo is not None else True,
+        ordem=payload.ordem if payload.ordem is not None else (maior or 0) + 1,
+    )
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    return _classif_dto(c)
+
+
+@router.patch("/config/classificacoes/{classif_id}", summary="Edita classificação/posição")
+def editar_classificacao(
+    classif_id: int,
+    payload: ClassificacaoPayload,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    c = db.get(BbClassificacao, classif_id)
+    if c is None:
+        raise HTTPException(status_code=404, detail="Classificação não encontrada.")
+    if payload.nome is not None and payload.nome.strip():
+        c.nome = payload.nome.strip()
+    if payload.situacao is not None:
+        c.situacao = payload.situacao.strip() or None
+    if payload.participante_tipo is not None:
+        c.participante_tipo = payload.participante_tipo.strip() or None
+    if payload.position_id_l1 is not None:
+        c.position_id_l1 = payload.position_id_l1 or None
+    if payload.ativo is not None:
+        c.ativo = payload.ativo
+    if payload.ordem is not None:
+        c.ordem = payload.ordem
+    db.commit()
+    db.refresh(c)
+    return _classif_dto(c)
+
+
+@router.delete("/config/classificacoes/{classif_id}", summary="Remove classificação/posição")
+def remover_classificacao(
+    classif_id: int,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    c = db.get(BbClassificacao, classif_id)
+    if c is None:
+        raise HTTPException(status_code=404, detail="Classificação não encontrada.")
+    db.delete(c)
+    db.commit()
+    return {"ok": True}
+
+
+# ── Grupos de Ajuizamento (duplas alternadas) ────────────────────────────
+def _grupo_dto(db: Session, g: BbGrupoAjuizamento) -> dict[str, Any]:
+    membros = (
+        db.query(BbGrupoAjuizamentoMembro)
+        .filter(BbGrupoAjuizamentoMembro.grupo_id == g.id)
+        .order_by(BbGrupoAjuizamentoMembro.ordem)
+        .all()
+    )
+    nomes = dict(
+        db.query(LegalOneUser.id, LegalOneUser.name)
+        .filter(LegalOneUser.id.in_([m.membro_user_id for m in membros] or [0]))
+        .all()
+    )
+    return {
+        "id": g.id, "nome": g.nome, "ativo": g.ativo, "ordem": g.ordem,
+        "membros": [
+            {"id": m.id, "membro_user_id": m.membro_user_id, "nome": nomes.get(m.membro_user_id),
+             "classificacao": m.classificacao}
+            for m in membros
+        ],
+    }
+
+
+@router.get("/config/grupos-ajuizamento", summary="Grupos de ajuizamento com membros")
+def listar_grupos_ajuizamento(
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    grupos = db.query(BbGrupoAjuizamento).order_by(BbGrupoAjuizamento.ordem, BbGrupoAjuizamento.id).all()
+    return [_grupo_dto(db, g) for g in grupos]
+
+
+@router.post("/config/grupos-ajuizamento", status_code=201, summary="Cria grupo de ajuizamento")
+def criar_grupo_ajuizamento(
+    payload: GrupoAjuizamentoPayload,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    if not (payload.nome or "").strip():
+        raise HTTPException(status_code=400, detail="Nome do grupo é obrigatório.")
+    maior = db.query(func.max(BbGrupoAjuizamento.ordem)).scalar()
+    g = BbGrupoAjuizamento(
+        nome=payload.nome.strip(),
+        ativo=payload.ativo if payload.ativo is not None else True,
+        ordem=payload.ordem if payload.ordem is not None else (maior or 0) + 1,
+    )
+    db.add(g)
+    db.commit()
+    db.refresh(g)
+    return _grupo_dto(db, g)
+
+
+@router.patch("/config/grupos-ajuizamento/{grupo_id}", summary="Edita grupo de ajuizamento")
+def editar_grupo_ajuizamento(
+    grupo_id: int,
+    payload: GrupoAjuizamentoPayload,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    g = db.get(BbGrupoAjuizamento, grupo_id)
+    if g is None:
+        raise HTTPException(status_code=404, detail="Grupo não encontrado.")
+    if payload.nome is not None and payload.nome.strip():
+        g.nome = payload.nome.strip()
+    if payload.ativo is not None:
+        g.ativo = payload.ativo
+    if payload.ordem is not None:
+        g.ordem = payload.ordem
+    db.commit()
+    db.refresh(g)
+    return _grupo_dto(db, g)
+
+
+@router.delete("/config/grupos-ajuizamento/{grupo_id}", summary="Remove grupo de ajuizamento")
+def remover_grupo_ajuizamento(
+    grupo_id: int,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    g = db.get(BbGrupoAjuizamento, grupo_id)
+    if g is None:
+        raise HTTPException(status_code=404, detail="Grupo não encontrado.")
+    db.delete(g)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/config/grupos-ajuizamento/membros", status_code=201, summary="Adiciona membro ao grupo")
+def adicionar_membro_grupo(
+    payload: GrupoMembroPayload,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    g = db.get(BbGrupoAjuizamento, payload.grupo_id)
+    if g is None:
+        raise HTTPException(status_code=404, detail="Grupo não encontrado.")
+    maior = (
+        db.query(func.max(BbGrupoAjuizamentoMembro.ordem))
+        .filter(BbGrupoAjuizamentoMembro.grupo_id == payload.grupo_id)
+        .scalar()
+    )
+    m = BbGrupoAjuizamentoMembro(
+        grupo_id=payload.grupo_id,
+        membro_user_id=payload.membro_user_id,
+        classificacao=payload.classificacao.strip(),
+        ordem=payload.ordem if payload.ordem is not None else (maior or 0) + 1,
+        ativo=True,
+    )
+    db.add(m)
+    db.commit()
+    db.refresh(g)
+    return _grupo_dto(db, g)
+
+
+@router.delete("/config/grupo-membros/{membro_id}", summary="Remove membro de um grupo de ajuizamento")
+def remover_membro_grupo(
+    membro_id: int,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    m = db.get(BbGrupoAjuizamentoMembro, membro_id)
+    if m is None:
+        raise HTTPException(status_code=404, detail="Membro não encontrado.")
+    db.delete(m)
+    db.commit()
+    return {"ok": True}
+
+
+# ── Valores Padrão (bbd_config key/value) ────────────────────────────────
+@router.get("/config/valores", summary="Valores padrão (constantes do módulo)")
+def listar_valores(
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    rows = db.query(BbConfig).order_by(BbConfig.chave).all()
+    return [{"chave": c.chave, "valor": c.valor, "descricao": c.descricao} for c in rows]
+
+
+@router.patch("/config/valores", summary="Atualiza valores padrão")
+def atualizar_valores(
+    payload: ValoresPayload,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    for chave, valor in payload.valores.items():
+        c = db.get(BbConfig, chave)
+        if c is None:
+            c = BbConfig(chave=chave, valor=valor)
+            db.add(c)
+        else:
+            c.valor = valor
+    registrar_evento(db, secao=SECAO_CONFIGURACAO, acao="Valores editados", mensagem=f"{len(payload.valores)} valor(es) padrão atualizado(s).")
+    db.commit()
+    rows = db.query(BbConfig).order_by(BbConfig.chave).all()
+    return [{"chave": c.chave, "valor": c.valor, "descricao": c.descricao} for c in rows]
 
 
 def _regra_dto(r: BbRegraObservacao) -> dict[str, Any]:
