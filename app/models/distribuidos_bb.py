@@ -276,6 +276,11 @@ class BbProcesso(Base):
     )
     escritorio_path = Column(Text, nullable=True)
     observacao = Column(String(40), nullable=True)  # Cadastro | Ajuizamento | Reterceirizado
+    # Grupo de ajuizamento atribuído (rodízio) quando a observação é Ajuizamento
+    grupo_ajuizamento_id = Column(
+        Integer, ForeignKey("bbd_grupos_ajuizamento.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
 
     # Ciclo de vida
     status = Column(String, nullable=False, server_default=PROC_COLETADO, index=True)

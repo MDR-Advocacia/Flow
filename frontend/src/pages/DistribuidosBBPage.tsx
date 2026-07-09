@@ -484,6 +484,30 @@ export default function DistribuidosBBPage() {
                 )}
               </div>
 
+              {/* Envolvidos de equipe (derivados da config: equipe + ajuizamento) */}
+              <div>
+                <h3 className="mb-2 text-sm font-semibold">
+                  Equipe / Envolvidos ({auditoria.envolvidos_equipe?.length ?? 0})
+                </h3>
+                {(auditoria.envolvidos_equipe?.length ?? 0) === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    Nenhum — configure a equipe do responsável (e os grupos de ajuizamento) na tela de Configuração.
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {auditoria.envolvidos_equipe.map((e, i) => (
+                      <div key={i} className="flex items-center gap-2 rounded-md border bg-card px-2.5 py-1.5 text-sm">
+                        <span>{e.nome ?? `#${e.membro_user_id}`}</span>
+                        <Badge variant="secondary">{e.classificacao}</Badge>
+                        {e.origem === "ajuizamento" && (
+                          <Badge className="bg-purple-100 text-purple-700" variant="secondary">ajuizamento</Badge>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               {/* Linha do tempo */}
               <div>
                 <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold">

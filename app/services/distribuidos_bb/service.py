@@ -183,9 +183,15 @@ class DistribuidosBBService:
             for e in p.envolvidos
         ]
         eventos = [self._evento_dto(ev) for ev in p.eventos]
+        # Envolvidos-de-equipe (derivados da config: equipe do responsável +
+        # grupo de ajuizamento atribuído) — como no data.json/aba Envolvidos.
+        from app.services.distribuidos_bb.envolvidos_equipe import montar_envolvidos_equipe
+
+        equipe = montar_envolvidos_equipe(self.db, p)
         return {
             "processo": self._proc_dto(p, nomes),
             "envolvidos": envolvidos,
+            "envolvidos_equipe": equipe,
             "eventos": eventos,
         }
 

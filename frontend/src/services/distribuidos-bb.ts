@@ -97,9 +97,17 @@ export interface Envolvido {
   l1_contact_id: number | null;
 }
 
+export interface EnvolvidoEquipe {
+  membro_user_id: number;
+  nome: string | null;
+  classificacao: string;
+  origem: string; // "equipe" | "ajuizamento"
+}
+
 export interface Auditoria {
   processo: Processo;
   envolvidos: Envolvido[];
+  envolvidos_equipe: EnvolvidoEquipe[];
   eventos: Evento[];
 }
 

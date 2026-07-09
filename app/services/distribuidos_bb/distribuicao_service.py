@@ -15,9 +15,12 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.models.distribuidos_bb import (
+    BbConfig,
     BbDistribuicaoEstado,
     BbEscritorio,
+    BbGrupoAjuizamento,
     BbProcesso,
+    BbRegraObservacao,
     BbResponsavel,
     NIVEL_AVISO,
     NIVEL_SUCESSO,
@@ -25,6 +28,8 @@ from app.models.distribuidos_bb import (
     SECAO_DISTRIBUICAO,
 )
 from app.services.distribuidos_bb.log_service import registrar_evento
+
+_CHAVE_PONTEIRO_AJUIZAMENTO = "ajuizamento_ultimo_indice"
 
 
 def _escolher_escritorio(db: Session, processo: BbProcesso) -> Optional[BbEscritorio]:
@@ -79,14 +84,57 @@ def _proximo_responsavel_rr(db: Session, escritorio: BbEscritorio) -> Optional[i
     return escolhido.user_id
 
 
-def _observacao(processo: BbProcesso, escritorio: BbEscritorio) -> Optional[str]:
-    """Regras de observação (iguais ao script legado)."""
+def _avaliar_observacao(db: Session, processo: BbProcesso, escritorio: BbEscritorio) -> Optional[str]:
+    """Observação decidida pelas REGRAS editáveis (bbd_regras_observacao).
+
+    Avalia as regras ativas por `ordem`; a 1ª que casar (posição, natureza e
+    presença/ausência de CNJ) vence. Sem regra → cai na observação padrão do
+    escritório. Substitui o if/else hardcoded do script legado.
+    """
     posicao = (processo.posicao or "").strip().lower()
-    if posicao == "autor":
-        return "Ajuizamento" if not processo.cnj else "Reterceirizado"
-    if posicao in ("réu", "reu") or (escritorio.criterio_natureza or "").strip().lower() == "trabalhista":
-        return "Cadastro"
+    natureza = (processo.natureza or "").strip().lower()
+    tem_cnj = bool(processo.cnj)
+
+    regras = (
+        db.query(BbRegraObservacao)
+        .filter(BbRegraObservacao.ativo.is_(True))
+        .order_by(BbRegraObservacao.ordem, BbRegraObservacao.id)
+        .all()
+    )
+    for r in regras:
+        if r.criterio_posicao and r.criterio_posicao.strip().lower() != posicao:
+            continue
+        if r.criterio_natureza and r.criterio_natureza.strip().lower() != natureza:
+            continue
+        if r.criterio_cnj == "com" and not tem_cnj:
+            continue
+        if r.criterio_cnj == "sem" and tem_cnj:
+            continue
+        return r.texto
     return escritorio.observacao_padrao
+
+
+def _proximo_grupo_ajuizamento(db: Session) -> Optional[int]:
+    """Rodízio dos grupos de ajuizamento (ponteiro persistido em bbd_config)."""
+    grupos = (
+        db.query(BbGrupoAjuizamento)
+        .filter(BbGrupoAjuizamento.ativo.is_(True))
+        .order_by(BbGrupoAjuizamento.ordem, BbGrupoAjuizamento.id)
+        .all()
+    )
+    if not grupos:
+        return None
+    ponteiro = db.get(BbConfig, _CHAVE_PONTEIRO_AJUIZAMENTO)
+    if ponteiro is None:
+        ponteiro = BbConfig(chave=_CHAVE_PONTEIRO_AJUIZAMENTO, valor="-1")
+        db.add(ponteiro)
+    try:
+        ultimo = int(ponteiro.valor)
+    except (TypeError, ValueError):
+        ultimo = -1
+    proximo = (ultimo + 1) % len(grupos)
+    ponteiro.valor = str(proximo)
+    return grupos[proximo].id
 
 
 def distribuir_processo(db: Session, processo: BbProcesso, *, run_id: Optional[int] = None) -> BbProcesso:
@@ -122,8 +170,14 @@ def distribuir_processo(db: Session, processo: BbProcesso, *, run_id: Optional[i
     processo.escritorio_id = escritorio.id
     processo.escritorio_path = escritorio.escritorio_path
     processo.responsavel_user_id = responsavel_id
-    processo.observacao = _observacao(processo, escritorio)
+    processo.observacao = _avaliar_observacao(db, processo, escritorio)
     processo.status = PROC_DISTRIBUIDO
+
+    # Ajuizamento → atribui o grupo da vez (rodízio), gravado no processo.
+    if (processo.observacao or "").strip().lower() == "ajuizamento":
+        processo.grupo_ajuizamento_id = _proximo_grupo_ajuizamento(db)
+    else:
+        processo.grupo_ajuizamento_id = None
 
     if responsavel_id is None:
         registrar_evento(
