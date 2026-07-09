@@ -130,6 +130,8 @@ export interface StatusL1 {
 export interface Estado {
   last_ingest_at: string | null;
   abertas: number;
+  // Farol GLOBAL das abertas (KPI cards estáticos, independem do filtro).
+  kpis?: Record<string, number>;
 }
 
 export interface L1Autorefresh {

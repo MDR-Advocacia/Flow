@@ -350,7 +350,6 @@ export default function OnerequestPage() {
   const [tab, setTab] = useState<TabKey>("novas");
   const [items, setItems] = useState<OnerequestSolicitacao[]>([]);
   const [total, setTotal] = useState(0);
-  const [kpis, setKpis] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(false);
   const [estado, setEstado] = useState<Estado | null>(null);
   const [autoref, setAutoref] = useState<L1Autorefresh | null>(null);
@@ -478,7 +477,7 @@ export default function OnerequestPage() {
       const resp = await listSolicitacoes(params);
       setItems(resp.items);
       setTotal(resp.total);
-      setKpis(resp.kpis);
+      // KPI cards são estáticos: farol global vem do getEstado (não da lista filtrada).
       getEstado().then(setEstado).catch(() => {});
     } catch (e) {
       toast({ title: "Erro ao carregar", description: String((e as Error).message), variant: "destructive" });
@@ -1041,7 +1040,9 @@ export default function OnerequestPage() {
                   <kpi.icon className="h-5 w-5" />
                 </span>
                 <div className="min-w-0">
-                  <div className="text-2xl font-bold leading-none tabular-nums">{kpis[kpi.key] ?? 0}</div>
+                  {/* Número ESTÁTICO: farol global das abertas (independe do filtro/aba).
+                      O clique só filtra a TABELA (drill-through), sem mexer no número. */}
+                  <div className="text-2xl font-bold leading-none tabular-nums">{estado?.kpis?.[kpi.key] ?? 0}</div>
                   <div className="mt-1 truncate text-xs text-muted-foreground">{kpi.label}</div>
                 </div>
               </CardContent>

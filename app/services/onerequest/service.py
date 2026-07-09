@@ -1332,16 +1332,29 @@ class OnerequestService:
         }
 
     def estado(self) -> dict:
-        """Heartbeat da última ingestão + contagem de abertas (pro aviso da UI)."""
+        """Heartbeat da última ingestão + farol GLOBAL das DMIs abertas.
+
+        Os KPI cards do topo são ESTÁTICOS: mostram sempre o total de cada
+        farol (pendentes/atrasadas/vence hoje/amanhã/fim de semana/futuras) de
+        TODAS as abertas, independente da aba/filtro selecionado na tabela.
+        """
         from app.services.app_settings import get_setting
 
         last = get_setting("onerequest_last_ingest_at")
-        abertas = (
-            self.db.query(OnerequestSolicitacao)
+        hoje = date.today()
+        prazos = (
+            self.db.query(OnerequestSolicitacao.prazo)
             .filter(OnerequestSolicitacao.status_sistema == STATUS_SISTEMA_ABERTO)
-            .count()
+            .all()
         )
-        return {"last_ingest_at": last, "abertas": abertas}
+        _map = {
+            "atrasado": "atrasadas", "vermelho": "hoje", "amarelo": "amanha",
+            "roxo": "fds", "verde": "futuras", "cinza": "sem_prazo",
+        }
+        kpis = {"atrasadas": 0, "hoje": 0, "amanha": 0, "fds": 0, "futuras": 0, "sem_prazo": 0}
+        for (prazo,) in prazos:
+            kpis[_map.get(_farol(_parse_prazo(prazo), hoje), "sem_prazo")] += 1
+        return {"last_ingest_at": last, "abertas": len(prazos), "kpis": kpis}
 
     @staticmethod
     def setores_disponiveis() -> list[str]:

@@ -365,6 +365,8 @@ def opcoes():
 class EstadoResponse(BaseModel):
     last_ingest_at: Optional[str] = None
     abertas: int
+    # Farol GLOBAL das abertas (KPI cards estáticos, independem do filtro).
+    kpis: Dict[str, int] = {}
 
 
 @router.get(
