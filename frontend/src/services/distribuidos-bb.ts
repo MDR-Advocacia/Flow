@@ -193,6 +193,7 @@ export async function dispararColeta(payload: {
   data_inicial?: string;
   data_final?: string;
   confirmar_ciencia: boolean;
+  coletar_envolvidos?: boolean;
 }): Promise<ColetaResposta> {
   return json(await apiFetch(`${BASE}/coletar`, { method: "POST", body: JSON.stringify(payload) }));
 }

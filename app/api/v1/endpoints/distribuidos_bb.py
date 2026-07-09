@@ -85,6 +85,9 @@ class ColetarPayload(BaseModel):
     confirmar_ciencia: bool = Field(
         False, description="Se True (e a trava global permitir), o robô dá ciência (SIM) no BB."
     )
+    coletar_envolvidos: bool = Field(
+        True, description="Também abre a capa do NPJ e captura as Pessoas do Processo (mais lento)."
+    )
 
 
 def _run_dto(run: BbRun) -> dict[str, Any]:
@@ -266,7 +269,11 @@ def coletar(
     thread = threading.Thread(
         target=coleta_service.executar_coleta_background,
         args=(run.id,),
-        kwargs={"data_inicial": payload.data_inicial, "data_final": payload.data_final},
+        kwargs={
+            "data_inicial": payload.data_inicial,
+            "data_final": payload.data_final,
+            "coletar_envolvidos": payload.coletar_envolvidos,
+        },
         daemon=True,
     )
     thread.start()

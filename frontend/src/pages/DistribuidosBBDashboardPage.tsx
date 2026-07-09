@@ -84,6 +84,7 @@ export default function DistribuidosBBDashboardPage() {
   const [dataIni, setDataIni] = useState("");
   const [dataFim, setDataFim] = useState("");
   const [confirmarCiencia, setConfirmarCiencia] = useState(false);
+  const [coletarEnvolvidos, setColetarEnvolvidos] = useState(true);
   const [disparando, setDisparando] = useState(false);
   const [runAtivo, setRunAtivo] = useState<RunResumo | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -140,6 +141,7 @@ export default function DistribuidosBBDashboardPage() {
         data_inicial: dataIni.trim() || undefined,
         data_final: dataFim.trim() || undefined,
         confirmar_ciencia: confirmarCiencia,
+        coletar_envolvidos: coletarEnvolvidos,
       });
       setColetaOpen(false);
       if (resp.aviso_ciencia) {
@@ -345,6 +347,24 @@ export default function DistribuidosBBDashboardPage() {
               <div className="space-y-1">
                 <Label className="text-xs">Data final</Label>
                 <Input placeholder="DD/MM/AAAA" value={dataFim} onChange={(e) => setDataFim(e.target.value)} />
+              </div>
+            </div>
+
+            <div className="flex items-start gap-2 rounded-md border p-3">
+              <Checkbox
+                id="coletar-envolvidos"
+                checked={coletarEnvolvidos}
+                onCheckedChange={(v) => setColetarEnvolvidos(v === true)}
+                className="mt-0.5"
+              />
+              <div className="text-sm">
+                <Label htmlFor="coletar-envolvidos" className="font-medium">
+                  Capturar envolvidos (Pessoas do Processo)
+                </Label>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  Abre a capa do NPJ de cada processo e traz as partes com CPF/CNPJ, MCI e relação com o BB. Deixa a
+                  coleta mais lenta.
+                </p>
               </div>
             </div>
 
