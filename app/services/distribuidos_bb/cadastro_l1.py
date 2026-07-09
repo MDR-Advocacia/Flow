@@ -277,6 +277,25 @@ def resolver_position_id(client: Any, nome: Optional[str]) -> Optional[int]:
     return _catalogo_por_nome(client, "LitigationParticipantPositions").get(_chave(nome))
 
 
+def resolver_contato_por_nome(client: Any, nome: Optional[str]) -> Optional[int]:
+    """Contato (Individual) pelo NOME COMPLETO exato → contactId.
+
+    Usado pro PersonInCharge (responsável). Sem homônimos na base (mesmo
+    padrão dos outros módulos), então pega o 1º match exato.
+    """
+    if not nome or not nome.strip():
+        return None
+    try:
+        lit = nome.strip().replace("'", "''")
+        url = f"{client.base_url}/Individuals?$filter=name eq '{lit}'&$top=1"
+        resp = client._authenticated_request("GET", url)
+        vals = resp.json().get("value", []) if resp.status_code == 200 else []
+        return vals[0].get("id") if vals else None
+    except Exception:  # noqa: BLE001
+        logger.exception("Cadastro: falha ao resolver contato do responsável %r.", nome)
+        return None
+
+
 # ─── Parse da Tramitação (BB) → cidade / UF / órgão ──────────────────────
 
 
@@ -351,10 +370,21 @@ def montar_payload_lawsuit(db, client: Any, processo, *, criar_contatos: bool = 
     else:
         avisos.append("cliente_contact_id não configurado (Valores Padrão).")
 
-    # PersonInCharge (responsável) — resolução user→contato ainda pendente
-    resolucao["responsavel"] = {"user_id": processo.responsavel_user_id, "contactId": None,
-                                "motivo": "mapeamento responsável→contato ainda não definido"}
-    avisos.append("PersonInCharge (responsável) sem contactId — definir como responsável vira contato no L1.")
+    # PersonInCharge (responsável) — contato resolvido pelo NOME COMPLETO.
+    from app.models.legal_one import LegalOneUser
+
+    resp_nome = None
+    resp_contact_id = None
+    if processo.responsavel_user_id:
+        u = db.get(LegalOneUser, processo.responsavel_user_id)
+        resp_nome = u.name if u else None
+        resp_contact_id = resolver_contato_por_nome(client, resp_nome)
+    if resp_contact_id:
+        participantes.append({"type": "PersonInCharge", "contactId": resp_contact_id,
+                              "isMainParticipant": True, "positionId": POSICAO_RESPONSAVEL})
+    else:
+        avisos.append(f"Responsável '{resp_nome or '—'}' sem contato no L1 (PersonInCharge não resolvido).")
+    resolucao["responsavel"] = {"user_id": processo.responsavel_user_id, "nome": resp_nome, "contactId": resp_contact_id}
 
     # OtherParty: envolvidos reais com CPF/CNPJ — EXCETO o próprio cliente (BB).
     doc_cliente = _digitos(_config(db, "cliente_cpf_cnpj"))

@@ -167,7 +167,7 @@ export default function DistribuidosBBPage() {
         <div>
           <h1 className="flex items-center gap-2 text-xl font-semibold">
             <Building2 className="h-6 w-6 shrink-0 text-primary" />
-            Distribuídos BB
+            Cadastro de Processo
           </h1>
           <p className="text-sm text-muted-foreground">Processos capturados no portal do Banco do Brasil e sua auditoria.</p>
         </div>

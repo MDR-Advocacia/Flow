@@ -198,7 +198,7 @@ export default function DistribuidosBBDashboardPage() {
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
             <Building2 className="h-6 w-6 text-[hsl(var(--dunatech-blue))]" />
-            Distribuídos BB — Acompanhamento
+            Cadastro de Processo — Acompanhamento
           </h1>
           <p className="text-sm text-muted-foreground">
             Processos distribuídos do Banco do Brasil: coleta, ciência, distribuição e cadastro no Legal One.

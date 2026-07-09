@@ -121,7 +121,7 @@ export default function Layout({ children }: PropsWithChildren) {
         { to: "/ged-legalone", icon: Upload, label: "Envio em Lote ao GED", requirePermission: 'canScheduleBatch' },
         { to: "/contatos-legalone", icon: Contact, label: "Atualização de Contatos", requirePermission: 'canScheduleBatch' },
         { to: "/cancelamento-duplicadas", icon: CopyX, label: "Cancelar Duplicadas", requirePermission: 'isAdmin' },
-        { to: "/distribuidos-bb/dashboard", icon: Building2, label: "Distribuídos BB", requirePermission: 'canManageDistribuidosBB' },
+        { to: "/distribuidos-bb/dashboard", icon: Building2, label: "Cadastro de Processo", requirePermission: 'canManageDistribuidosBB' },
       ],
     },
     {

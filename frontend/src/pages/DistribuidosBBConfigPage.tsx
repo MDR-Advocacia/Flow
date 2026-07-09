@@ -240,7 +240,7 @@ export default function DistribuidosBBConfigPage() {
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-bold">
             <Settings className="h-6 w-6 text-[hsl(var(--dunatech-blue))]" />
-            Distribuídos BB — Configuração
+            Cadastro de Processo — Configuração
           </h1>
           <p className="text-sm text-muted-foreground">
             Escritórios, filas de responsáveis e regras. Tudo o que era fixo no robô agora é editável aqui, com base no

@@ -45,7 +45,7 @@ const PERMISSOES = [
   { key: "can_use_prazos_iniciais", label: "Prazos Iniciais", abbr: "PI" },
   { key: "can_use_onerequest", label: "OneRequest", abbr: "OR" },
   { key: "can_use_minha_equipe", label: "Minha Equipe", abbr: "ME" },
-  { key: "can_manage_distribuidos_bb", label: "Distribuídos BB", abbr: "DBB" },
+  { key: "can_manage_distribuidos_bb", label: "Cadastro de Processo", abbr: "CP" },
   { key: "notify_onerequest_errors", label: "Notificação OneRequest", abbr: "Notif" },
 ] as const;
 
