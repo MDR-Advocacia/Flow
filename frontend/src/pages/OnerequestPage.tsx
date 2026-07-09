@@ -1401,6 +1401,12 @@ export default function OnerequestPage() {
                               <span className="block text-[10px]">tarefa p/ {sol.data_agendamento}</span>
                             )}
                           </span>
+                        ) : sol.data_agendamento ? (
+                          // DMI antiga (agendada fora do Flow): a fonte não registra
+                          // QUANDO o agendamento foi feito — mostra a data da tarefa.
+                          <span title="Agendada antes do Flow registrar o horário do ato — mostrando a data da tarefa agendada">
+                            tarefa p/ {sol.data_agendamento}
+                          </span>
                         ) : (
                           "—"
                         )}
