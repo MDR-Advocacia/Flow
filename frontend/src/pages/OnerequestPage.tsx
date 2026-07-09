@@ -54,6 +54,7 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import UserSelector, { SelectableUser } from "@/components/ui/UserSelector";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
@@ -75,6 +76,7 @@ import {
   Loader2,
   type LucideIcon,
   Pause,
+  Pencil,
   Play,
   RefreshCw,
   Search,
@@ -654,6 +656,30 @@ export default function OnerequestPage() {
     }
   };
 
+  // Troca INLINE de responsável na tabela (combobox no clique — o operador
+  // ajusta direto, sem abrir o Tratar).
+  const [respEditFor, setRespEditFor] = useState<number | null>(null);
+  const [respSaving, setRespSaving] = useState<number | null>(null);
+
+  const trocarResponsavel = async (sol: OnerequestSolicitacao, u: FormUser) => {
+    setRespSaving(sol.id);
+    try {
+      await updateTratamento(sol.id, { responsavel_user_id: u.id });
+      // Atualiza a linha localmente (sem reload da página inteira).
+      setItems((prev) =>
+        prev.map((it) =>
+          it.id === sol.id ? { ...it, responsavel_user_id: u.id, responsavel_nome: u.name } : it,
+        ),
+      );
+      toast({ title: "Responsável atualizado", description: `${sol.numero_solicitacao} → ${u.name}` });
+    } catch (e) {
+      toast({ title: "Erro ao trocar responsável", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setRespSaving(null);
+      setRespEditFor(null);
+    }
+  };
+
   // Picker "Alerta Teams": pra quem notificar (multiselect; default = o
   // responsável principal do grupo, quando endereçável).
   const [teamsPickerFor, setTeamsPickerFor] = useState<string | null>(null);
@@ -724,22 +750,33 @@ export default function OnerequestPage() {
     setAnotacoes([]);
     setNovaAnotacao("");
 
-    // Sugestão (pré-preenche entradas NOVAS ainda sem tratamento).
+    // Sugestão: pré-preenche SÓ os campos ainda VAZIOS de DMI sem tarefa criada.
+    // Se a DMI já tem responsável/setor/data indicados (pelo operador ou pela
+    // fonte), o campo mostra o valor ATUAL — a sugestão vira só informativa.
+    // (Antes a sugestão sobrescrevia o campo e o modal divergia da tabela.)
     getSugestao(sol.id)
       .then((s) => {
         setSugestao(s);
-        // Pré-preenche os 3 campos com a sugestão em qualquer DMI ainda sem
-        // tarefa criada (o operador confirma/ajusta). Setor, responsável E data.
         const naoAgendada = !sol.created_task_id;
         if (naoAgendada) {
+          let aplicou = false;
           // "N/A" não é setor válido no Select — deixa vazio pro operador escolher.
-          if (s.setor && s.setor !== "N/A") setEditSetor(s.setor);
-          if (s.responsavel_user_id) {
-            const su = users.find((x) => x.id === s.responsavel_user_id);
-            if (su) setEditResponsavelExt(String(su.external_id));
+          if (s.setor && s.setor !== "N/A" && !sol.setor) {
+            setEditSetor(s.setor);
+            aplicou = true;
           }
-          if (s.data_agendamento) setEditData(toISODate(s.data_agendamento));
-          setSugerido(true);
+          if (s.responsavel_user_id && !sol.responsavel_user_id) {
+            const su = users.find((x) => x.id === s.responsavel_user_id);
+            if (su) {
+              setEditResponsavelExt(String(su.external_id));
+              aplicou = true;
+            }
+          }
+          if (s.data_agendamento && !sol.data_agendamento) {
+            setEditData(toISODate(s.data_agendamento));
+            aplicou = true;
+          }
+          setSugerido(aplicou);
         }
       })
       .catch(() => {});
@@ -1445,7 +1482,53 @@ export default function OnerequestPage() {
                         )}
                       </TableCell>
                       <TableCell className="text-sm">
-                        {sol.responsavel_nome ?? <span className="text-muted-foreground">—</span>}
+                        {/* Troca inline: clica no nome (ou no —) e escolhe no combobox. */}
+                        <Popover
+                          open={respEditFor === sol.id}
+                          onOpenChange={(o) => setRespEditFor(o ? sol.id : null)}
+                        >
+                          <PopoverTrigger asChild>
+                            <button
+                              type="button"
+                              className="group inline-flex max-w-[180px] items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-muted/60"
+                              title="Trocar o responsável"
+                              disabled={respSaving === sol.id}
+                            >
+                              {respSaving === sol.id ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                              ) : (
+                                <>
+                                  <span className="truncate">
+                                    {sol.responsavel_nome ?? <span className="text-muted-foreground">—</span>}
+                                  </span>
+                                  <Pencil className="h-3 w-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+                                </>
+                              )}
+                            </button>
+                          </PopoverTrigger>
+                          <PopoverContent className="w-72 p-0" align="start">
+                            <Command>
+                              <CommandInput placeholder="Buscar colaborador…" />
+                              <CommandList className="max-h-56">
+                                <CommandEmpty>Ninguém encontrado.</CommandEmpty>
+                                <CommandGroup>
+                                  {users.map((u) => (
+                                    <CommandItem
+                                      key={u.id}
+                                      value={u.name}
+                                      onSelect={() => trocarResponsavel(sol, u)}
+                                    >
+                                      <span className="min-w-0 flex-1 truncate">{u.name}</span>
+                                      {sol.responsavel_user_id === u.id && (
+                                        <CheckCircle2 className="ml-2 h-3.5 w-3.5 shrink-0 text-emerald-600" />
+                                      )}
+                                    </CommandItem>
+                                  ))}
+                                </CommandGroup>
+                              </CommandList>
+                            </Command>
+                          </PopoverContent>
+                        </Popover>
                       </TableCell>
                       <TableCell className="whitespace-nowrap text-sm">{sol.setor ?? "—"}</TableCell>
                       <TableCell>
@@ -1602,7 +1685,9 @@ export default function OnerequestPage() {
                 <div className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 p-2 text-xs text-sky-900">
                   <Lightbulb className="mt-0.5 h-4 w-4 shrink-0" />
                   <div>
-                    <span className="font-medium">{sugerido ? "Sugestão pré-preenchida" : "Sugestão"}:</span>{" "}
+                    <span className="font-medium">
+                      {sugerido ? "Sugestão pré-preenchida" : "Sugestão do motor (só informativa — o campo mostra o indicado atual)"}:
+                    </span>{" "}
                     setor <b>{sugestao.setor}</b> ({sugestao.setor_confianca})
                     {sugestao.responsavel_nome && (
                       <>
