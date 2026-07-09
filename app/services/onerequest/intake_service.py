@@ -264,11 +264,17 @@ class OnerequestIntakeService:
         }
 
         # A fonte guarda o responsável por NOME — resolve pra id do LegalOneUser.
+        # SÓ ATIVOS: se a fonte apontar ex-colaborador, deixa vazio (o L1 recusa
+        # tarefa com participante inativo; melhor o operador escolher).
         nome_to_id: dict = {}
         if espelhar:
             from app.models.legal_one import LegalOneUser
 
-            for uid, uname in self.db.query(LegalOneUser.id, LegalOneUser.name).all():
+            for uid, uname in (
+                self.db.query(LegalOneUser.id, LegalOneUser.name)
+                .filter(LegalOneUser.is_active.is_(True))
+                .all()
+            ):
                 if uname:
                     nome_to_id.setdefault(uname.strip().lower(), uid)
 
