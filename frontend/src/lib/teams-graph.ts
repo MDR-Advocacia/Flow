@@ -2,6 +2,13 @@
 // pra mandar a DM de alerta no Teams. Single-tenant MDR/Duna — clientId/tenantId
 // são identificadores PÚBLICOS de SPA (não são segredo); o secret NÃO é usado
 // neste fluxo delegado. Override por env (VITE_ENTRA_*) se um dia mudar.
+//
+// ⚠️ COOP: as páginas de login da Microsoft mandam Cross-Origin-Opener-Policy
+// e CORTAM o window.opener — a aba-mãe não consegue monitorar o popup. Por isso
+// NÃO usamos acquireTokenPopup (que depende desse monitoramento e ainda mistura
+// interação popup×redirect, dando `no_token_request_cache`). Em vez disso: o
+// POPUP roda o fluxo REDIRECT inteiro (inicia + conclui na própria janela) e
+// devolve o token por BroadcastChannel; a aba-mãe só abre e escuta.
 
 import {
   InteractionRequiredAuthError,
@@ -16,26 +23,26 @@ export const ENTRA_TENANT_ID =
   "384ac778-bc7e-48ef-963c-d545a96997b8";
 
 // Permissões consentidas no app do Entra (delegadas).
-const SCOPES = ["Chat.Create", "ChatMessage.Send", "User.Read.All"];
+export const TEAMS_SCOPES = ["Chat.Create", "ChatMessage.Send", "User.Read.All"];
 
-// Canal aba-mãe ↔ popup de retorno (mesma origem). O popup troca o código por
-// token e manda o resultado por aqui — porque o COOP das páginas de login da
-// Microsoft corta o window.opener e o monitoramento interno do MSAL não fecha.
+// Canal aba-mãe ↔ popup (mesma origem) pra devolver o token — window.opener
+// morre pelo COOP, mas BroadcastChannel entre janelas da mesma origem funciona.
 export const MSAL_TEAMS_CHANNEL = "flow-msal-teams-auth";
 
 // Config compartilhado app ↔ página de retorno (msal-redirect.ts).
-// - redirectUri: 2ª entry do Vite (página que RODA o MSAL e completa o fluxo).
-// - cache em localStorage (INCLUSIVE o temporário): o code_verifier do PKCE
-//   precisa ser visível pro popup — sessionStorage é por-janela e deixava o
-//   handleRedirectPromise do popup sem estado pra trocar o código por token.
-// Precisa estar registrada como redirect URI SPA no Entra
-// (…/msal-redirect.html nos dois domínios flow.*).
+// - redirectUri: a página estática/bundlada msal-redirect.html (2ª entry Vite),
+//   registrada como redirect URI SPA no Entra nos dois domínios flow.*.
+// - cache em localStorage (inclusive o temporário do PKCE): o popup recarrega ao
+//   voltar da Microsoft; localStorage sobrevive à navegação e é visível à aba-mãe.
+// - navigateToLoginRequestUrl=false: senão o MSAL re-navega pro ?flow=teams
+//   depois de concluir e entra em loop.
 export function msalConfig() {
   return {
     auth: {
       clientId: ENTRA_CLIENT_ID,
       authority: `https://login.microsoftonline.com/${ENTRA_TENANT_ID}`,
       redirectUri: `${window.location.origin}/msal-redirect.html`,
+      navigateToLoginRequestUrl: false,
     },
     cache: {
       cacheLocation: "localStorage" as const,
@@ -54,17 +61,27 @@ async function getMsal(): Promise<PublicClientApplication> {
   return _msal;
 }
 
-/**
- * Popup + escuta do canal: resolve com o PRIMEIRO que entregar o token —
- * o fluxo interno do MSAL (quando o opener sobrevive) OU o BroadcastChannel
- * (quando o COOP corta o opener e é o popup que completa a troca).
- * A rejeição do caminho interno NÃO derruba a espera (o canal ainda pode
- * entregar); só o timeout encerra de vez.
- */
-function tokenViaPopup(msal: PublicClientApplication, loginHint: string): Promise<string> {
+// Warm-up opcional (chamar no mount da página) — deixa o initialize pronto pra
+// o clique do botão abrir o popup sem await longo antes (bloqueador de popup).
+export function warmupTeamsAuth(): void {
+  getMsal().catch(() => undefined);
+}
+
+// Abre o popup no fluxo REDIRECT e resolve com o token que ele devolver pelo
+// canal. Aberto SÍNCRONO no gesto do clique (não pode vir depois de awaits
+// longos, senão o navegador bloqueia).
+function tokenViaPopup(loginHint: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    let done = false;
+    const url =
+      `${window.location.origin}/msal-redirect.html` +
+      `?flow=teams&login_hint=${encodeURIComponent(loginHint || "")}`;
+    const popup = window.open(url, "flow-teams-auth", "width=520,height=680");
+    if (!popup) {
+      reject(new Error("O navegador bloqueou o popup de login. Permita popups para este site e tente de novo."));
+      return;
+    }
     const bc = new BroadcastChannel(MSAL_TEAMS_CHANNEL);
+    let done = false;
     const finish = (fn: () => void) => {
       if (done) return;
       done = true;
@@ -81,21 +98,13 @@ function tokenViaPopup(msal: PublicClientApplication, loginHint: string): Promis
       if (d?.accessToken) finish(() => resolve(d.accessToken!));
       else if (d?.error) finish(() => reject(new Error(d.error)));
     };
-    msal
-      .acquireTokenPopup({ scopes: SCOPES, loginHint })
-      .then((r) => finish(() => resolve(r.accessToken)))
-      .catch((e) => {
-        // Ex.: "user_cancelled" fantasma quando o COOP faz o popup parecer
-        // fechado. O popup real segue vivo e entrega pelo canal — só loga.
-        // eslint-disable-next-line no-console
-        console.warn("[teams-graph] fluxo interno do popup falhou; aguardando o canal:", e);
-      });
   });
 }
 
 /**
  * Token do Graph pra agir COMO a operadora (loginHint = e-mail dela).
- * Tenta silencioso; cai pra popup só se precisar de interação/consentimento.
+ * Silencioso quando há conta em cache (sem popup); popup só na 1ª vez / quando
+ * o refresh token expira. Depois do 1º login o cache (localStorage) persiste.
  */
 export async function getGraphTokenForTeams(loginHint: string): Promise<string> {
   const msal = await getMsal();
@@ -104,16 +113,17 @@ export async function getGraphTokenForTeams(loginHint: string): Promise<string> 
     accounts.find((a) => a.username?.toLowerCase() === loginHint.toLowerCase()) ||
     accounts[0];
 
+  // Sem conta em cache → precisa de interação: abre o popup direto (sem
+  // ssoSilent, que é lento e faria o window.open cair no bloqueador).
+  if (!account) {
+    return tokenViaPopup(loginHint);
+  }
   try {
-    if (account) {
-      const r = await msal.acquireTokenSilent({ scopes: SCOPES, account });
-      return r.accessToken;
-    }
-    const r = await msal.ssoSilent({ scopes: SCOPES, loginHint });
+    const r = await msal.acquireTokenSilent({ scopes: TEAMS_SCOPES, account });
     return r.accessToken;
   } catch (e) {
-    if (e instanceof InteractionRequiredAuthError || !account) {
-      return tokenViaPopup(msal, loginHint);
+    if (e instanceof InteractionRequiredAuthError) {
+      return tokenViaPopup(loginHint);
     }
     throw e;
   }

@@ -58,7 +58,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import UserSelector, { SelectableUser } from "@/components/ui/UserSelector";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
-import { getGraphTokenForTeams } from "@/lib/teams-graph";
+import { getGraphTokenForTeams, warmupTeamsAuth } from "@/lib/teams-graph";
 import {
   AlertTriangle,
   Bell,
@@ -523,6 +523,7 @@ export default function OnerequestPage() {
     getOptions().then((o) => setSetores(o.setores)).catch(() => {});
     getFormUsers().then(setUsers).catch(() => {});
     getL1Autorefresh().then(setAutoref).catch(() => {});
+    warmupTeamsAuth(); // deixa o MSAL pronto → popup do Teams abre sem atraso
   }, []);
 
   // Drill-through do dashboard: lê os filtros da URL uma vez, aplica como chips
