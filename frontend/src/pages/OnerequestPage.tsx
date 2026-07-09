@@ -399,8 +399,10 @@ export default function OnerequestPage() {
   const [prazoAte, setPrazoAte] = useState("");
   const [exporting, setExporting] = useState(false);
 
-  // Filtro por farol vindo do clique nos KPI cards (toggle). Sobrepõe só o
-  // farol, mantendo a base da aba — assim a contagem do card bate com a tabela.
+  // Filtro por farol vindo do clique nos KPI cards (toggle). Os cards são
+  // GLOBAIS (todas as abertas), então o clique também muda a base pra
+  // "Todas (abertas)" — senão o farol combinaria com a aba atual (ex.:
+  // "Novas" ∩ atrasadas = vazio) e a tabela não bateria com o número do card.
   const [farolFilter, setFarolFilter] = useState<Farol | null>(null);
 
   // Drill-through vindo do dashboard (via URL): setor, responsável e status de
@@ -1010,7 +1012,14 @@ export default function OnerequestPage() {
           const ativo = farolFilter === kpi.farol;
           const toggle = () => {
             setPage(1);
-            setFarolFilter((cur) => (cur === kpi.farol ? null : kpi.farol));
+            if (farolFilter === kpi.farol) {
+              setFarolFilter(null); // limpa o filtro, mantém a aba onde está
+            } else {
+              // O número do card é GLOBAL → a tabela precisa da base "Todas
+              // (abertas)" pra listar exatamente aquelas DMIs.
+              setTab("todas");
+              setFarolFilter(kpi.farol);
+            }
           };
           return (
             <Card
