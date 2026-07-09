@@ -14,6 +14,7 @@ interface User {
   can_use_onerequest?: boolean;
   can_use_minha_equipe?: boolean;
   minha_equipe_equipes?: string[];
+  can_manage_distribuidos_bb?: boolean;
   must_change_password?: boolean;
   is_active?: boolean;
 }
@@ -25,6 +26,7 @@ interface TokenData {
   can_use_publications: boolean;
   can_use_prazos_iniciais?: boolean;
   can_use_onerequest?: boolean;
+  can_manage_distribuidos_bb?: boolean;
   must_change_password: boolean;
   exp: number;
 }
@@ -44,6 +46,7 @@ interface AuthContextType {
   canUseOnerequest: boolean;
   canUseMinhaEquipe: boolean;
   minhaEquipeEquipes: string[];
+  canManageDistribuidosBB: boolean;
   isAdmin: boolean;
   refreshMe: () => Promise<void>;
 }
@@ -215,6 +218,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       user?.can_use_onerequest ?? tokenData?.can_use_onerequest ?? false,
     canUseMinhaEquipe: user?.can_use_minha_equipe ?? false,
     minhaEquipeEquipes: user?.minha_equipe_equipes ?? [],
+    canManageDistribuidosBB:
+      user?.can_manage_distribuidos_bb ?? tokenData?.can_manage_distribuidos_bb ?? false,
     isAdmin: (user?.role ?? tokenData?.role) === 'admin',
     refreshMe,
   };

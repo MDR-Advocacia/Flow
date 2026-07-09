@@ -13,7 +13,12 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.models.distribuidos_bb import (
+    BbClassificacao,
+    BbConfig,
     BbEscritorio,
+    BbGrupoAjuizamento,
+    BbGrupoAjuizamentoMembro,
+    BbRegraObservacao,
     BbResponsavel,
     NIVEL_AVISO,
     NIVEL_SUCESSO,
@@ -43,6 +48,50 @@ _RESP_AUTOR = [
     "Marcos Vinicius Cruz Bezerra",
 ]
 _RESP_TRABALHISTA_FIXO = "Antônio Uemerson de Carvalho"
+
+# Classificações/posições de envolvido (coluna "Posição" da planilha)
+_CLASSIFICACOES = [
+    "Advogado",
+    "Assistente",
+    "Advogado Ajuizamento",
+    "Assistente Ajuizamento",
+    "Outros",
+]
+
+# Grupos de ajuizamento legados (conjuntos_ajuizamento do gerar_planilha.py)
+_GRUPOS_AJUIZAMENTO = [
+    ("Ajuizamento 1", [
+        ("Maria Laiza Barbosa de Farias", "Advogado Ajuizamento"),
+        ("Sabrina Ribeiro Braga", "Assistente Ajuizamento"),
+    ]),
+    ("Ajuizamento 2", [
+        ("Marcelli Gomes do Nascimento", "Advogado Ajuizamento"),
+        ("Paulo Guilherme Morais de Almeida", "Assistente Ajuizamento"),
+    ]),
+]
+
+# Regras de observação (o if/else de observação do script, em ordem)
+_REGRAS_OBSERVACAO = [
+    # (nome, criterio_posicao, criterio_natureza, criterio_cnj, texto)
+    ("Autor sem CNJ → Ajuizamento", "Autor", None, "sem", "Ajuizamento"),
+    ("Autor com CNJ → Reterceirizado", "Autor", None, "com", "Reterceirizado"),
+    ("Réu → Cadastro", "Réu", None, None, "Cadastro"),
+    ("Trabalhista → Cadastro", None, "Trabalhista", None, "Cadastro"),
+]
+
+# Valores padrão (constantes cravadas na planilha antiga)
+_CONFIG_PADRAO = {
+    "cliente_nome": ("Banco do Brasil S.A.", "Nome do cliente principal"),
+    "cliente_contact_id": ("21", "contactId do BB no Legal One (Customer)"),
+    "cliente_cpf_cnpj": ("00.000.000/0001-91", "CNPJ do BB"),
+    "cliente_tipo": ("PJ", "Tipo do cliente principal"),
+    "tipo_registro": ("Processo", "Coluna 'Tipo de Registro'"),
+    "tipo": ("Judicial", "Coluna 'Tipo'"),
+    "status": ("Ativo", "Coluna 'Status'"),
+    "escritorio_origem": ("MDR Advocacia", "Coluna 'Escritório Origem'"),
+    "situacao_envolvido": ("Outros", "Coluna 'Situação' dos envolvidos"),
+    "ajuizamento_ultimo_indice": ("-1", "Ponteiro do rodízio de grupos de ajuizamento"),
+}
 
 
 def _chave_nome(nome: str) -> str:
@@ -114,13 +163,68 @@ def _povoar_fila(db: Session, escritorio: BbEscritorio, nomes: list[str]) -> lis
     return nao_resolvidos
 
 
+def _seed_classificacoes(db: Session) -> None:
+    if db.query(BbClassificacao).count() > 0:
+        return
+    for ordem, nome in enumerate(_CLASSIFICACOES):
+        db.add(BbClassificacao(nome=nome, situacao="Outros", ordem=ordem, ativo=True))
+
+
+def _seed_regras_observacao(db: Session) -> None:
+    if db.query(BbRegraObservacao).count() > 0:
+        return
+    for ordem, (nome, pos, nat, cnj, texto) in enumerate(_REGRAS_OBSERVACAO):
+        db.add(BbRegraObservacao(
+            nome=nome, criterio_posicao=pos, criterio_natureza=nat,
+            criterio_cnj=cnj, texto=texto, ordem=ordem, ativo=True,
+        ))
+
+
+def _seed_grupos_ajuizamento(db: Session) -> list[str]:
+    nao_resolvidos: list[str] = []
+    if db.query(BbGrupoAjuizamento).count() > 0:
+        return nao_resolvidos
+    for ordem, (nome, membros) in enumerate(_GRUPOS_AJUIZAMENTO):
+        grupo = BbGrupoAjuizamento(nome=nome, ordem=ordem, ativo=True)
+        db.add(grupo)
+        db.flush()
+        for m_ordem, (m_nome, classif) in enumerate(membros):
+            uid = _resolver_user_id(db, m_nome)
+            if uid is None:
+                nao_resolvidos.append(m_nome)
+                continue
+            db.add(BbGrupoAjuizamentoMembro(
+                grupo_id=grupo.id, membro_user_id=uid,
+                classificacao=classif, ordem=m_ordem, ativo=True,
+            ))
+    return nao_resolvidos
+
+
+def _seed_config(db: Session) -> None:
+    existentes = {c.chave for c in db.query(BbConfig).all()}
+    for chave, (valor, descricao) in _CONFIG_PADRAO.items():
+        if chave in existentes:
+            continue
+        db.add(BbConfig(chave=chave, valor=valor, descricao=descricao))
+
+
 def seed_all(db: Session, *, forcar: bool = False) -> dict:
-    """Cria os escritórios/filas default. Idempotente (pula se já houver dados)."""
+    """Cria toda a config default do módulo. Idempotente (cada tabela por si)."""
+    # As tabelas de catálogo (classificações/regras/grupos/config) são semeadas
+    # independentemente — assim uma re-execução adiciona config nova mesmo que os
+    # escritórios já existam.
+    _seed_classificacoes(db)
+    _seed_regras_observacao(db)
+    nao_resolvidos_aj = _seed_grupos_ajuizamento(db)
+    _seed_config(db)
+
     ja_existe = db.query(BbEscritorio).count() > 0
     if ja_existe and not forcar:
-        return {"criado": False, "motivo": "escritórios já existem"}
+        db.commit()
+        return {"criado": False, "motivo": "escritórios já existem; catálogos garantidos",
+                "nao_resolvidos": nao_resolvidos_aj}
 
-    nao_resolvidos: list[str] = []
+    nao_resolvidos: list[str] = list(nao_resolvidos_aj)
 
     esc_reu = _criar_escritorio(
         db, nome="Réu", sufixo="Réu", criterio_polo="Passivo",

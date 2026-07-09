@@ -4,8 +4,8 @@ Superfície da UI: dashboard, listagem de processos, auditoria por processo,
 log global de eventos, ingestão do RPA legado e CRUD das tabelas editáveis
 (escritórios/filas, responsáveis, equipe de envolvidos).
 
-Gating: admin (como os outros itens do macrosetor LegalOne). Permissão
-dedicada por operador pode ser plugada depois.
+Gating: `can_manage_distribuidos_bb` (admin sempre passa) — permissão dedicada
+que o admin concede por usuário na tela de Administração.
 """
 from __future__ import annotations
 
@@ -39,9 +39,15 @@ router = APIRouter(prefix="/distribuidos-bb", tags=["Distribuídos BB"])
 logger = logging.getLogger(__name__)
 
 
-def _require_admin(current_user: LegalOneUser) -> None:
-    if current_user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Acesso restrito a administradores.")
+def _require_gestao(current_user: LegalOneUser) -> None:
+    """Permite admin OU quem tem a permissão can_manage_distribuidos_bb."""
+    if current_user.role == "admin":
+        return
+    if not getattr(current_user, "can_manage_distribuidos_bb", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Você não tem permissão para o módulo Distribuídos BB.",
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -118,7 +124,7 @@ def get_dashboard(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     return DistribuidosBBService(db).dashboard()
 
 
@@ -132,7 +138,7 @@ def listar_processos(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     return DistribuidosBBService(db).listar_processos(
         status=status_filtro, escritorio_id=escritorio_id, busca=busca, limit=limit, offset=offset,
     )
@@ -144,7 +150,7 @@ def auditoria_processo(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     resultado = DistribuidosBBService(db).auditoria_processo(processo_id)
     if resultado is None:
         raise HTTPException(status_code=404, detail="Processo não encontrado.")
@@ -162,7 +168,7 @@ def listar_eventos(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     return DistribuidosBBService(db).listar_eventos(
         secao=secao, nivel=nivel, processo_id=processo_id, run_id=run_id, limit=limit, offset=offset,
     )
@@ -174,7 +180,7 @@ def ingerir(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     return DistribuidosBBService(db).ingerir_linhas(payload.linhas, run_id=payload.run_id)
 
 
@@ -184,7 +190,7 @@ def seed(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     return seed_all(db, forcar=forcar)
 
 
@@ -203,7 +209,7 @@ def testar_onelog(
     NÃO abre o Chromium nem toca no portal BB — serve só pra validar credenciais
     e conectividade com o OneLog.
     """
-    _require_admin(current_user)
+    _require_gestao(current_user)
     cliente = OneLogClient()
     if not cliente.configurado:
         return {
@@ -244,7 +250,7 @@ def coletar(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
 
     if not OneLogClient().configurado:
         raise HTTPException(
@@ -297,7 +303,7 @@ def listar_runs(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     q = db.query(BbRun).order_by(BbRun.id.desc())
     total = q.count()
     rows = q.limit(limit).offset(offset).all()
@@ -310,7 +316,7 @@ def get_run(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     run = db.get(BbRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Execução não encontrada.")
@@ -328,7 +334,7 @@ def listar_usuarios(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     q = db.query(LegalOneUser).filter(LegalOneUser.is_active.is_(True))
     if busca:
         q = q.filter(LegalOneUser.name.ilike(f"%{busca.strip()}%"))
@@ -380,7 +386,7 @@ def listar_escritorios(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     escritorios = db.query(BbEscritorio).order_by(BbEscritorio.ordem, BbEscritorio.id).all()
     return [_escritorio_dto(db, e) for e in escritorios]
 
@@ -391,7 +397,7 @@ def criar_escritorio(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     if not (payload.nome or "").strip() or not (payload.escritorio_path or "").strip():
         raise HTTPException(status_code=400, detail="Nome e caminho do escritório são obrigatórios.")
     esc = BbEscritorio(
@@ -418,7 +424,7 @@ def editar_escritorio(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     esc = db.get(BbEscritorio, escritorio_id)
     if esc is None:
         raise HTTPException(status_code=404, detail="Escritório não encontrado.")
@@ -441,7 +447,7 @@ def desativar_escritorio(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     esc = db.get(BbEscritorio, escritorio_id)
     if esc is None:
         raise HTTPException(status_code=404, detail="Escritório não encontrado.")
@@ -457,7 +463,7 @@ def adicionar_responsavel(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     esc = db.get(BbEscritorio, payload.escritorio_id)
     if esc is None:
         raise HTTPException(status_code=404, detail="Escritório não encontrado.")
@@ -486,7 +492,7 @@ def remover_responsavel(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     resp = db.get(BbResponsavel, responsavel_id)
     if resp is None:
         raise HTTPException(status_code=404, detail="Responsável não encontrado.")
@@ -506,7 +512,7 @@ def listar_equipe(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     rows = (
         db.query(BbEquipeMembro)
         .filter(BbEquipeMembro.responsavel_user_id == responsavel_user_id)
@@ -535,7 +541,7 @@ def adicionar_membro_equipe(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     ja = (
         db.query(BbEquipeMembro)
         .filter(
@@ -565,7 +571,7 @@ def remover_membro_equipe(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    _require_admin(current_user)
+    _require_gestao(current_user)
     membro = db.get(BbEquipeMembro, membro_id)
     if membro is None:
         raise HTTPException(status_code=404, detail="Membro não encontrado.")

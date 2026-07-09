@@ -432,6 +432,7 @@ class UserUpdateRequest(BaseModel):
     notify_onerequest_errors: Optional[bool] = None
     can_use_minha_equipe: Optional[bool] = None
     minha_equipe_equipes: Optional[list] = None
+    can_manage_distribuidos_bb: Optional[bool] = None
     default_office_id: Optional[int] = None
 
 
@@ -481,6 +482,7 @@ def list_users(
             "can_use_onerequest": getattr(u, "can_use_onerequest", False),
             "can_use_minha_equipe": getattr(u, "can_use_minha_equipe", False),
             "minha_equipe_equipes": _equipes_to_list(u),
+            "can_manage_distribuidos_bb": getattr(u, "can_manage_distribuidos_bb", False),
             "notify_onerequest_errors": getattr(u, "notify_onerequest_errors", False),
             "default_office_id": u.default_office_id,
             "has_password": u.hashed_password is not None,
@@ -520,6 +522,8 @@ def update_user(
         user.can_use_minha_equipe = payload.can_use_minha_equipe
     if payload.minha_equipe_equipes is not None:
         user.minha_equipe_equipes = ",".join(payload.minha_equipe_equipes)
+    if payload.can_manage_distribuidos_bb is not None:
+        user.can_manage_distribuidos_bb = payload.can_manage_distribuidos_bb
     if payload.notify_onerequest_errors is not None:
         user.notify_onerequest_errors = payload.notify_onerequest_errors
     if payload.default_office_id is not None:
@@ -538,6 +542,7 @@ def update_user(
         "can_use_onerequest": getattr(user, "can_use_onerequest", False),
         "can_use_minha_equipe": getattr(user, "can_use_minha_equipe", False),
         "minha_equipe_equipes": _equipes_to_list(user),
+        "can_manage_distribuidos_bb": getattr(user, "can_manage_distribuidos_bb", False),
         "notify_onerequest_errors": getattr(user, "notify_onerequest_errors", False),
         "default_office_id": user.default_office_id,
     }
@@ -1083,6 +1088,7 @@ class MeResponseSchema(BaseModel):
     can_use_onerequest: bool = False
     can_use_minha_equipe: bool = False
     minha_equipe_equipes: list = []
+    can_manage_distribuidos_bb: bool = False
     default_office_id: Optional[int]
     must_change_password: bool
 
@@ -1107,6 +1113,7 @@ def get_current_user_info(
         "can_use_onerequest": getattr(current_user, "can_use_onerequest", False),
         "can_use_minha_equipe": getattr(current_user, "can_use_minha_equipe", False),
         "minha_equipe_equipes": _equipes_to_list(current_user),
+        "can_manage_distribuidos_bb": getattr(current_user, "can_manage_distribuidos_bb", False),
         "default_office_id": current_user.default_office_id,
         "must_change_password": current_user.must_change_password,
     }

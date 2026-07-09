@@ -75,12 +75,17 @@ from .analise_recursal import (
     RecursalCustaTabela,
 )
 from .distribuidos_bb import (
+    BbClassificacao,
+    BbConfig,
     BbDistribuicaoEstado,
     BbEnvolvido,
     BbEquipeMembro,
     BbEscritorio,
     BbEvento,
+    BbGrupoAjuizamento,
+    BbGrupoAjuizamentoMembro,
     BbProcesso,
+    BbRegraObservacao,
     BbResponsavel,
     BbRun,
 )

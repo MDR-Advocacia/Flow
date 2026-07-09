@@ -45,6 +45,7 @@ const PERMISSOES = [
   { key: "can_use_prazos_iniciais", label: "Prazos Iniciais", abbr: "PI" },
   { key: "can_use_onerequest", label: "OneRequest", abbr: "OR" },
   { key: "can_use_minha_equipe", label: "Minha Equipe", abbr: "ME" },
+  { key: "can_manage_distribuidos_bb", label: "Distribuídos BB", abbr: "DBB" },
   { key: "notify_onerequest_errors", label: "Notificação OneRequest", abbr: "Notif" },
 ] as const;
 
@@ -80,6 +81,7 @@ interface AdminUser {
   can_use_onerequest: boolean;
   can_use_minha_equipe: boolean;
   minha_equipe_equipes: string[];
+  can_manage_distribuidos_bb: boolean;
   notify_onerequest_errors: boolean;
   default_office_id: number | null;
   has_password: boolean;

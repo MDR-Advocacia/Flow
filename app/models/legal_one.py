@@ -74,6 +74,8 @@ class LegalOneUser(Base):
     # Minha Equipe: libera o menu + CSV das equipes que o usuário pode ver (ex.: "bb-reu").
     can_use_minha_equipe = Column(Boolean, default=False, server_default="false", nullable=False)
     minha_equipe_equipes = Column(String, nullable=True)
+    # Distribuídos BB: libera o módulo + edição das tabelas de configuração.
+    can_manage_distribuidos_bb = Column(Boolean, default=False, server_default="false", nullable=False)
     default_office_id = Column(Integer, ForeignKey("legal_one_offices.external_id"), nullable=True)
     # Carimbo do último login via SSO (Microsoft Entra). NULL = nunca entrou
     # por SSO. Usado pro selo "Entra ID" no admin de usuários.

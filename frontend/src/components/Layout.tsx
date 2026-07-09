@@ -40,7 +40,7 @@ import {
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "./ui/sheet";
 import { DunaFlowMark } from "./DunaFlowMark";
 
-type Permission = 'canScheduleBatch' | 'canUsePublications' | 'canUsePrazosIniciais' | 'canUseOnerequest' | 'canUseMinhaEquipe' | 'isAdmin';
+type Permission = 'canScheduleBatch' | 'canUsePublications' | 'canUsePrazosIniciais' | 'canUseOnerequest' | 'canUseMinhaEquipe' | 'canManageDistribuidosBB' | 'isAdmin';
 
 interface NavItem {
   to: string;
@@ -71,6 +71,7 @@ export default function Layout({ children }: PropsWithChildren) {
     canUseOnerequest,
     canUseMinhaEquipe,
     minhaEquipeEquipes,
+    canManageDistribuidosBB,
     isAdmin,
   } = useAuth();
   const navigate = useNavigate();
@@ -104,6 +105,7 @@ export default function Layout({ children }: PropsWithChildren) {
     if (perm === 'canUsePrazosIniciais') return canUsePrazosIniciais || isAdmin;
     if (perm === 'canUseOnerequest') return canUseOnerequest || isAdmin;
     if (perm === 'canUseMinhaEquipe') return canUseMinhaEquipe || isAdmin;
+    if (perm === 'canManageDistribuidosBB') return canManageDistribuidosBB || isAdmin;
     if (perm === 'isAdmin') return isAdmin;
     return false;
   };
@@ -119,7 +121,7 @@ export default function Layout({ children }: PropsWithChildren) {
         { to: "/ged-legalone", icon: Upload, label: "Envio em Lote ao GED", requirePermission: 'canScheduleBatch' },
         { to: "/contatos-legalone", icon: Contact, label: "Atualização de Contatos", requirePermission: 'canScheduleBatch' },
         { to: "/cancelamento-duplicadas", icon: CopyX, label: "Cancelar Duplicadas", requirePermission: 'isAdmin' },
-        { to: "/distribuidos-bb/dashboard", icon: Building2, label: "Distribuídos BB", requirePermission: 'isAdmin' },
+        { to: "/distribuidos-bb/dashboard", icon: Building2, label: "Distribuídos BB", requirePermission: 'canManageDistribuidosBB' },
       ],
     },
     {

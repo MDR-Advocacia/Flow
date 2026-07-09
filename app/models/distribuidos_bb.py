@@ -353,3 +353,119 @@ class BbEvento(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
 
     processo = relationship("BbProcesso", back_populates="eventos")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Configuração editável — regras que estavam hardcoded no gerar_planilha.py
+# (tabeladas pra edição na tela administrativa do módulo)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class BbClassificacao(Base):
+    """Catálogo de classificações/posições de envolvido (Advogado, Assistente…).
+
+    Serve pra planilha (coluna "Posição" + "Situação") e pro cadastro via API
+    (mapeia pro tipo de participante e positionId do Legal One).
+    """
+
+    __tablename__ = "bbd_classificacoes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String(80), nullable=False)               # ex.: "Advogado", "Assistente"
+    situacao = Column(String(40), nullable=True, server_default="Outros")  # col "Situação" da planilha
+    # Mapa pro cadastro via API do L1
+    participante_tipo = Column(String(20), nullable=True)   # Customer | PersonInCharge | OtherParty
+    position_id_l1 = Column(Integer, nullable=True)         # LitigationParticipantPositions
+
+    ativo = Column(Boolean, nullable=False, server_default="true")
+    ordem = Column(Integer, nullable=False, server_default="0")
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+
+class BbRegraObservacao(Base):
+    """Regra que decide o TEXTO do campo Observações (Ajuizamento/Reterceirizado/
+    Cadastro…). Avaliadas por `ordem`; a primeira que casar vence.
+    """
+
+    __tablename__ = "bbd_regras_observacao"
+
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String(120), nullable=False)
+    # Critérios (todos opcionais; None = "qualquer")
+    criterio_posicao = Column(String(20), nullable=True)     # Réu | Autor | Interessado
+    criterio_natureza = Column(String(80), nullable=True)    # ex.: "Trabalhista"
+    criterio_cnj = Column(String(10), nullable=True)         # "com" | "sem" | None
+    texto = Column(String(120), nullable=False)              # o valor gravado na Observação
+
+    ativo = Column(Boolean, nullable=False, server_default="true")
+    ordem = Column(Integer, nullable=False, server_default="0")
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+
+class BbGrupoAjuizamento(Base):
+    """Grupo (dupla) de ajuizamento — advogado + assistente aplicados como
+    envolvidos quando a observação é "Ajuizamento". Os grupos ativos são
+    alternados (rodízio) entre os processos de ajuizamento.
+    """
+
+    __tablename__ = "bbd_grupos_ajuizamento"
+
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String(120), nullable=False)
+    ativo = Column(Boolean, nullable=False, server_default="true")
+    ordem = Column(Integer, nullable=False, server_default="0")
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+    membros = relationship(
+        "BbGrupoAjuizamentoMembro", back_populates="grupo",
+        cascade="all, delete-orphan", order_by="BbGrupoAjuizamentoMembro.ordem",
+    )
+
+
+class BbGrupoAjuizamentoMembro(Base):
+    """Membro de um grupo de ajuizamento (com sua classificação)."""
+
+    __tablename__ = "bbd_grupo_ajuizamento_membros"
+
+    id = Column(Integer, primary_key=True, index=True)
+    grupo_id = Column(
+        Integer, ForeignKey("bbd_grupos_ajuizamento.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    membro_user_id = Column(
+        Integer, ForeignKey("legal_one_users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    classificacao = Column(String(80), nullable=False)  # "Advogado Ajuizamento", "Assistente Ajuizamento"
+    ordem = Column(Integer, nullable=False, server_default="0")
+    ativo = Column(Boolean, nullable=False, server_default="true")
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    grupo = relationship("BbGrupoAjuizamento", back_populates="membros")
+    membro = relationship("LegalOneUser", foreign_keys=[membro_user_id])
+
+
+class BbConfig(Base):
+    """Valores padrão do módulo (chave/valor) — os constantes do script antigo.
+
+    Ex.: cliente_nome=Banco do Brasil S.A., cliente_contact_id=21,
+    cliente_cpf_cnpj=00.000.000/0001-91, cliente_tipo=PJ, tipo_registro=Processo,
+    tipo=Judicial, status=Ativo, escritorio_origem=MDR Advocacia,
+    situacao_envolvido=Outros, ajuizamento_ultimo_indice=-1 (rodízio).
+    """
+
+    __tablename__ = "bbd_config"
+
+    chave = Column(String(60), primary_key=True)
+    valor = Column(Text, nullable=True)
+    descricao = Column(Text, nullable=True)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False,
+    )

@@ -116,6 +116,7 @@ class UserMe(BaseModel):
     can_use_publications: bool = False
     can_use_prazos_iniciais: bool = False
     can_use_onerequest: bool = False
+    can_manage_distribuidos_bb: bool = False
     must_change_password: bool = False
     model_config = ConfigDict(from_attributes=True)
 
