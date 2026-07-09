@@ -8,34 +8,38 @@ import {
   PublicClientApplication,
 } from "@azure/msal-browser";
 
-const CLIENT_ID =
+export const ENTRA_CLIENT_ID =
   (import.meta.env.VITE_ENTRA_CLIENT_ID as string | undefined) ||
   "5a322b91-a2f9-4d47-9e0e-02db86755fc3";
-const TENANT_ID =
+export const ENTRA_TENANT_ID =
   (import.meta.env.VITE_ENTRA_TENANT_ID as string | undefined) ||
   "384ac778-bc7e-48ef-963c-d545a96997b8";
 
 // Permissões consentidas no app do Entra (delegadas).
 const SCOPES = ["Chat.Create", "ChatMessage.Send", "User.Read.All"];
 
+// Config compartilhado app ↔ página de retorno (msal-redirect.ts). O
+// redirectUri aponta pra 2ª entry do Vite: uma página que RODA o MSAL e chama
+// handleRedirectPromise. Não dá pra depender do window.opener (as páginas de
+// login da Microsoft mandam COOP e cortam o vínculo com a aba-mãe). Precisa
+// estar registrada como redirect URI SPA no Entra (…/msal-redirect.html nos
+// dois domínios flow.*).
+export function msalConfig() {
+  return {
+    auth: {
+      clientId: ENTRA_CLIENT_ID,
+      authority: `https://login.microsoftonline.com/${ENTRA_TENANT_ID}`,
+      redirectUri: `${window.location.origin}/msal-redirect.html`,
+    },
+    cache: { cacheLocation: "sessionStorage" as const },
+  };
+}
+
 let _msal: PublicClientApplication | null = null;
 
 async function getMsal(): Promise<PublicClientApplication> {
   if (!_msal) {
-    _msal = new PublicClientApplication({
-      auth: {
-        clientId: CLIENT_ID,
-        authority: `https://login.microsoftonline.com/${TENANT_ID}`,
-        // Página ESTÁTICA em branco (public/msal-redirect.html): se o retorno
-        // cair na raiz, o app React boota dentro do popup e o router reescreve
-        // a URL antes do MSAL ler o código — o popup fica preso na "tela do
-        // Flow sem acesso". Precisa estar registrada como redirect URI SPA no
-        // Entra (https://flow.mdradvocacia.com/msal-redirect.html e a variante
-        // .dunatecnologia.com).
-        redirectUri: `${window.location.origin}/msal-redirect.html`,
-      },
-      cache: { cacheLocation: "sessionStorage" },
-    });
+    _msal = new PublicClientApplication(msalConfig());
     await _msal.initialize();
   }
   return _msal;

@@ -38,5 +38,16 @@ export default defineConfig(({ mode }) => {
         "@": path.resolve(__dirname, "./src"),
       },
     },
+    build: {
+      rollupOptions: {
+        input: {
+          // App principal + página de retorno do MSAL (2ª entry, bundlada — roda
+          // handleRedirectPromise no popup e devolve o token via BroadcastChannel;
+          // as páginas de login da Microsoft mandam COOP e cortam o window.opener).
+          main: path.resolve(__dirname, "index.html"),
+          "msal-redirect": path.resolve(__dirname, "msal-redirect.html"),
+        },
+      },
+    },
   };
 });
