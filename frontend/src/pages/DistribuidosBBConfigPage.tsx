@@ -19,6 +19,7 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import EquipesTab from "@/components/distribuidos-bb/EquipesTab";
+import RegrasObservacaoTab from "@/components/distribuidos-bb/RegrasObservacaoTab";
 import {
   Escritorio,
   EscritorioPayload,
@@ -266,10 +267,15 @@ export default function DistribuidosBBConfigPage() {
         <TabsList>
           <TabsTrigger value="escritorios">Escritórios &amp; Filas</TabsTrigger>
           <TabsTrigger value="equipes">Equipes / Envolvidos</TabsTrigger>
+          <TabsTrigger value="regras">Regras de Observação</TabsTrigger>
         </TabsList>
 
         <TabsContent value="equipes" className="mt-4">
           <EquipesTab />
+        </TabsContent>
+
+        <TabsContent value="regras" className="mt-4">
+          <RegrasObservacaoTab />
         </TabsContent>
 
         <TabsContent value="escritorios" className="mt-4">

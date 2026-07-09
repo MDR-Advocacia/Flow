@@ -26,6 +26,7 @@ from app.models.distribuidos_bb import (
     BbClassificacao,
     BbEquipeMembro,
     BbEscritorio,
+    BbRegraObservacao,
     BbResponsavel,
     BbRun,
     SECAO_CONFIGURACAO,
@@ -80,6 +81,16 @@ class EquipeMembroPayload(BaseModel):
     membro_user_id: int
     classificacao: str = Field(..., min_length=1)
     ativo: Optional[bool] = None
+
+
+class RegraObservacaoPayload(BaseModel):
+    nome: Optional[str] = None
+    criterio_posicao: Optional[str] = None   # Réu | Autor | Interessado | ""(qualquer)
+    criterio_natureza: Optional[str] = None
+    criterio_cnj: Optional[str] = None        # "com" | "sem" | ""(qualquer)
+    texto: Optional[str] = None
+    ativo: Optional[bool] = None
+    ordem: Optional[int] = None
 
 
 class IngerirPayload(BaseModel):
@@ -568,6 +579,104 @@ def listar_responsaveis_distintos(
         ],
         key=lambda x: (x["nome"] or "").lower(),
     )
+
+
+def _regra_dto(r: BbRegraObservacao) -> dict[str, Any]:
+    return {
+        "id": r.id,
+        "nome": r.nome,
+        "criterio_posicao": r.criterio_posicao,
+        "criterio_natureza": r.criterio_natureza,
+        "criterio_cnj": r.criterio_cnj,
+        "texto": r.texto,
+        "ativo": r.ativo,
+        "ordem": r.ordem,
+    }
+
+
+@router.get("/config/regras-observacao", summary="Regras do campo Observação (ativam o workflow no L1)")
+def listar_regras_observacao(
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    rows = db.query(BbRegraObservacao).order_by(BbRegraObservacao.ordem, BbRegraObservacao.id).all()
+    return [_regra_dto(r) for r in rows]
+
+
+@router.post("/config/regras-observacao", status_code=201, summary="Cria regra de observação")
+def criar_regra_observacao(
+    payload: RegraObservacaoPayload,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    if not (payload.nome or "").strip() or not (payload.texto or "").strip():
+        raise HTTPException(status_code=400, detail="Nome e texto da observação são obrigatórios.")
+    ordem = payload.ordem
+    if ordem is None:
+        maior = db.query(func.max(BbRegraObservacao.ordem)).scalar()
+        ordem = (maior or 0) + 1
+    r = BbRegraObservacao(
+        nome=payload.nome.strip(),
+        criterio_posicao=(payload.criterio_posicao or None) or None,
+        criterio_natureza=(payload.criterio_natureza or None) or None,
+        criterio_cnj=(payload.criterio_cnj or None) or None,
+        texto=payload.texto.strip(),
+        ativo=payload.ativo if payload.ativo is not None else True,
+        ordem=ordem,
+    )
+    db.add(r)
+    registrar_evento(db, secao=SECAO_CONFIGURACAO, acao="Regra criada", mensagem=f"Regra de observação '{r.nome}' → '{r.texto}'.")
+    db.commit()
+    db.refresh(r)
+    return _regra_dto(r)
+
+
+@router.patch("/config/regras-observacao/{regra_id}", summary="Edita regra de observação")
+def editar_regra_observacao(
+    regra_id: int,
+    payload: RegraObservacaoPayload,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    r = db.get(BbRegraObservacao, regra_id)
+    if r is None:
+        raise HTTPException(status_code=404, detail="Regra não encontrada.")
+    # Campos de texto: "" limpa o critério (vira "qualquer"); None = não mexe.
+    if payload.nome is not None:
+        r.nome = payload.nome.strip() or r.nome
+    if payload.texto is not None and payload.texto.strip():
+        r.texto = payload.texto.strip()
+    for campo in ("criterio_posicao", "criterio_natureza", "criterio_cnj"):
+        valor = getattr(payload, campo)
+        if valor is not None:
+            setattr(r, campo, valor.strip() or None)
+    if payload.ativo is not None:
+        r.ativo = payload.ativo
+    if payload.ordem is not None:
+        r.ordem = payload.ordem
+    registrar_evento(db, secao=SECAO_CONFIGURACAO, acao="Regra editada", mensagem=f"Regra de observação '{r.nome}' atualizada.")
+    db.commit()
+    db.refresh(r)
+    return _regra_dto(r)
+
+
+@router.delete("/config/regras-observacao/{regra_id}", summary="Remove regra de observação")
+def remover_regra_observacao(
+    regra_id: int,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    r = db.get(BbRegraObservacao, regra_id)
+    if r is None:
+        raise HTTPException(status_code=404, detail="Regra não encontrada.")
+    db.delete(r)
+    registrar_evento(db, secao=SECAO_CONFIGURACAO, acao="Regra removida", mensagem=f"Regra de observação '{r.nome}' removida.")
+    db.commit()
+    return {"ok": True}
 
 
 @router.get("/config/equipe/{responsavel_user_id}", summary="Equipe (envolvidos) de um responsável")

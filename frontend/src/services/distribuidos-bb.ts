@@ -305,3 +305,37 @@ export async function adicionarMembroEquipe(payload: {
 export async function removerMembroEquipe(membroId: number): Promise<{ ok: boolean }> {
   return json(await apiFetch(`${BASE}/config/equipe/${membroId}`, { method: "DELETE" }));
 }
+
+// ── Regras de Observação (ativam o workflow no L1) ─────────────────────────
+export interface RegraObservacao {
+  id: number;
+  nome: string;
+  criterio_posicao: string | null;
+  criterio_natureza: string | null;
+  criterio_cnj: string | null;
+  texto: string;
+  ativo: boolean;
+  ordem: number;
+}
+export interface RegraObservacaoPayload {
+  nome?: string;
+  criterio_posicao?: string | null;
+  criterio_natureza?: string | null;
+  criterio_cnj?: string | null;
+  texto?: string;
+  ativo?: boolean;
+  ordem?: number;
+}
+
+export async function listarRegrasObservacao(): Promise<RegraObservacao[]> {
+  return json(await apiFetch(`${BASE}/config/regras-observacao`));
+}
+export async function criarRegraObservacao(payload: RegraObservacaoPayload): Promise<RegraObservacao> {
+  return json(await apiFetch(`${BASE}/config/regras-observacao`, { method: "POST", body: JSON.stringify(payload) }));
+}
+export async function editarRegraObservacao(id: number, payload: RegraObservacaoPayload): Promise<RegraObservacao> {
+  return json(await apiFetch(`${BASE}/config/regras-observacao/${id}`, { method: "PATCH", body: JSON.stringify(payload) }));
+}
+export async function removerRegraObservacao(id: number): Promise<{ ok: boolean }> {
+  return json(await apiFetch(`${BASE}/config/regras-observacao/${id}`, { method: "DELETE" }));
+}
