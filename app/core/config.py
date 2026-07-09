@@ -363,6 +363,28 @@ class Settings(BaseSettings):
     ajus_runner_poll_interval_seconds: int = 30
     ajus_runner_batch_per_account: int = 5
 
+    # ── Distribuídos BB — coleta na nuvem via OneLog + Playwright ──────
+    # OneLog é o broker de sessão do portal BB (HTTPS público, mesmo
+    # usado por OneCost/Cadastro). Credenciais do robô (usuário tipo
+    # `robo.cadastro`) — setar no Coolify, nunca commitar. Sem elas, a
+    # coleta fica desabilitada (o resto do módulo funciona por ingestão).
+    distribuidos_bb_onelog_api_url: str = "https://api-onelog.mdradvocacia.com"
+    distribuidos_bb_onelog_username: str | None = None
+    distribuidos_bb_onelog_password: str | None = None
+    # Portal de notificações (consultar/receber) do PAJ.
+    distribuidos_bb_portal_url: str = (
+        "https://juridico.bb.com.br/paj/juridico/v2?app=consultarReceberNotificacoesApp"
+    )
+    # Chromium NÃO-headless (provado 2026-07-09: o PAJ bloqueia headless).
+    # Roda sob Xvfb (DISPLAY setado no docker-api-start.sh). Só ligue
+    # headless=True em ambiente onde o portal não faça anti-bot.
+    distribuidos_bb_headless: bool = False
+    # Trava de segurança GLOBAL da ciência: por run o operador pode ligar,
+    # mas se isto estiver False a ciência (SIM) NUNCA é dada, aconteça o
+    # que acontecer. Default seguro.
+    distribuidos_bb_confirmar_ciencia: bool = False
+    distribuidos_bb_session_timeout_seconds: int = 1800
+
     # ── GED LegalOne — envio em lote de arquivos pro GED (ECM) do L1 ──
     # Modulo dedicado a subir arquivos arbitrarios (PDF, docx, xlsx,
     # imagens...) no GED de processos do Legal One a partir de CNJ +

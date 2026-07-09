@@ -56,6 +56,17 @@ COPY . .
 # Imagem servida pelo Uvicorn, escutando 8000.
 FROM base AS api
 
+# ── Playwright Python + Xvfb (coleta do Distribuídos BB) ──────────────
+# O portal do BB bloqueia headless, então a coleta usa Chromium
+# NÃO-headless sob Xvfb (display virtual). O Chromium já veio da base
+# (`npx playwright install --with-deps chromium`); o pacote Python do
+# Playwright (mesma linha ^1.59 do runner Node) REUSA esse mesmo binário
+# via PLAYWRIGHT_BROWSERS_PATH=/ms-playwright — sem download extra.
+# `xvfb` provê o binário Xvfb usado pelo docker-api-start.sh.
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir playwright==1.59.0
+
 RUN chmod +x /app/scripts/docker-api-start.sh
 
 EXPOSE 8000

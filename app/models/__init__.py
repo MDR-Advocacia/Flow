@@ -74,3 +74,13 @@ from .analise_recursal import (
     AnaliseRecursalBatch,
     RecursalCustaTabela,
 )
+from .distribuidos_bb import (
+    BbDistribuicaoEstado,
+    BbEnvolvido,
+    BbEquipeMembro,
+    BbEscritorio,
+    BbEvento,
+    BbProcesso,
+    BbResponsavel,
+    BbRun,
+)

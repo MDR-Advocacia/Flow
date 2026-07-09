@@ -41,6 +41,9 @@ import GedLegalOnePage from './pages/GedLegalOnePage';
 import ContatosLegalOnePage from './pages/ContatosLegalOnePage';
 import OnerequestPage from './pages/OnerequestPage';
 import OnerequestDashboardPage from './pages/OnerequestDashboardPage';
+import DistribuidosBBPage from './pages/DistribuidosBBPage';
+import DistribuidosBBDashboardPage from './pages/DistribuidosBBDashboardPage';
+import DistribuidosBBConfigPage from './pages/DistribuidosBBConfigPage';
 import MinhaEquipePage from './pages/MinhaEquipePage';
 
 // Contexto de Autenticação
@@ -112,6 +115,9 @@ function AppContent() {
             <Route path="/contatos-legalone" element={<ContatosLegalOnePage />} />
             <Route path="/onerequest" element={<OnerequestPage />} />
             <Route path="/onerequest/dashboard" element={<OnerequestDashboardPage />} />
+            <Route path="/distribuidos-bb" element={<DistribuidosBBPage />} />
+            <Route path="/distribuidos-bb/dashboard" element={<DistribuidosBBDashboardPage />} />
+            <Route path="/distribuidos-bb/config" element={<DistribuidosBBConfigPage />} />
             <Route path="/minha-equipe" element={<MinhaEquipePage />} />
             <Route path="/minha-equipe/:team" element={<MinhaEquipePage />} />
           </Route>

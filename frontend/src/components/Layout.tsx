@@ -1,6 +1,7 @@
 import { PropsWithChildren, useMemo, useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import {
+  Building2,
   CalendarClock,
   ChevronDown,
   CircleUser,
@@ -118,6 +119,7 @@ export default function Layout({ children }: PropsWithChildren) {
         { to: "/ged-legalone", icon: Upload, label: "Envio em Lote ao GED", requirePermission: 'canScheduleBatch' },
         { to: "/contatos-legalone", icon: Contact, label: "Atualização de Contatos", requirePermission: 'canScheduleBatch' },
         { to: "/cancelamento-duplicadas", icon: CopyX, label: "Cancelar Duplicadas", requirePermission: 'isAdmin' },
+        { to: "/distribuidos-bb/dashboard", icon: Building2, label: "Distribuídos BB", requirePermission: 'isAdmin' },
       ],
     },
     {
