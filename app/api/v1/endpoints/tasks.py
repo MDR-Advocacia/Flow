@@ -495,7 +495,12 @@ def get_data_for_task_form(db: Session = Depends(get_db)):
     )
     # Só usuários com external_id (contato no L1) podem ser responsável por
     # tarefa — os sem external_id (SSO/JIT não sincronizado) ficam de fora.
-    users = db.query(LegalOneUser).filter(LegalOneUser.external_id.isnot(None))
+    # Só usuários ATIVOS: o L1 recusa tarefa com participante inativo
+    # ("O valor do campo 'Participants' deve ser o id de um usuário ativo" —
+    # caso real: ex-colaborador escolhido no dropdown do OneRequest, 400).
+    users = db.query(LegalOneUser).filter(
+        LegalOneUser.external_id.isnot(None), LegalOneUser.is_active.is_(True)
+    )
     users_for_form = [
         UserForTaskForm(
             id=user.id,
