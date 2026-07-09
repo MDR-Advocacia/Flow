@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertCircle, CheckCircle2, Download, File, HelpCircle, ListChecks, Loader2, Pause, Play, Square, Upload } from "lucide-react";
+import { AlertCircle, CheckCircle2, Download, Eye, EyeOff, File, HelpCircle, ListChecks, Loader2, Pause, Play, Square, Upload } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
@@ -305,6 +305,25 @@ const CreateTaskFromSpreadsheetPage = () => {
 
   return (
     <div className="space-y-6">
+      {/* Chip de lote rodando com o progresso OCULTO — clica pra reabrir o
+          controle. O lote é server-backed; o polling da página segue vivo. */}
+      {isMonitoring && !showBatchDialog && (
+        <button
+          type="button"
+          onClick={() => setShowBatchDialog(true)}
+          className="flex w-full items-center gap-2 rounded-lg border border-blue-200 bg-blue-50/60 px-3 py-2 text-left text-sm text-blue-800 transition-colors hover:bg-blue-100/60"
+        >
+          <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+          <span className="font-medium">Lote em processamento</span>
+          <span className="tabular-nums">
+            {batchStatus?.processed_items ?? 0}/{batchStatus?.total_items ?? 0}
+          </span>
+          <span className="ml-auto flex items-center gap-1 text-xs font-medium">
+            <Eye className="h-3.5 w-3.5" /> Ver progresso
+          </span>
+        </button>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
@@ -612,12 +631,23 @@ const CreateTaskFromSpreadsheetPage = () => {
               </Button>
             </div>
           </div>
-          {!isMonitoring && batchStatus && (
-            <AlertDialogFooter>
+          {isMonitoring ? (
+            <AlertDialogFooter className="sm:justify-between sm:gap-2">
+              <p className="self-center text-[11px] text-muted-foreground">
+                O lote roda no servidor — ocultar não interrompe nada.
+              </p>
               <Button variant="outline" onClick={() => setShowBatchDialog(false)}>
-                Fechar
+                <EyeOff className="mr-2 h-4 w-4" /> Ocultar progresso
               </Button>
             </AlertDialogFooter>
+          ) : (
+            batchStatus && (
+              <AlertDialogFooter>
+                <Button variant="outline" onClick={() => setShowBatchDialog(false)}>
+                  Fechar
+                </Button>
+              </AlertDialogFooter>
+            )
           )}
         </AlertDialogContent>
       </AlertDialog>
