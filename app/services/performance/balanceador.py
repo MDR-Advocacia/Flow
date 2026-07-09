@@ -6,8 +6,9 @@ Na versão real a fila vem AO VIVO do L1 e a escrita reatribui de fato
 (API PATCH p/ normal, POST ModalEnvolvimentoEmLote p/ Workflow — já provado).
 Aqui é tudo read-only.
 
-Escopo redistribuível: pendentes, fora dos subtipos `Acompanhar*` (são segmento
-de tarefa já iniciada — não se redistribui).
+Escopo redistribuível: TODAS as pendentes — inclusive os subtipos `Acompanhar*`
+(restrição removida em 2026-07-09 após revisão; antes ficavam de fora por serem
+segmento de tarefa já iniciada).
 """
 
 import datetime as _dt
@@ -18,7 +19,6 @@ from sqlalchemy.orm import Session
 _BRT = "America/Sao_Paulo"
 _HOJE = f"(now() AT TIME ZONE '{_BRT}')::date"
 _PRAZO = f"(t.prazo_previsto AT TIME ZONE '{_BRT}')::date"
-_NAO_ACOMP = "lower(coalesce(t.subtipo,'')) NOT LIKE 'acompanhar%'"
 
 try:
     from zoneinfo import ZoneInfo
@@ -79,7 +79,7 @@ class BalanceadorService:
                   count(t.id) AS total
                 FROM perf_pessoa p
                 LEFT JOIN perf_l1_tarefa t
-                  ON t.pessoa_id = p.id AND t.status = 'Pendente' AND {_NAO_ACOMP}
+                  ON t.pessoa_id = p.id AND t.status = 'Pendente'
                 WHERE p.equipe = :team AND p.ativo
                 GROUP BY p.id, p.nome, p.cargo, p.is_supervisor
                 ORDER BY p.is_supervisor DESC, atrasado DESC, futuro DESC, p.nome
@@ -108,7 +108,7 @@ class BalanceadorService:
                   count(*) FILTER (WHERE t.prazo_previsto IS NOT NULL AND {_PRAZO} < {_HOJE}) AS atrasado,
                   count(*) FILTER (WHERE {_PRAZO} = {_HOJE}) AS fatal_hoje
                 FROM perf_l1_tarefa t
-                WHERE t.pessoa_id = ANY(:ids) AND t.status = 'Pendente' AND {_NAO_ACOMP}
+                WHERE t.pessoa_id = ANY(:ids) AND t.status = 'Pendente'
                   {_periodo_clause(dias)}
                 GROUP BY t.pessoa_id, subtipo
                 ORDER BY total DESC
@@ -137,7 +137,7 @@ class BalanceadorService:
                        WHEN {_PRAZO} = {_HOJE} THEN 'fatal_hoje'
                        ELSE 'futuro' END AS situacao
                 FROM perf_l1_tarefa t
-                WHERE t.pessoa_id = :pid AND t.status = 'Pendente' AND {sub_clause} AND {_NAO_ACOMP}
+                WHERE t.pessoa_id = :pid AND t.status = 'Pendente' AND {sub_clause}
                   {_periodo_clause(dias)}
                 ORDER BY t.prazo_previsto ASC NULLS LAST
                 LIMIT :lim
@@ -374,8 +374,6 @@ class BalanceadorService:
         tarefas = []
         for t in raw:
             sub = nomes.get(t.get("subTypeId")) or f"subtipo {t.get('subTypeId')}"
-            if sub.lower().startswith("acompanhar"):
-                continue
             dl = t.get("endDateTime")
             d = None
             if dl:
