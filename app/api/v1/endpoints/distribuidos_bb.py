@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import threading
@@ -22,6 +23,7 @@ from app.core import auth
 from app.core.config import settings
 from app.core.dependencies import get_db
 from app.models.distribuidos_bb import (
+    BbClassificacao,
     BbEquipeMembro,
     BbEscritorio,
     BbResponsavel,
@@ -504,6 +506,68 @@ def remover_responsavel(
 # ─────────────────────────────────────────────────────────────────────
 # Config: equipe de envolvidos (por responsável)
 # ─────────────────────────────────────────────────────────────────────
+
+
+@router.get("/config/classificacoes", summary="Catálogo de classificações/posições de envolvido")
+def listar_classificacoes(
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    rows = (
+        db.query(BbClassificacao)
+        .filter(BbClassificacao.ativo.is_(True))
+        .order_by(BbClassificacao.ordem, BbClassificacao.id)
+        .all()
+    )
+    return [
+        {
+            "id": c.id,
+            "nome": c.nome,
+            "situacao": c.situacao,
+            "participante_tipo": c.participante_tipo,
+            "position_id_l1": c.position_id_l1,
+        }
+        for c in rows
+    ]
+
+
+@router.get("/config/responsaveis", summary="Responsáveis distintos (para gerir equipes)")
+def listar_responsaveis_distintos(
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    """Une os responsáveis das filas (round-robin) + os fixos dos escritórios,
+    com quantos membros de equipe cada um já tem — pra tela de Equipes.
+    """
+    _require_gestao(current_user)
+    ids: set[int] = set()
+    for (uid,) in db.query(BbResponsavel.user_id).distinct().all():
+        if uid:
+            ids.add(uid)
+    for (uid,) in db.query(BbEscritorio.responsavel_fixo_user_id).distinct().all():
+        if uid:
+            ids.add(uid)
+    if not ids:
+        return []
+    nomes = dict(
+        db.query(LegalOneUser.id, LegalOneUser.name).filter(LegalOneUser.id.in_(ids)).all()
+    )
+    # contagem de membros de equipe por responsável
+    contagem: dict[int, int] = {}
+    for uid, qtd in (
+        db.query(BbEquipeMembro.responsavel_user_id, func.count(BbEquipeMembro.id))
+        .group_by(BbEquipeMembro.responsavel_user_id)
+        .all()
+    ):
+        contagem[uid] = qtd
+    return sorted(
+        [
+            {"user_id": uid, "nome": nomes.get(uid), "membros": contagem.get(uid, 0)}
+            for uid in ids
+        ],
+        key=lambda x: (x["nome"] or "").lower(),
+    )
 
 
 @router.get("/config/equipe/{responsavel_user_id}", summary="Equipe (envolvidos) de um responsável")

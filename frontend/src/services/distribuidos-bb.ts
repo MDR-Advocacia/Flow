@@ -256,3 +256,44 @@ export async function adicionarResponsavel(payload: {
 export async function removerResponsavel(id: number): Promise<{ ok: boolean }> {
   return json(await apiFetch(`${BASE}/config/responsaveis/${id}`, { method: "DELETE" }));
 }
+
+// ── Equipes / Envolvidos (por responsável) ─────────────────────────────────
+export interface Classificacao {
+  id: number;
+  nome: string;
+  situacao: string | null;
+  participante_tipo: string | null;
+  position_id_l1: number | null;
+}
+export interface ResponsavelDistinto {
+  user_id: number;
+  nome: string | null;
+  membros: number;
+}
+export interface EquipeMembro {
+  id: number;
+  membro_user_id: number;
+  membro_nome: string | null;
+  classificacao: string;
+  ativo: boolean;
+}
+
+export async function listarClassificacoes(): Promise<Classificacao[]> {
+  return json(await apiFetch(`${BASE}/config/classificacoes`));
+}
+export async function listarResponsaveisDistintos(): Promise<ResponsavelDistinto[]> {
+  return json(await apiFetch(`${BASE}/config/responsaveis`));
+}
+export async function listarEquipe(responsavelUserId: number): Promise<EquipeMembro[]> {
+  return json(await apiFetch(`${BASE}/config/equipe/${responsavelUserId}`));
+}
+export async function adicionarMembroEquipe(payload: {
+  responsavel_user_id: number;
+  membro_user_id: number;
+  classificacao: string;
+}): Promise<{ id: number; ok: boolean }> {
+  return json(await apiFetch(`${BASE}/config/equipe`, { method: "POST", body: JSON.stringify(payload) }));
+}
+export async function removerMembroEquipe(membroId: number): Promise<{ ok: boolean }> {
+  return json(await apiFetch(`${BASE}/config/equipe/${membroId}`, { method: "DELETE" }));
+}

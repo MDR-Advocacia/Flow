@@ -16,7 +16,9 @@ import {
 } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
+import EquipesTab from "@/components/distribuidos-bb/EquipesTab";
 import {
   Escritorio,
   EscritorioPayload,
@@ -260,6 +262,17 @@ export default function DistribuidosBBConfigPage() {
         </div>
       </div>
 
+      <Tabs defaultValue="escritorios">
+        <TabsList>
+          <TabsTrigger value="escritorios">Escritórios &amp; Filas</TabsTrigger>
+          <TabsTrigger value="equipes">Equipes / Envolvidos</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="equipes" className="mt-4">
+          <EquipesTab />
+        </TabsContent>
+
+        <TabsContent value="escritorios" className="mt-4">
       {loading && escritorios.length === 0 ? (
         <div className="py-16 text-center">
           <Loader2 className="mx-auto h-6 w-6 animate-spin text-muted-foreground" />
@@ -351,6 +364,8 @@ export default function DistribuidosBBConfigPage() {
           ))}
         </div>
       )}
+        </TabsContent>
+      </Tabs>
 
       {/* Dialog de novo/editar escritório */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
