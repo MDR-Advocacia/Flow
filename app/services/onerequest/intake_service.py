@@ -246,11 +246,12 @@ class OnerequestIntakeService:
     # Sync READ-ONLY do Postgres da fonte (OneRequest/RPA). Espelha os campos
     # CAPTURADOS + status_sistema. O TRATAMENTO (responsável/setor/data/anotação)
     # depende do flag `onerequest_sync_espelha_tratamento`:
-    #   True  (transição): espelha o tratamento da fonte (SOBRESCREVE) — hoje as
-    #          meninas tratam no sistema antigo, então o Flow reflete.
-    #   False (pós-migração): Flow é dono; o sync NÃO toca no tratamento nem nos
-    #          created_task_id/l1_*/scheduled_by.
-    # Nunca deleta. `rows` = lista de dicts lidos do Postgres da fonte.
+    #   True: espelha o tratamento da fonte SÓ PREENCHENDO o que está vazio no
+    #         Flow (fill-only) — e pula DMI já tratada/agendada no Flow. O Flow
+    #         é o DONO do tratamento; o espelho serve pra transição/histórico.
+    #   False: o sync não toca no tratamento de jeito nenhum.
+    # Em nenhum caso toca em created_task_id/l1_*/scheduled_by. Nunca deleta.
+    # `rows` = lista de dicts lidos do Postgres da fonte.
     # ──────────────────────────────────────────────────────────────────
     def sync_from_source(self, rows: list) -> dict:
         from app.core.config import settings
@@ -272,17 +273,28 @@ class OnerequestIntakeService:
                     nome_to_id.setdefault(uname.strip().lower(), uid)
 
         def _aplica_tratamento(row, r) -> bool:
-            """Espelha responsável/setor/data/anotação da fonte (sobrescreve).
+            """Espelha responsável/setor/data/anotação da fonte — SÓ PREENCHENDO
+            o que está VAZIO no Flow (fill-only). NUNCA sobrescreve nem apaga.
+            (Bug corrigido 2026-07-09: o espelho sobrescrevia com 'N/A'/vazio da
+            fonte e apagava o tratamento de DMI recém-agendada no Flow — ex.:
+            DMI 2026/0000317161, agendada 10:24 e zerada pelo sync das 11h.)
             Retorna True se mudou algo."""
+            # DMI já tratada/agendada no Flow: não mexe em NADA do tratamento.
+            if (
+                getattr(row, "created_task_id", None)
+                or getattr(row, "scheduled_at", None)
+                or (row.status_tratamento or STATUS_TRATAMENTO_NOVO) != STATUS_TRATAMENTO_NOVO
+            ):
+                return False
             mudou = False
             nome = _src_clean(r.get("responsavel"))
             resp_id = nome_to_id.get(nome.lower()) if nome else None
-            if row.responsavel_user_id != resp_id:
+            if resp_id and not row.responsavel_user_id:
                 row.responsavel_user_id = resp_id
                 mudou = True
             for campo in ("setor", "data_agendamento", "anotacao"):
                 novo = _src_clean(r.get(campo))
-                if getattr(row, campo) != novo:
+                if novo and not getattr(row, campo):
                     setattr(row, campo, novo)
                     mudou = True
             return mudou
