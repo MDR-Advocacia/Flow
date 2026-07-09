@@ -26,9 +26,13 @@ async function getMsal(): Promise<PublicClientApplication> {
       auth: {
         clientId: CLIENT_ID,
         authority: `https://login.microsoftonline.com/${TENANT_ID}`,
-        // A operadora já está logada no M365 nesse mesmo domínio (flow.*),
-        // então o token sai silencioso na maioria das vezes.
-        redirectUri: window.location.origin,
+        // Página ESTÁTICA em branco (public/msal-redirect.html): se o retorno
+        // cair na raiz, o app React boota dentro do popup e o router reescreve
+        // a URL antes do MSAL ler o código — o popup fica preso na "tela do
+        // Flow sem acesso". Precisa estar registrada como redirect URI SPA no
+        // Entra (https://flow.mdradvocacia.com/msal-redirect.html e a variante
+        // .dunatecnologia.com).
+        redirectUri: `${window.location.origin}/msal-redirect.html`,
       },
       cache: { cacheLocation: "sessionStorage" },
     });
