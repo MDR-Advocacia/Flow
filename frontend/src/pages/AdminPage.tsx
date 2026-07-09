@@ -1015,7 +1015,13 @@ const UsersAndPermissions = () => {
                                                             <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-60" />
                                                         </Button>
                                                     </DropdownMenuTrigger>
-                                                    <DropdownMenuContent align="start" className="w-56">
+                                                    {/* Lista cresceu (permissões + equipes): teto na altura disponível
+                                                        da viewport + scroll interno, senão o menu estoura a tela. */}
+                                                    <DropdownMenuContent
+                                                        align="start"
+                                                        collisionPadding={12}
+                                                        className="max-h-[min(70vh,var(--radix-dropdown-menu-content-available-height))] w-56 overflow-y-auto"
+                                                    >
                                                         <DropdownMenuLabel>Permissões de acesso</DropdownMenuLabel>
                                                         <DropdownMenuSeparator />
                                                         {PERMISSOES.map((p) => (
