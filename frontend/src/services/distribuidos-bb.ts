@@ -44,11 +44,25 @@ export interface RunResumo {
   concluido_em: string | null;
 }
 
+export interface PlanilhasResumo {
+  total: number;
+  pendentes: number;
+  pool_novos: number;
+  recentes_pendentes: {
+    id: number;
+    nome_arquivo: string;
+    total_processos: number;
+    origem: string;
+    created_at: string | null;
+  }[];
+}
+
 export interface DashboardData {
   kpis: DashboardKpis;
   por_status: Record<string, number>;
   por_escritorio: { escritorio: string; total: number }[];
   ultima_run: RunResumo | null;
+  planilhas?: PlanilhasResumo;
 }
 
 export interface Processo {
@@ -69,6 +83,9 @@ export interface Processo {
   escritorio_path: string | null;
   observacao: string | null;
   status: string;
+  planilha_status: string; // NOVO | PLANILHA_GERADA
+  planilha_id: number | null;
+  planilha_gerada_em: string | null;
   ciencia_dada_em: string | null;
   l1_lawsuit_id: number | null;
   erro: string | null;
@@ -197,6 +214,72 @@ export async function baixarPlanilha(params: { ids?: number[]; status?: string }
   a.remove();
   URL.revokeObjectURL(url);
   return total;
+}
+
+// ── Histórico de planilhas geradas ────────────────────────────────────────
+export interface PlanilhaHist {
+  id: number;
+  run_id: number | null;
+  nome_arquivo: string;
+  total_processos: number;
+  tamanho_bytes: number;
+  origem: string; // AUTOMATICA | MANUAL
+  status_origem: string | null;
+  subido_legalone: boolean;
+  subido_em: string | null;
+  subido_por: string | null;
+  created_at: string | null;
+}
+
+export async function listarPlanilhas(params: {
+  apenasPendentes?: boolean;
+  limit?: number;
+  offset?: number;
+}): Promise<{ total: number; pendentes: number; items: PlanilhaHist[] }> {
+  const qs = new URLSearchParams();
+  if (params.apenasPendentes) qs.set("apenas_pendentes", "true");
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  return json(await apiFetch(`${BASE}/planilhas?${qs.toString()}`));
+}
+
+export async function gerarPlanilhaNoHistorico(params: {
+  ids?: number[];
+} = {}): Promise<PlanilhaHist> {
+  const qs = new URLSearchParams();
+  if (params.ids && params.ids.length) qs.set("ids", params.ids.join(","));
+  return json(await apiFetch(`${BASE}/planilhas/gerar?${qs.toString()}`, { method: "POST" }));
+}
+
+export async function baixarPlanilhaArquivada(id: number, nomeArquivo: string): Promise<void> {
+  const res = await apiFetch(`${BASE}/planilhas/${id}/download`);
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      detail = (await res.json())?.detail || detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = nomeArquivo || "planilha.xlsx";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export async function marcarPlanilhaSubida(id: number, subido: boolean): Promise<PlanilhaHist> {
+  return json(
+    await apiFetch(`${BASE}/planilhas/${id}/subido`, {
+      method: "POST",
+      body: JSON.stringify({ subido }),
+    }),
+  );
 }
 
 export async function listarEventos(params: {

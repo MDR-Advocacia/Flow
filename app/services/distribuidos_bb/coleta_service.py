@@ -40,6 +40,7 @@ from app.models.distribuidos_bb import (
     SECAO_COLETA,
     SECAO_ENVOLVIDOS,
     SECAO_EXTRACAO,
+    SECAO_PLANILHA,
     SECAO_SESSAO,
 )
 from app.services.distribuidos_bb import normalizacao as norm
@@ -295,6 +296,39 @@ def executar_coleta(
                     )
                     db.commit()
 
+            # Verificação pós-coleta: re-consulta a lista no BB pra confirmar
+            # que ZEROU (quando deu ciência) ou quanto sobrou (modo seguro).
+            try:
+                restantes = portal.consultar(run.data_inicial, run.data_final)
+                if gate_ciencia:
+                    nivel_vf = NIVEL_SUCESSO if restantes == 0 else NIVEL_AVISO
+                    msg_vf = (
+                        "Verificação pós-coleta: lista de pendências ZERADA no BB."
+                        if restantes == 0
+                        else (
+                            f"Verificação pós-coleta: {restantes} notificação(ões) ainda "
+                            f"pendente(s) no BB (esperava 0 após a ciência) — revisar."
+                        )
+                    )
+                else:
+                    nivel_vf = NIVEL_INFO
+                    msg_vf = (
+                        f"Verificação pós-coleta: {restantes} notificação(ões) seguem "
+                        f"pendentes no BB (esperado — modo seguro, nada recebeu ciência)."
+                    )
+                registrar_evento(
+                    db, secao=SECAO_COLETA, nivel=nivel_vf, acao="Verificação pós-coleta",
+                    mensagem=msg_vf,
+                    dados={"restantes": restantes, "gate_ciencia": gate_ciencia},
+                    run_id=run.id,
+                )
+                db.commit()
+            except Exception as exc_vf:  # noqa: BLE001
+                logger.warning(
+                    "Distribuídos BB: verificação pós-coleta falhou (run %s): %s",
+                    run.id, exc_vf,
+                )
+
         run.status = RUN_CONCLUIDO
         run.concluido_em = datetime.now(timezone.utc)
         registrar_evento(
@@ -306,6 +340,40 @@ def executar_coleta(
             ),
             run_id=run.id,
         )
+        db.commit()
+
+        # Pool de planilha: NÃO gera planilha automática. Os distribuídos ficam
+        # como NOVO (default) aguardando o operador mandar gerar. Aqui só
+        # sinalizamos o que entrou no pool — e avisamos quando não veio nada.
+        try:
+            from app.services.distribuidos_bb.planilha_service import contar_pool_novos
+
+            novos_pool = contar_pool_novos(db)
+            if run.total_distribuidos > 0:
+                registrar_evento(
+                    db, secao=SECAO_PLANILHA, nivel=NIVEL_INFO, acao="Pool atualizado",
+                    mensagem=(
+                        f"{run.total_distribuidos} processo(s) novo(s) desta execução "
+                        f"entraram no pool. Pool total aguardando planilha: {novos_pool}. "
+                        f"O operador gera a planilha quando quiser."
+                    ),
+                    dados={"novos_execucao": run.total_distribuidos, "pool_total": novos_pool},
+                    run_id=run.id,
+                )
+            else:
+                registrar_evento(
+                    db, secao=SECAO_PLANILHA, nivel=NIVEL_AVISO, acao="Sem processos",
+                    mensagem=(
+                        "Esta execução não teve processos novos — nada entrou no pool "
+                        f"(pool total aguardando planilha segue em {novos_pool})."
+                    ),
+                    run_id=run.id,
+                )
+            db.commit()
+        except Exception as exc_pool:  # noqa: BLE001
+            logger.warning(
+                "Distribuídos BB: falha ao sinalizar o pool (run %s): %s", run.id, exc_pool,
+            )
     except Exception as exc:  # noqa: BLE001
         run.status = RUN_ERRO
         run.erro = str(exc)

@@ -385,6 +385,13 @@ class Settings(BaseSettings):
     distribuidos_bb_confirmar_ciencia: bool = False
     distribuidos_bb_session_timeout_seconds: int = 1800
 
+    # Agendamento automático da coleta: 3x/dia (madrugada, meio-dia, noite),
+    # horário de Brasília. Ao fim de cada passagem, gera e arquiva a planilha.
+    # A ciência continua protegida pela trava global acima — mesmo agendado,
+    # só dá SIM no BB se distribuidos_bb_confirmar_ciencia também estiver True.
+    distribuidos_bb_agendamento_ativo: bool = True
+    distribuidos_bb_agendamento_horarios: str = "3,12,20"  # horas BRT, separadas por vírgula
+
     # ── GED LegalOne — envio em lote de arquivos pro GED (ECM) do L1 ──
     # Modulo dedicado a subir arquivos arbitrarios (PDF, docx, xlsx,
     # imagens...) no GED de processos do Legal One a partir de CNJ +

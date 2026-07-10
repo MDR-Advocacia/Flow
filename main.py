@@ -374,6 +374,18 @@ async def lifespan(_: FastAPI):
             "Falha ao registrar o autorun do Tratamento Web de publicações no startup."
         )
 
+    # Distribuídos BB (Cadastro de Processo): coleta agendada 3x/dia + planilha.
+    try:
+        from app.services.distribuidos_bb.schedule_worker import (
+            register_distribuidos_bb_coleta_job,
+        )
+
+        register_distribuidos_bb_coleta_job(scheduler)
+    except Exception:
+        logger.exception(
+            "Falha ao registrar o agendamento da coleta Distribuídos BB no startup."
+        )
+
     try:
         yield
     finally:

@@ -6,7 +6,9 @@ import {
   CheckCircle2,
   CloudDownload,
   Download,
+  FileSpreadsheet,
   Inbox,
+  Layers,
   ListChecks,
   Loader2,
   type LucideIcon,
@@ -34,11 +36,18 @@ import { useToast } from "@/hooks/use-toast";
 import {
   DashboardData,
   RunResumo,
+  baixarPlanilhaArquivada,
+  gerarPlanilhaNoHistorico,
   dispararColeta,
   getDashboard,
   getRun,
   rodarSeed,
 } from "@/services/distribuidos-bb";
+
+function fmtDataCurta(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
+}
 
 function Kpi({
   label,
@@ -73,6 +82,17 @@ function Kpi({
   );
 }
 
+// O backend fala DD/MM/AAAA; o <input type="date"> nativo fala ISO (AAAA-MM-DD).
+// Convertemos nos dois sentidos pra manter o payload/back intactos e ganhar o calendário.
+function brParaIso(br: string): string {
+  const m = br.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : "";
+}
+function isoParaBr(iso: string): string {
+  const m = iso.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : "";
+}
+
 export default function DistribuidosBBDashboardPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -88,6 +108,24 @@ export default function DistribuidosBBDashboardPage() {
   const [disparando, setDisparando] = useState(false);
   const [runAtivo, setRunAtivo] = useState<RunResumo | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [gerandoPlanilha, setGerandoPlanilha] = useState(false);
+
+  const gerarPlanilhaDoPool = useCallback(async () => {
+    setGerandoPlanilha(true);
+    try {
+      const pl = await gerarPlanilhaNoHistorico();
+      await baixarPlanilhaArquivada(pl.id, pl.nome_arquivo);
+      toast({
+        title: "Planilha gerada",
+        description: `${pl.total_processos} processo(s) do pool exportado(s) e marcado(s) como "Planilha gerada".`,
+      });
+      setData(await getDashboard());
+    } catch (e) {
+      toast({ title: "Nada para gerar", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setGerandoPlanilha(false);
+    }
+  }, [toast]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -326,6 +364,85 @@ export default function DistribuidosBBDashboardPage() {
         </Card>
       </div>
 
+      {/* Pool + planilhas pendentes de subir no Legal One */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader className="pb-3 flex-row items-center justify-between space-y-0">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Layers className="h-4 w-4 text-amber-600" />
+              Pool aguardando planilha
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-3xl font-bold">{data?.planilhas?.pool_novos ?? 0}</div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Processos novos distribuídos que ainda não entraram em nenhuma planilha. Gere quando
+              quiser — eles viram <strong>"Planilha gerada"</strong> e a próxima coleta traz os novos.
+            </p>
+            <Button
+              className="mt-4"
+              size="sm"
+              onClick={gerarPlanilhaDoPool}
+              disabled={gerandoPlanilha || (data?.planilhas?.pool_novos ?? 0) === 0}
+            >
+              {gerandoPlanilha ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <FileSpreadsheet className="mr-2 h-4 w-4" />
+              )}
+              Gerar planilha do pool
+            </Button>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3 flex-row items-center justify-between space-y-0">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <CloudDownload className="h-4 w-4 text-[hsl(var(--dunatech-blue))]" />
+              Planilhas pendentes de subir no Legal One
+            </CardTitle>
+            <Button variant="ghost" size="sm" onClick={() => navigate("/distribuidos-bb")}>
+              Ver todas
+            </Button>
+          </CardHeader>
+          <CardContent>
+            <div className="text-3xl font-bold">{data?.planilhas?.pendentes ?? 0}</div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Planilhas já geradas que o operador ainda não marcou como subidas no Legal One.
+            </p>
+            <div className="mt-3 flex flex-col gap-2">
+              {(data?.planilhas?.recentes_pendentes ?? []).length === 0 ? (
+                <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
+                  Nenhuma planilha pendente de envio.
+                </div>
+              ) : (
+                data!.planilhas!.recentes_pendentes.map((pl) => (
+                  <div
+                    key={pl.id}
+                    className="flex items-center justify-between gap-2 rounded-md border bg-card px-3 py-2 text-sm"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate font-mono text-xs">{pl.nome_arquivo}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {pl.total_processos} processo(s) · {fmtDataCurta(pl.created_at)}
+                      </div>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="shrink-0"
+                      onClick={() => baixarPlanilhaArquivada(pl.id, pl.nome_arquivo)}
+                    >
+                      <Download className="mr-1.5 h-3.5 w-3.5" /> Baixar
+                    </Button>
+                  </div>
+                ))
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
       {/* Dialog de nova coleta */}
       <Dialog open={coletaOpen} onOpenChange={setColetaOpen}>
         <DialogContent className="max-w-md">
@@ -342,13 +459,24 @@ export default function DistribuidosBBDashboardPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
                 <Label className="text-xs">Data inicial</Label>
-                <Input placeholder="DD/MM/AAAA" value={dataIni} onChange={(e) => setDataIni(e.target.value)} />
+                <Input
+                  type="date"
+                  value={brParaIso(dataIni)}
+                  onChange={(e) => setDataIni(isoParaBr(e.target.value))}
+                />
               </div>
               <div className="space-y-1">
                 <Label className="text-xs">Data final</Label>
-                <Input placeholder="DD/MM/AAAA" value={dataFim} onChange={(e) => setDataFim(e.target.value)} />
+                <Input
+                  type="date"
+                  value={brParaIso(dataFim)}
+                  onChange={(e) => setDataFim(isoParaBr(e.target.value))}
+                />
               </div>
             </div>
+            <p className="-mt-1 text-xs text-muted-foreground">
+              Clique no campo pra abrir o calendário. Deixe em branco = hoje.
+            </p>
 
             <div className="flex items-start gap-2 rounded-md border p-3">
               <Checkbox

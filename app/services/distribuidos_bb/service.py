@@ -18,10 +18,13 @@ from app.models.distribuidos_bb import (
     BbEnvolvido,
     BbEscritorio,
     BbEvento,
+    BbPlanilha,
     BbProcesso,
     BbRun,
     NIVEL_SUCESSO,
+    POOL_NOVO,
     PROC_COLETADO,
+    PROC_DISTRIBUIDO,
     SECAO_EXTRACAO,
 )
 from app.models.legal_one import LegalOneUser
@@ -89,11 +92,53 @@ class DistribuidosBBService:
         }
 
         ultima_run = self.db.query(BbRun).order_by(BbRun.id.desc()).first()
+
+        # Planilhas ainda não subidas no Legal One (fica no dashboard inicial).
+        planilhas_total = self.db.query(func.count(BbPlanilha.id)).scalar() or 0
+        pend_rows = (
+            self.db.query(BbPlanilha)
+            .filter(BbPlanilha.subido_legalone.is_(False))
+            .order_by(BbPlanilha.id.desc())
+            .limit(5)
+            .all()
+        )
+        planilhas_pendentes = (
+            self.db.query(func.count(BbPlanilha.id))
+            .filter(BbPlanilha.subido_legalone.is_(False))
+            .scalar()
+            or 0
+        )
+        pool_novos = (
+            self.db.query(func.count(BbProcesso.id))
+            .filter(
+                BbProcesso.planilha_status == POOL_NOVO,
+                BbProcesso.status == PROC_DISTRIBUIDO,
+            )
+            .scalar()
+            or 0
+        )
+        planilhas = {
+            "total": int(planilhas_total),
+            "pendentes": int(planilhas_pendentes),
+            "pool_novos": int(pool_novos),
+            "recentes_pendentes": [
+                {
+                    "id": p.id,
+                    "nome_arquivo": p.nome_arquivo,
+                    "total_processos": p.total_processos,
+                    "origem": p.origem,
+                    "created_at": p.created_at.isoformat() if p.created_at else None,
+                }
+                for p in pend_rows
+            ],
+        }
+
         return {
             "kpis": kpis,
             "por_status": por_status,
             "por_escritorio": por_escritorio,
             "ultima_run": self._run_dto(ultima_run) if ultima_run else None,
+            "planilhas": planilhas,
         }
 
     def _run_dto(self, run: BbRun) -> dict[str, Any]:
@@ -158,6 +203,9 @@ class DistribuidosBBService:
             "escritorio_path": p.escritorio_path,
             "observacao": p.observacao,
             "status": p.status,
+            "planilha_status": p.planilha_status,
+            "planilha_id": p.planilha_id,
+            "planilha_gerada_em": p.planilha_gerada_em.isoformat() if p.planilha_gerada_em else None,
             "ciencia_dada_em": p.ciencia_dada_em.isoformat() if p.ciencia_dada_em else None,
             "l1_lawsuit_id": p.l1_lawsuit_id,
             "erro": p.erro,

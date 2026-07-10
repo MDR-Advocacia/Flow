@@ -2,8 +2,11 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Building2,
+  CheckCircle2,
+  Download,
   FileSpreadsheet,
   FileText,
+  History,
   Loader2,
   ScrollText,
   Search,
@@ -11,6 +14,7 @@ import {
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -26,14 +30,36 @@ import { useToast } from "@/hooks/use-toast";
 import {
   Auditoria,
   Evento,
+  PlanilhaHist,
   Processo,
-  baixarPlanilha,
+  baixarPlanilhaArquivada,
+  gerarPlanilhaNoHistorico,
   getAuditoria,
   listarEventos,
+  listarPlanilhas,
   listarProcessos,
+  marcarPlanilhaSubida,
 } from "@/services/distribuidos-bb";
 
 const PAGE_SIZES = [25, 50, 100];
+const PLANILHAS_PAGE_SIZE = 25;
+
+function fmtBytes(n: number): string {
+  if (!n) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+const ORIGEM_META: Record<string, { label: string; cls: string }> = {
+  AUTOMATICA: { label: "Automática", cls: "bg-sky-100 text-sky-700" },
+  MANUAL: { label: "Manual", cls: "bg-slate-100 text-slate-700" },
+};
+
+const POOL_META: Record<string, { label: string; cls: string }> = {
+  NOVO: { label: "Novo", cls: "bg-amber-100 text-amber-700" },
+  PLANILHA_GERADA: { label: "Planilha gerada", cls: "bg-emerald-100 text-emerald-700" },
+};
 
 const STATUS_META: Record<string, { label: string; cls: string }> = {
   COLETADO: { label: "Aguardando ciência", cls: "bg-slate-100 text-slate-700" },
@@ -82,16 +108,23 @@ export default function DistribuidosBBPage() {
   const { toast } = useToast();
   const [searchParams] = useSearchParams();
 
-  const [aba, setAba] = useState<"processos" | "log">("processos");
+  const [aba, setAba] = useState<"processos" | "log" | "planilhas">("processos");
   const [baixando, setBaixando] = useState(false);
 
   const gerarPlanilha = async () => {
     setBaixando(true);
     try {
-      const total = await baixarPlanilha({ status: statusFiltro || "DISTRIBUIDO" });
-      toast({ title: "Planilha gerada", description: `${total} processo(s) exportado(s). Suba o arquivo no Legal One.` });
+      const pl = await gerarPlanilhaNoHistorico();
+      await baixarPlanilhaArquivada(pl.id, pl.nome_arquivo);
+      toast({
+        title: "Planilha gerada",
+        description: `${pl.total_processos} processo(s) do pool exportado(s) e marcado(s) como "Planilha gerada". Suba no Legal One.`,
+      });
+      setAba("planilhas");
+      loadPlanilhas();
+      if (aba === "processos") loadProcessos();
     } catch (e) {
-      toast({ title: "Erro ao gerar planilha", description: String((e as Error).message), variant: "destructive" });
+      toast({ title: "Nada para gerar", description: String((e as Error).message), variant: "destructive" });
     } finally {
       setBaixando(false);
     }
@@ -113,6 +146,14 @@ export default function DistribuidosBBPage() {
   const [secaoFiltro, setSecaoFiltro] = useState<string>("");
   const [nivelFiltro, setNivelFiltro] = useState<string>("");
   const [logPage, setLogPage] = useState(1);
+
+  // Planilhas
+  const [planilhas, setPlanilhas] = useState<PlanilhaHist[]>([]);
+  const [planilhasTotal, setPlanilhasTotal] = useState(0);
+  const [planilhasPendentes, setPlanilhasPendentes] = useState(0);
+  const [planilhasPage, setPlanilhasPage] = useState(1);
+  const [planilhasLoading, setPlanilhasLoading] = useState(false);
+  const [soPendentes, setSoPendentes] = useState(false);
 
   // Auditoria
   const [auditoria, setAuditoria] = useState<Auditoria | null>(null);
@@ -155,12 +196,51 @@ export default function DistribuidosBBPage() {
     }
   }, [secaoFiltro, nivelFiltro, logPage, toast]);
 
+  const loadPlanilhas = useCallback(async () => {
+    setPlanilhasLoading(true);
+    try {
+      const resp = await listarPlanilhas({
+        apenasPendentes: soPendentes,
+        limit: PLANILHAS_PAGE_SIZE,
+        offset: (planilhasPage - 1) * PLANILHAS_PAGE_SIZE,
+      });
+      setPlanilhas(resp.items);
+      setPlanilhasTotal(resp.total);
+      setPlanilhasPendentes(resp.pendentes);
+    } catch (e) {
+      toast({ title: "Erro ao carregar planilhas", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setPlanilhasLoading(false);
+    }
+  }, [soPendentes, planilhasPage, toast]);
+
+  const alternarSubido = async (pl: PlanilhaHist, valor: boolean) => {
+    try {
+      const atualizada = await marcarPlanilhaSubida(pl.id, valor);
+      setPlanilhas((prev) => prev.map((x) => (x.id === pl.id ? atualizada : x)));
+      setPlanilhasPendentes((n) => Math.max(0, n + (valor ? -1 : 1)));
+    } catch (e) {
+      toast({ title: "Erro ao marcar planilha", description: String((e as Error).message), variant: "destructive" });
+    }
+  };
+
+  const baixarDoHistorico = async (pl: PlanilhaHist) => {
+    try {
+      await baixarPlanilhaArquivada(pl.id, pl.nome_arquivo);
+    } catch (e) {
+      toast({ title: "Erro ao baixar", description: String((e as Error).message), variant: "destructive" });
+    }
+  };
+
   useEffect(() => {
     if (aba === "processos") loadProcessos();
   }, [aba, loadProcessos]);
   useEffect(() => {
     if (aba === "log") loadEventos();
   }, [aba, loadEventos]);
+  useEffect(() => {
+    if (aba === "planilhas") loadPlanilhas();
+  }, [aba, loadPlanilhas]);
 
   const abrirAuditoria = async (proc: Processo) => {
     setAuditLoading(true);
@@ -175,6 +255,7 @@ export default function DistribuidosBBPage() {
   };
 
   const logTotalPages = Math.max(1, Math.ceil(eventosTotal / 100));
+  const planilhasTotalPages = Math.max(1, Math.ceil(planilhasTotal / PLANILHAS_PAGE_SIZE));
 
   return (
     <div className="flex flex-col gap-4">
@@ -197,10 +278,18 @@ export default function DistribuidosBBPage() {
         </div>
       </div>
 
-      <Tabs value={aba} onValueChange={(v) => setAba(v as "processos" | "log")}>
+      <Tabs value={aba} onValueChange={(v) => setAba(v as "processos" | "log" | "planilhas")}>
         <TabsList>
           <TabsTrigger value="processos">
             <FileText className="mr-1.5 h-4 w-4" /> Processos
+          </TabsTrigger>
+          <TabsTrigger value="planilhas">
+            <History className="mr-1.5 h-4 w-4" /> Planilhas
+            {planilhasPendentes > 0 && (
+              <Badge className="ml-1.5 bg-amber-100 text-amber-700 hover:bg-amber-100" variant="secondary">
+                {planilhasPendentes}
+              </Badge>
+            )}
           </TabsTrigger>
           <TabsTrigger value="log">
             <ScrollText className="mr-1.5 h-4 w-4" /> Log de tudo
@@ -253,6 +342,7 @@ export default function DistribuidosBBPage() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>Status</TableHead>
+                      <TableHead>Pool</TableHead>
                       <TableHead>CNJ / NPJ</TableHead>
                       <TableHead>Posição</TableHead>
                       <TableHead>Natureza</TableHead>
@@ -266,13 +356,13 @@ export default function DistribuidosBBPage() {
                   <TableBody>
                     {loading && items.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={9} className="py-10 text-center">
+                        <TableCell colSpan={10} className="py-10 text-center">
                           <Loader2 className="mx-auto h-6 w-6 animate-spin text-muted-foreground" />
                         </TableCell>
                       </TableRow>
                     ) : items.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={9} className="py-10 text-center text-muted-foreground">
+                        <TableCell colSpan={10} className="py-10 text-center text-muted-foreground">
                           Nenhum processo encontrado.
                         </TableCell>
                       </TableRow>
@@ -281,6 +371,12 @@ export default function DistribuidosBBPage() {
                         <TableRow key={p.id} className={idx % 2 === 1 ? "bg-muted/20" : undefined}>
                           <TableCell>
                             <StatusBadge status={p.status} />
+                          </TableCell>
+                          <TableCell>
+                            {(() => {
+                              const pm = POOL_META[p.planilha_status] ?? { label: p.planilha_status, cls: "bg-slate-100 text-slate-700" };
+                              return <Badge className={`${pm.cls} hover:${pm.cls}`} variant="secondary">{pm.label}</Badge>;
+                            })()}
                           </TableCell>
                           <TableCell className="font-mono text-xs">
                             <div>{p.cnj ?? <span className="text-muted-foreground">sem CNJ</span>}</div>
@@ -338,6 +434,135 @@ export default function DistribuidosBBPage() {
                     size="sm"
                     disabled={page >= totalPages || loading}
                     onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  >
+                    Próxima
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </>
+      )}
+
+      {aba === "planilhas" && (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="so-pendentes"
+                checked={soPendentes}
+                onCheckedChange={(v) => {
+                  setPlanilhasPage(1);
+                  setSoPendentes(v === true);
+                }}
+              />
+              <label htmlFor="so-pendentes" className="text-sm">
+                Só as que ainda não subi no Legal One
+              </label>
+            </div>
+            <div className="text-sm text-muted-foreground">
+              {planilhasPendentes} pendente(s) de envio ao Legal One
+            </div>
+          </div>
+
+          <Card>
+            <CardContent className="p-0">
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-44">Gerada em</TableHead>
+                      <TableHead>Arquivo</TableHead>
+                      <TableHead className="w-28">Origem</TableHead>
+                      <TableHead className="w-24 text-right">Processos</TableHead>
+                      <TableHead className="w-24 text-right">Tamanho</TableHead>
+                      <TableHead className="min-w-[200px]">Subido no Legal One</TableHead>
+                      <TableHead className="w-28 text-right">Baixar</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {planilhasLoading && planilhas.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={7} className="py-10 text-center">
+                          <Loader2 className="mx-auto h-6 w-6 animate-spin text-muted-foreground" />
+                        </TableCell>
+                      </TableRow>
+                    ) : planilhas.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
+                          Nenhuma planilha gerada ainda. Elas aparecem aqui automaticamente após cada
+                          coleta (agendada ou manual).
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      planilhas.map((pl, idx) => {
+                        const om = ORIGEM_META[pl.origem] ?? { label: pl.origem, cls: "bg-slate-100 text-slate-700" };
+                        return (
+                          <TableRow key={pl.id} className={idx % 2 === 1 ? "bg-muted/20" : undefined}>
+                            <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                              {fmtData(pl.created_at)}
+                            </TableCell>
+                            <TableCell className="max-w-[280px] truncate font-mono text-xs" title={pl.nome_arquivo}>
+                              {pl.nome_arquivo}
+                            </TableCell>
+                            <TableCell>
+                              <Badge className={`${om.cls} hover:${om.cls}`} variant="secondary">{om.label}</Badge>
+                            </TableCell>
+                            <TableCell className="text-right">{pl.total_processos}</TableCell>
+                            <TableCell className="text-right text-muted-foreground">{fmtBytes(pl.tamanho_bytes)}</TableCell>
+                            <TableCell>
+                              <div className="flex items-center gap-2">
+                                <Checkbox
+                                  id={`subido-${pl.id}`}
+                                  checked={pl.subido_legalone}
+                                  onCheckedChange={(v) => alternarSubido(pl, v === true)}
+                                />
+                                {pl.subido_legalone ? (
+                                  <span className="flex items-center gap-1 text-xs text-emerald-700">
+                                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                                    {pl.subido_em ? fmtData(pl.subido_em) : "subido"}
+                                    {pl.subido_por ? ` · ${pl.subido_por}` : ""}
+                                  </span>
+                                ) : (
+                                  <label htmlFor={`subido-${pl.id}`} className="cursor-pointer text-xs text-amber-600">
+                                    marcar como subido
+                                  </label>
+                                )}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Button size="sm" variant="outline" onClick={() => baixarDoHistorico(pl)}>
+                                <Download className="mr-1.5 h-3.5 w-3.5" /> Baixar
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t p-3 text-sm">
+                <div className="text-muted-foreground">
+                  {planilhasTotal === 0 ? 0 : (planilhasPage - 1) * PLANILHAS_PAGE_SIZE + 1}–
+                  {Math.min(planilhasTotal, planilhasPage * PLANILHAS_PAGE_SIZE)} de {planilhasTotal} · Página{" "}
+                  {planilhasPage} de {planilhasTotalPages}
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={planilhasPage <= 1 || planilhasLoading}
+                    onClick={() => setPlanilhasPage((p) => Math.max(1, p - 1))}
+                  >
+                    Anterior
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={planilhasPage >= planilhasTotalPages || planilhasLoading}
+                    onClick={() => setPlanilhasPage((p) => Math.min(planilhasTotalPages, p + 1))}
                   >
                     Próxima
                   </Button>

@@ -11,19 +11,31 @@ from __future__ import annotations
 
 import io
 from copy import copy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import openpyxl
 from sqlalchemy.orm import Session
 
-from app.models.distribuidos_bb import BbConfig, BbEnvolvido, BbProcesso
+from app.models.distribuidos_bb import (
+    PLANILHA_MANUAL,
+    POOL_NOVO,
+    POOL_PLANILHA_GERADA,
+    PROC_DISTRIBUIDO,
+    BbConfig,
+    BbEnvolvido,
+    BbPlanilha,
+    BbProcesso,
+)
 from app.models.legal_one import LegalOneUser
 from app.services.distribuidos_bb import normalizacao as norm
 from app.services.distribuidos_bb.cadastro_l1 import parse_tramitacao
 from app.services.distribuidos_bb.envolvidos_equipe import montar_envolvidos_equipe
 
 _TEMPLATE = Path(__file__).parent / "templates" / "MODELO_LEGAL_ONE.xlsx"
+_TZ_BR = ZoneInfo("America/Sao_Paulo")
 
 
 def _cfg(db: Session, chave: str, default: str = "") -> str:
@@ -141,3 +153,78 @@ def gerar_planilha(
     wb.save(buf)
     buf.seek(0)
     return buf, len(processos)
+
+
+def contar_pool_novos(db: Session) -> int:
+    """Quantos processos estão no pool aguardando planilha (NOVO + distribuídos)."""
+    return (
+        db.query(BbProcesso)
+        .filter(
+            BbProcesso.planilha_status == POOL_NOVO,
+            BbProcesso.status == PROC_DISTRIBUIDO,
+        )
+        .count()
+    )
+
+
+def gerar_e_persistir(
+    db: Session,
+    *,
+    processo_ids: Optional[list[int]] = None,
+    origem: str = PLANILHA_MANUAL,
+) -> Optional[BbPlanilha]:
+    """Gera a planilha do POOL e a arquiva em `bbd_planilhas`. Devolve a linha.
+
+    Regra do pool: pega TODOS os processos marcados NOVO (e já distribuídos),
+    gera a planilha e os marca como PLANILHA_GERADA (vinculando à planilha).
+    A próxima coleta traz os processos novos como NOVO de novo.
+
+    - Se `processo_ids` for dado, usa exatamente esses (subset manual).
+    - Devolve `None` quando não há nada no pool (não cria planilha vazia).
+    - NÃO faz commit — quem chama controla a transação.
+    """
+    if processo_ids is None:
+        processos = (
+            db.query(BbProcesso)
+            .filter(
+                BbProcesso.planilha_status == POOL_NOVO,
+                BbProcesso.status == PROC_DISTRIBUIDO,
+            )
+            .order_by(BbProcesso.id)
+            .all()
+        )
+    else:
+        processos = (
+            db.query(BbProcesso).filter(BbProcesso.id.in_(processo_ids or [0])).all()
+        )
+    if not processos:
+        return None
+
+    ids = [p.id for p in processos]
+    buf, total = gerar_planilha(db, processo_ids=ids, status=None)
+    if total == 0:
+        return None
+
+    dados = buf.getvalue()
+    carimbo = datetime.now(_TZ_BR).strftime("%Y%m%d_%H%M")
+    nome = f"PLANILHA_MIGRACAO_DISTRIBUIDOS_BB_{carimbo}.xlsx"
+
+    planilha = BbPlanilha(
+        nome_arquivo=nome,
+        conteudo=dados,
+        total_processos=total,
+        tamanho_bytes=len(dados),
+        origem=origem,
+        status_origem=PROC_DISTRIBUIDO,
+    )
+    db.add(planilha)
+    db.flush()   # garante planilha.id
+
+    # Marca o pool como PLANILHA_GERADA e vincula à planilha recém-criada.
+    agora = datetime.now(timezone.utc)
+    for p in processos:
+        p.planilha_status = POOL_PLANILHA_GERADA
+        p.planilha_id = planilha.id
+        p.planilha_gerada_em = agora
+
+    return planilha

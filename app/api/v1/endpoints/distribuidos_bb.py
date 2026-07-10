@@ -32,7 +32,9 @@ from app.models.distribuidos_bb import (
     BbGrupoAjuizamentoMembro,
     BbRegraObservacao,
     BbResponsavel,
+    BbPlanilha,
     BbRun,
+    PLANILHA_MANUAL,
     SECAO_CONFIGURACAO,
 )
 from app.models.legal_one import LegalOneUser
@@ -244,6 +246,120 @@ def baixar_planilha(
             "X-Total-Processos": str(total),
         },
     )
+
+# ── Histórico de planilhas geradas ──────────────────────────────────────
+
+
+def _planilha_dto(p: BbPlanilha) -> dict[str, Any]:
+    return {
+        "id": p.id,
+        "run_id": p.run_id,
+        "nome_arquivo": p.nome_arquivo,
+        "total_processos": p.total_processos,
+        "tamanho_bytes": p.tamanho_bytes,
+        "origem": p.origem,
+        "status_origem": p.status_origem,
+        "subido_legalone": p.subido_legalone,
+        "subido_em": p.subido_em.isoformat() if p.subido_em else None,
+        "subido_por": p.subido_por.name if p.subido_por else None,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+    }
+
+
+@router.get("/planilhas", summary="Histórico de planilhas geradas (paginado)")
+def listar_planilhas(
+    apenas_pendentes: bool = Query(False, description="Só as ainda não subidas no L1."),
+    limit: int = Query(25, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    q = db.query(BbPlanilha)
+    if apenas_pendentes:
+        q = q.filter(BbPlanilha.subido_legalone.is_(False))
+    q = q.order_by(BbPlanilha.id.desc())
+    total = q.count()
+    rows = q.limit(limit).offset(offset).all()
+    pendentes = db.query(BbPlanilha).filter(BbPlanilha.subido_legalone.is_(False)).count()
+    return {"total": total, "pendentes": pendentes, "items": [_planilha_dto(p) for p in rows]}
+
+
+@router.post("/planilhas/gerar", summary="Gera a planilha do pool (processos NOVO) e arquiva")
+def gerar_planilha_agora(
+    ids: Optional[str] = Query(None, description="IDs específicos; vazio = todo o pool NOVO."),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    from app.services.distribuidos_bb.planilha_service import gerar_e_persistir
+
+    _require_gestao(current_user)
+    processo_ids = None
+    if ids:
+        processo_ids = [int(x) for x in ids.split(",") if x.strip().isdigit()]
+    planilha = gerar_e_persistir(
+        db,
+        processo_ids=processo_ids,
+        origem=PLANILHA_MANUAL,
+    )
+    if planilha is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Nenhum processo novo no pool para gerar planilha.",
+        )
+    db.commit()
+    return _planilha_dto(planilha)
+
+
+@router.get("/planilhas/{planilha_id}/download", summary="Baixa o xlsx arquivado")
+def baixar_planilha_arquivada(
+    planilha_id: int,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    import io
+
+    _require_gestao(current_user)
+    p = db.get(BbPlanilha, planilha_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="Planilha não encontrada.")
+    return StreamingResponse(
+        io.BytesIO(p.conteudo),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{p.nome_arquivo}"',
+            "X-Total-Processos": str(p.total_processos),
+        },
+    )
+
+
+class MarcarSubidoPayload(BaseModel):
+    subido: bool = Field(True, description="True = ja subi no Legal One; False = desmarca.")
+
+
+@router.post("/planilhas/{planilha_id}/subido", summary="Marca/desmarca 'ja subi no Legal One'")
+def marcar_planilha_subida(
+    planilha_id: int,
+    payload: MarcarSubidoPayload,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    from datetime import datetime, timezone
+
+    _require_gestao(current_user)
+    p = db.get(BbPlanilha, planilha_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="Planilha não encontrada.")
+    p.subido_legalone = bool(payload.subido)
+    if payload.subido:
+        p.subido_em = datetime.now(timezone.utc)
+        p.subido_por_user_id = current_user.id
+    else:
+        p.subido_em = None
+        p.subido_por_user_id = None
+    db.commit()
+    db.refresh(p)
+    return _planilha_dto(p)
 
 
 @router.post("/ingerir", summary="Ingere linhas capturadas (RPA legado) e distribui")

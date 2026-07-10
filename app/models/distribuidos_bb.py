@@ -20,6 +20,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -72,6 +73,17 @@ SECAO_CONTATOS = "Contatos"
 SECAO_CADASTRO = "Cadastro"
 SECAO_CONFIGURACAO = "Configuração"
 SECAO_SESSAO = "Sessão"  # login/OneLog
+SECAO_PLANILHA = "Planilha"  # geração/arquivamento da planilha de migração
+
+# Origem de uma planilha gerada
+PLANILHA_AUTOMATICA = "AUTOMATICA"  # gerada ao fim de uma coleta (manual ou agendada)
+PLANILHA_MANUAL = "MANUAL"          # gerada pelo botão "Gerar planilha"
+
+# Situação do processo no POOL de planilha (o operador é quem gera a planilha):
+# NOVO = distribuído e ainda não entrou em nenhuma planilha; PLANILHA_GERADA =
+# já foi exportado numa planilha. A próxima coleta traz os novos como NOVO.
+POOL_NOVO = "NOVO"
+POOL_PLANILHA_GERADA = "PLANILHA_GERADA"
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -289,6 +301,15 @@ class BbProcesso(Base):
     l1_workflow_task_id = Column(Integer, nullable=True)
     erro = Column(Text, nullable=True)
 
+    # Pool de planilha: NOVO até o operador gerar a planilha, depois PLANILHA_GERADA.
+    planilha_status = Column(
+        String(20), nullable=False, server_default=POOL_NOVO, index=True,
+    )
+    planilha_id = Column(
+        Integer, ForeignKey("bbd_planilhas.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    planilha_gerada_em = Column(DateTime(timezone=True), nullable=True)
+
     # Auditoria bruta (capa do NPJ / HTML de origem)
     raw = Column(jsonb(), nullable=True)
 
@@ -474,3 +495,41 @@ class BbConfig(Base):
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False,
     )
+
+
+class BbPlanilha(Base):
+    """Planilha de migração do Legal One gerada e arquivada.
+
+    Cada passagem do RPA (agendada ou manual) gera uma planilha ao final e a
+    guarda aqui (o xlsx inteiro fica no banco em `conteudo`). O operador vê o
+    histórico, baixa e marca `subido_legalone` quando já importou no L1.
+    """
+
+    __tablename__ = "bbd_planilhas"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(
+        Integer, ForeignKey("bbd_runs.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    nome_arquivo = Column(String(200), nullable=False)
+    conteudo = Column(LargeBinary, nullable=False)              # xlsx completo
+    total_processos = Column(Integer, nullable=False, server_default="0")
+    tamanho_bytes = Column(Integer, nullable=False, server_default="0")
+    origem = Column(String(20), nullable=False, server_default=PLANILHA_MANUAL)
+    status_origem = Column(String(20), nullable=True)          # ex.: DISTRIBUIDO
+
+    # Marcação do operador: já subi essa planilha no Legal One?
+    subido_legalone = Column(
+        Boolean, nullable=False, server_default="false", index=True,
+    )
+    subido_em = Column(DateTime(timezone=True), nullable=True)
+    subido_por_user_id = Column(
+        Integer, ForeignKey("legal_one_users.id", ondelete="SET NULL"), nullable=True,
+    )
+
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True,
+    )
+
+    run = relationship("BbRun")
+    subido_por = relationship("LegalOneUser", foreign_keys=[subido_por_user_id])
