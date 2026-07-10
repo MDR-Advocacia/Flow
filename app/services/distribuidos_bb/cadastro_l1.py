@@ -345,6 +345,37 @@ def verificar_duplicado(client: Any, cnj: Optional[str], office_id: Optional[int
     return {"duplicado": bool(mesmo), "no_mesmo_escritorio": mesmo, "em_outros_escritorios": outros}
 
 
+def buscar_lawsuit_por_npj(client: Any, npj: Optional[str]) -> list[dict[str, Any]]:
+    """Acha a(s) pasta(s) pelo NPJ — que o IMPORT grava como `title` da pasta.
+
+    Essencial pra confirmar processo SEM CNJ (pré-judicial): o campo `title` é
+    filtrável (`title eq '<npj>'`, validado ao vivo) e o custom field 3687 vem
+    VAZIO em pasta criada por import. Devolve dtos {id, folder, office, cnj}.
+    """
+    if not npj or not npj.strip():
+        return []
+    lit = npj.strip().replace("'", "''")
+    url = (
+        f"{client.base_url}/Lawsuits?$filter=title eq '{lit}'"
+        "&$select=id,folder,identifierNumber,responsibleOfficeId,title&$top=10"
+    )
+    try:
+        resp = client._authenticated_request("GET", url)
+        vals = resp.json().get("value", []) if resp.status_code == 200 else []
+    except Exception:  # noqa: BLE001
+        vals = []
+    # Guarda: só os que o title bate mesmo (defensivo contra página não-filtrada).
+    alvo = npj.strip()
+    return [
+        {
+            "id": v.get("id"), "folder": v.get("folder"),
+            "office": v.get("responsibleOfficeId"), "cnj": v.get("identifierNumber"),
+        }
+        for v in vals
+        if (v.get("title") or "").strip() == alvo
+    ]
+
+
 def resolver_contato_por_nome(client: Any, nome: Optional[str]) -> Optional[int]:
     """Contato (Individual) pelo NOME COMPLETO exato → contactId.
 

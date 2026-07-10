@@ -51,12 +51,13 @@ def verificar_pendentes(db, *, client=None, limite: int = 300) -> dict:
         client = LegalOneApiClient()
 
     office_cache: dict[str, int | None] = {}
-    verificados = confirmados = sem_cnj = 0
+    verificados = confirmados = sem_id = 0
     agora = datetime.now(timezone.utc)
 
     for p in pendentes:
-        if not p.cnj:
-            sem_cnj += 1
+        # Sem NENHUM identificador (nem CNJ nem NPJ) não dá pra confirmar.
+        if not p.cnj and not p.npj:
+            sem_id += 1
             continue
         verificados += 1
         try:
@@ -65,11 +66,26 @@ def verificar_pendentes(db, *, client=None, limite: int = 300) -> dict:
                 office_cache[path] = cadastro_l1.resolver_office_por_path(client, path)
             office_id = office_cache[path]
 
-            res = cadastro_l1.verificar_duplicado(client, p.cnj, office_id)
-            achados = res.get("no_mesmo_escritorio") or []
+            pasta = None
+            via = None
+            # 1) Por CNJ + escritório (respeita BB vs Ativos no mesmo CNJ).
+            if p.cnj:
+                res = cadastro_l1.verificar_duplicado(client, p.cnj, office_id)
+                achados = res.get("no_mesmo_escritorio") or []
+                if achados:
+                    pasta, via = achados[0], f"CNJ {p.cnj}"
+            # 2) Por NPJ (o import grava o NPJ como TITLE) — resolve os SEM CNJ
+            #    e reforça os demais. Prefere mesmo escritório, senão aceita o NPJ
+            #    (que é único por processo BB).
+            if pasta is None and p.npj:
+                por_npj = cadastro_l1.buscar_lawsuit_por_npj(client, p.npj)
+                if por_npj:
+                    mesmo = [m for m in por_npj if m.get("office") == office_id]
+                    pasta = (mesmo or por_npj)[0]
+                    via = f"NPJ {p.npj}"
+
             p.l1_verificado_em = agora
-            if achados:
-                pasta = achados[0]
+            if pasta:
                 p.planilha_status = POOL_CADASTRADO_L1
                 p.l1_lawsuit_id = pasta.get("id")
                 p.l1_folder = pasta.get("folder")
@@ -80,23 +96,24 @@ def verificar_pendentes(db, *, client=None, limite: int = 300) -> dict:
                     acao="Cadastro confirmado no L1",
                     mensagem=(
                         f"Cadastro confirmado no Legal One: pasta {pasta.get('folder')} "
-                        f"(id {pasta.get('id')}), CNJ {p.cnj}."
+                        f"(id {pasta.get('id')}) — casado por {via}."
                     ),
-                    dados={"lawsuit_id": pasta.get("id"), "folder": pasta.get("folder")},
+                    dados={"lawsuit_id": pasta.get("id"), "folder": pasta.get("folder"), "via": via},
                     processo_id=p.id, run_id=p.run_id,
                 )
             db.commit()
         except Exception:  # noqa: BLE001
             db.rollback()
             logger.exception(
-                "Monitor cadastro: falha ao verificar processo %s (CNJ %s).", p.id, p.cnj,
+                "Monitor cadastro: falha ao verificar processo %s (CNJ %s / NPJ %s).",
+                p.id, p.cnj, p.npj,
             )
 
     logger.info(
-        "Monitor cadastro L1: %s verificado(s), %s confirmado(s), %s sem CNJ.",
-        verificados, confirmados, sem_cnj,
+        "Monitor cadastro L1: %s verificado(s), %s confirmado(s), %s sem identificador.",
+        verificados, confirmados, sem_id,
     )
-    return {"verificados": verificados, "confirmados": confirmados, "sem_cnj_ignorados": sem_cnj}
+    return {"verificados": verificados, "confirmados": confirmados, "sem_cnj_ignorados": sem_id}
 
 
 def _tick() -> None:
