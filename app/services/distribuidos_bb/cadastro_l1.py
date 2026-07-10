@@ -300,6 +300,51 @@ def resolver_proximo_folder(client: Any, incremento: int = 0) -> Optional[str]:
     return f"Proc - {maxn + 1 + incremento:07d}" if maxn else None
 
 
+def _buscar_lawsuits_por_cnj(client: Any, cnj: str) -> list[dict[str, Any]]:
+    """Busca lawsuits por CNJ (máscara e dígitos), com guarda anti-lixo.
+
+    Filtra o resultado pra garantir que o identifierNumber bate mesmo (o filtro
+    OData às vezes devolve página não-filtrada; comparamos por dígitos).
+    """
+    alvo = _digitos(cnj)
+    for termo in (cnj.strip(), alvo):
+        if not termo:
+            continue
+        lit = termo.replace("'", "''")
+        url = (
+            f"{client.base_url}/Lawsuits?$filter=identifierNumber eq '{lit}'"
+            "&$select=id,folder,identifierNumber,responsibleOfficeId,type&$top=30"
+        )
+        try:
+            resp = client._authenticated_request("GET", url)
+            vals = resp.json().get("value", []) if resp.status_code == 200 else []
+        except Exception:  # noqa: BLE001
+            vals = []
+        vals = [v for v in vals if _digitos(v.get("identifierNumber")) == alvo]
+        if vals:
+            return vals
+    return []
+
+
+def verificar_duplicado(client: Any, cnj: Optional[str], office_id: Optional[int]) -> dict[str, Any]:
+    """Trava anti-duplicado por (CNJ + escritório responsável).
+
+    Mesmo CNJ pode ter DUAS pastas se em escritórios DIFERENTES (ex.: BB e
+    Ativos no mesmo processo). Só é duplicado se já existir pasta principal do
+    mesmo CNJ NO MESMO escritório. Devolve
+    {duplicado, no_mesmo_escritorio: [...], em_outros_escritorios: [...]}.
+    """
+    if not cnj:
+        return {"duplicado": False, "no_mesmo_escritorio": [], "em_outros_escritorios": []}
+    existentes = _buscar_lawsuits_por_cnj(client, cnj)
+    def dto(v):
+        return {"id": v.get("id"), "folder": v.get("folder"),
+                "office": v.get("responsibleOfficeId"), "type": v.get("type")}
+    mesmo = [dto(v) for v in existentes if v.get("responsibleOfficeId") == office_id]
+    outros = [dto(v) for v in existentes if v.get("responsibleOfficeId") != office_id]
+    return {"duplicado": bool(mesmo), "no_mesmo_escritorio": mesmo, "em_outros_escritorios": outros}
+
+
 def resolver_contato_por_nome(client: Any, nome: Optional[str]) -> Optional[int]:
     """Contato (Individual) pelo NOME COMPLETO exato → contactId.
 
@@ -374,6 +419,20 @@ def montar_payload_lawsuit(
 
     office_id = resolver_office_por_path(client, processo.escritorio_path)
     origem_id = resolver_office_por_path(client, _config(db, "escritorio_origem")) or 1
+
+    # TRAVA anti-duplicado: (CNJ + escritório responsável).
+    dedup = verificar_duplicado(client, processo.cnj, office_id)
+    resolucao["dedup"] = dedup
+    if dedup["duplicado"]:
+        avisos.append(
+            "DUPLICADO: já existe pasta principal deste CNJ no mesmo escritório "
+            f"({dedup['no_mesmo_escritorio']}) — NÃO cadastrar."
+        )
+    elif dedup["em_outros_escritorios"]:
+        avisos.append(
+            f"Existe este CNJ em OUTRO escritório ({dedup['em_outros_escritorios']}) — "
+            "ok criar (2 pastas, escritórios diferentes)."
+        )
     nature_id = resolver_nature_id(client, processo.natureza)
     action_id = resolver_action_type_id(client, processo.acao)
     state_id = resolver_state_id(client, uf)
