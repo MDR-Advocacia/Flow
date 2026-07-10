@@ -313,6 +313,25 @@ export async function verificarCadastroAgora(): Promise<{
   return json(await apiFetch(`${BASE}/monitor-cadastro/verificar`, { method: "POST" }));
 }
 
+export interface CadastroL1Relatorio {
+  dry_run: boolean;
+  file: string;
+  resultado: string;
+  importado_por?: { user_id: number | null; nome: string };
+  status_import?: {
+    revisingLitigationsCount?: number;
+    importingLitigationsErrorsCount?: number;
+    importedLitigationCount?: number;
+  };
+  passos: { passo: string; ok: boolean; message?: string }[];
+}
+
+export async function cadastrarPlanilhaL1(id: number, dryRun: boolean): Promise<CadastroL1Relatorio> {
+  return json(
+    await apiFetch(`${BASE}/planilhas/${id}/cadastrar-l1?dry_run=${dryRun}`, { method: "POST" }),
+  );
+}
+
 export async function listarEventos(params: {
   secao?: string;
   nivel?: string;

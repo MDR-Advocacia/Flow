@@ -46,9 +46,9 @@ def verificar_pendentes(db, *, client=None, limite: int = 300) -> dict:
         return {"verificados": 0, "confirmados": 0, "sem_cnj_ignorados": 0}
 
     if client is None:
-        from app.services.legal_one_client import LegalOneClient
+        from app.services.legal_one_client import LegalOneApiClient
 
-        client = LegalOneClient()
+        client = LegalOneApiClient()
 
     office_cache: dict[str, int | None] = {}
     verificados = confirmados = sem_cnj = 0

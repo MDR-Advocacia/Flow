@@ -385,7 +385,37 @@ def verificar_cadastro_agora(
     _require_gestao(current_user)
     from app.services.distribuidos_bb.cadastro_monitor_worker import verificar_pendentes
 
-    return verificar_pendentes(db)
+    try:
+        return verificar_pendentes(db)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Distribuidos BB: verificacao manual de cadastro falhou.")
+        raise HTTPException(status_code=502, detail=f"Falha ao verificar no Legal One: {exc}")
+
+
+@router.post(
+    "/planilhas/{planilha_id}/cadastrar-l1",
+    summary="Sobe e importa a planilha pela API interna do L1 (dry_run controla o save real)",
+)
+def cadastrar_planilha_l1(
+    planilha_id: int,
+    dry_run: bool = Query(True, description="True = sobe e parseia (nao cria pasta). False = save real."),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb.import_l1_service import (
+        ImportL1Error,
+        cadastrar_planilha,
+    )
+
+    pl = db.get(BbPlanilha, planilha_id)
+    if pl is None:
+        raise HTTPException(status_code=404, detail="Planilha nao encontrada.")
+    try:
+        rel = cadastrar_planilha(bytes(pl.conteudo), pl.nome_arquivo, dry_run=dry_run)
+    except ImportL1Error as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return rel
 
 
 @router.post("/ingerir", summary="Ingere linhas capturadas (RPA legado) e distribui")

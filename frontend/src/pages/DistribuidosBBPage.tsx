@@ -35,6 +35,7 @@ import {
   PlanilhaHist,
   Processo,
   baixarPlanilhaArquivada,
+  cadastrarPlanilhaL1,
   gerarPlanilhaNoHistorico,
   getAuditoria,
   getPlanilhaDetalhe,
@@ -195,6 +196,34 @@ export default function DistribuidosBBPage() {
       toast({ title: "Erro ao verificar", description: String((e as Error).message), variant: "destructive" });
     } finally {
       setVerificando(false);
+    }
+  };
+
+  const [cadastrandoL1, setCadastrandoL1] = useState(false);
+  const cadastrarNoL1 = async (dryRun: boolean) => {
+    if (!detalhe) return;
+    if (!dryRun) {
+      const ok = window.confirm(
+        `CADASTRO REAL no Legal One: vai criar as pastas dos ${detalhe.progresso.total} processo(s) desta planilha e disparar o workflow. Ação irreversível. Confirmar?`,
+      );
+      if (!ok) return;
+    }
+    setCadastrandoL1(true);
+    try {
+      const rel = await cadastrarPlanilhaL1(detalhe.planilha.id, dryRun);
+      const st = rel.status_import;
+      toast({
+        title: dryRun ? "Simulação (dry-run) concluída" : "Import enviado ao Legal One",
+        description: dryRun
+          ? `${st?.revisingLitigationsCount ?? 0} em revisão · ${st?.importingLitigationsErrorsCount ?? 0} erro(s). Nada foi cadastrado (dry-run).`
+          : `${rel.resultado}. O monitor confirma os cadastros de 2 em 2 min.`,
+      });
+      setDetalhe(await getPlanilhaDetalhe(detalhe.planilha.id));
+      loadPlanilhas();
+    } catch (e) {
+      toast({ title: "Erro no import", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setCadastrandoL1(false);
     }
   };
 
@@ -899,14 +928,34 @@ export default function DistribuidosBBPage() {
                   <span className="text-sm font-medium">
                     {detalhe.progresso.cadastrados} de {detalhe.progresso.total} cadastrados no Legal One
                   </span>
-                  <Button size="sm" variant="outline" onClick={verificarCadastro} disabled={verificando}>
-                    {verificando ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    ) : (
-                      <RefreshCw className="mr-2 h-4 w-4" />
-                    )}
-                    Verificar agora
-                  </Button>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => cadastrarNoL1(true)}
+                      disabled={cadastrandoL1}
+                      title="Sobe e parseia no L1 sem criar pasta (validação)"
+                    >
+                      {cadastrandoL1 ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                      Simular import
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => cadastrarNoL1(false)}
+                      disabled={cadastrandoL1}
+                    >
+                      {cadastrandoL1 ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                      Cadastrar no L1
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={verificarCadastro} disabled={verificando}>
+                      {verificando ? (
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      ) : (
+                        <RefreshCw className="mr-2 h-4 w-4" />
+                      )}
+                      Verificar agora
+                    </Button>
+                  </div>
                 </div>
                 <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-muted">
                   <div
