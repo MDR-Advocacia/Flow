@@ -23,6 +23,10 @@ logger = logging.getLogger("distribuidos_bb.agendamento")
 
 JOB_ID_PREFIX = "distribuidos_bb_coleta"
 _TZ_BR = "America/Sao_Paulo"
+# Lock entre workers do uvicorn (WORKERS=4): só 1 roda a passagem, senão a coleta
+# — e a ciência — dispararia 4×. Chaves da casa: onerequest 001-003, ingest 004,
+# recursal 005; distribuídos BB usa 006 (coleta) e 007 (monitor cadastro).
+_LOCK_KEY = 826100006
 
 # Janela de raspagem das passagens automáticas: 3 dias pra trás até hoje.
 _DIAS_PARA_TRAS = 3
@@ -46,10 +50,11 @@ def _horarios() -> list[int]:
 
 
 def _tick() -> None:
-    """Uma passagem agendada: cria o run, coleta, distribui e gera a planilha."""
+    """Uma passagem agendada: cria o run, coleta e distribui (pool)."""
     from app.db.session import SessionLocal
     from app.services.distribuidos_bb import coleta_service
     from app.services.distribuidos_bb.onelog_client import OneLogClient
+    from app.services.onerequest._concurrency import single_worker_lock
 
     if not OneLogClient().configurado:
         logger.warning(
@@ -57,40 +62,46 @@ def _tick() -> None:
         )
         return
 
-    data_inicial, data_final = _janela_datas()
+    # Só UM worker do uvicorn roda a passagem (senão coleta+ciência em 4×).
+    with single_worker_lock(_LOCK_KEY) as got:
+        if not got:
+            logger.info("Distribuídos BB agendado: outro worker já rodando — pulando.")
+            return
 
-    db = SessionLocal()
-    try:
-        run = coleta_service.criar_run(
-            db,
-            data_inicial=data_inicial,   # 3 dias pra trás
-            data_final=data_final,       # até hoje
-            confirmar_ciencia=True,   # gated pela trava global; modo seguro se off
-            disparado_por_user_id=None,   # sistema (agendado)
-        )
-        run_id = run.id
-    except Exception:
-        logger.exception("Distribuídos BB agendado: falha ao criar o run.")
-        db.close()
-        return
-    finally:
-        db.close()
+        data_inicial, data_final = _janela_datas()
 
-    logger.info(
-        "Distribuídos BB agendado: run #%s iniciado (janela %s → %s).",
-        run_id, data_inicial, data_final,
-    )
-    try:
-        # Já estamos numa thread do scheduler — roda a coleta síncrona aqui.
-        coleta_service.executar_coleta_background(
-            run_id,
-            data_inicial=data_inicial,
-            data_final=data_final,
-            coletar_envolvidos=True,
+        db = SessionLocal()
+        try:
+            run = coleta_service.criar_run(
+                db,
+                data_inicial=data_inicial,   # 3 dias pra trás
+                data_final=data_final,       # até hoje
+                confirmar_ciencia=True,   # gated pela trava global; modo seguro se off
+                disparado_por_user_id=None,   # sistema (agendado)
+            )
+            run_id = run.id
+        except Exception:
+            logger.exception("Distribuídos BB agendado: falha ao criar o run.")
+            db.close()
+            return
+        finally:
+            db.close()
+
+        logger.info(
+            "Distribuídos BB agendado: run #%s iniciado (janela %s → %s).",
+            run_id, data_inicial, data_final,
         )
-        logger.info("Distribuídos BB agendado: run #%s concluído.", run_id)
-    except Exception:
-        logger.exception("Distribuídos BB agendado: run #%s falhou.", run_id)
+        try:
+            # Já estamos numa thread do scheduler — roda a coleta síncrona aqui.
+            coleta_service.executar_coleta_background(
+                run_id,
+                data_inicial=data_inicial,
+                data_final=data_final,
+                coletar_envolvidos=True,
+            )
+            logger.info("Distribuídos BB agendado: run #%s concluído.", run_id)
+        except Exception:
+            logger.exception("Distribuídos BB agendado: run #%s falhou.", run_id)
 
 
 def register_distribuidos_bb_coleta_job(scheduler) -> None:

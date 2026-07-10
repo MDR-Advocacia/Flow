@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 logger = logging.getLogger("distribuidos_bb.monitor_cadastro")
 
 JOB_ID = "distribuidos_bb_monitor_cadastro"
+# Lock entre workers do uvicorn (só 1 checa o L1, senão 4× requests/corrida).
+_LOCK_KEY = 826100007
 
 
 def verificar_pendentes(db, *, client=None, limite: int = 300) -> dict:
@@ -99,15 +101,19 @@ def verificar_pendentes(db, *, client=None, limite: int = 300) -> dict:
 
 def _tick() -> None:
     from app.db.session import SessionLocal
-    from app.services.distribuidos_bb.onelog_client import OneLogClient  # noqa: F401
+    from app.services.onerequest._concurrency import single_worker_lock
 
-    db = SessionLocal()
-    try:
-        verificar_pendentes(db)
-    except Exception:  # noqa: BLE001
-        logger.exception("Monitor cadastro L1: erro inesperado no tick.")
-    finally:
-        db.close()
+    # Só UM worker do uvicorn bate no L1 (evita 4× requests e corrida na marcação).
+    with single_worker_lock(_LOCK_KEY) as got:
+        if not got:
+            return
+        db = SessionLocal()
+        try:
+            verificar_pendentes(db)
+        except Exception:  # noqa: BLE001
+            logger.exception("Monitor cadastro L1: erro inesperado no tick.")
+        finally:
+            db.close()
 
 
 def register_distribuidos_bb_monitor_cadastro_job(scheduler) -> None:
