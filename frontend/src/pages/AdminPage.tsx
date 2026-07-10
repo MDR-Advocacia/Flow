@@ -135,6 +135,9 @@ const SquadsManager = () => {
   const [creatingSquad, setCreatingSquad] = useState(false);
   const [newSquadName, setNewSquadName] = useState("");
   const [newSquadKind, setNewSquadKind] = useState<"principal" | "support">("principal");
+  // Renomear squad inline (CRUD completo: criar/renomear/excluir).
+  const [renamingSquad, setRenamingSquad] = useState<number | null>(null);
+  const [renameValue, setRenameValue] = useState("");
 
   const usersForPicker = allUsers
     .filter((u) => u.is_active)
@@ -213,6 +216,52 @@ const SquadsManager = () => {
       await fetchSquads(selectedOffice);
     } catch (err: any) {
       toast({ title: "Erro ao criar squad", description: err.message, variant: "destructive" });
+    }
+  };
+
+  // Renomear squad (PUT parcial — só o nome; membros ficam intocados).
+  const renameSquad = async (squadId: number) => {
+    const nome = renameValue.trim();
+    if (!nome) return;
+    setSaving(squadId);
+    try {
+      const res = await apiFetch(`/api/v1/squads/${squadId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: nome }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+      toast({ title: "Squad renomeada", description: nome });
+      setRenamingSquad(null);
+      if (selectedOffice) await fetchSquads(selectedOffice);
+    } catch (err: any) {
+      toast({ title: "Erro ao renomear", description: err.message, variant: "destructive" });
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  // Excluir squad (soft-delete no backend: desativa e preserva o histórico).
+  const deleteSquad = async (squad: SquadDetail) => {
+    const membros = squad.members.length
+      ? ` Ela tem ${squad.members.length} membro(s).`
+      : "";
+    if (!confirm(`Excluir a squad "${squad.name}"?${membros} Ela será desativada (o histórico é preservado).`)) return;
+    setSaving(squad.id);
+    try {
+      const res = await apiFetch(`/api/v1/squads/${squad.id}`, { method: "DELETE" });
+      if (!res.ok && res.status !== 204) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      toast({ title: "Squad excluída", description: squad.name });
+      if (selectedOffice) await fetchSquads(selectedOffice);
+    } catch (err: any) {
+      toast({ title: "Erro ao excluir", description: err.message, variant: "destructive" });
+    } finally {
+      setSaving(null);
     }
   };
 
@@ -358,25 +407,80 @@ const SquadsManager = () => {
               const leader = squad.members.find((m) => m.is_leader);
               return (
                 <AccordionItem key={squad.id} value={String(squad.id)} className="border rounded-md px-3">
-                  <AccordionTrigger className="hover:no-underline">
-                    <div className="flex items-center gap-3 flex-1 flex-wrap">
-                      <span className="font-medium">{squad.name}</span>
-                      {squad.kind === "support" && (
-                        <Badge variant="secondary" className="bg-purple-100 text-purple-700 border-purple-200">Suporte</Badge>
-                      )}
-                      <Badge variant="secondary">{squad.members.length} {squad.members.length === 1 ? "membro" : "membros"}</Badge>
-                      {leader && (
-                        <Badge variant="default" className="gap-1">
-                          <Crown className="h-3 w-3" /> {leader.user.name}
-                        </Badge>
-                      )}
-                      {squad.members.filter((m) => m.is_assistant).map((m) => (
-                        <Badge key={m.id} variant="outline" className="gap-1">
-                          <Star className="h-3 w-3" /> {m.user.name}
-                        </Badge>
-                      ))}
+                  {renamingSquad === squad.id ? (
+                    // Modo renomear: input inline no lugar do header.
+                    <div className="flex items-center gap-2 py-3">
+                      <Input
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        className="h-8 max-w-sm"
+                        autoFocus
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") renameSquad(squad.id);
+                          if (e.key === "Escape") setRenamingSquad(null);
+                        }}
+                      />
+                      <Button
+                        size="sm"
+                        onClick={() => renameSquad(squad.id)}
+                        disabled={!renameValue.trim() || saving === squad.id}
+                      >
+                        Salvar
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => setRenamingSquad(null)}>
+                        Cancelar
+                      </Button>
                     </div>
-                  </AccordionTrigger>
+                  ) : (
+                    <div className="flex items-center">
+                      <AccordionTrigger className="hover:no-underline flex-1">
+                        <div className="flex items-center gap-3 flex-1 flex-wrap">
+                          <span className="font-medium">{squad.name}</span>
+                          {squad.kind === "support" && (
+                            <Badge variant="secondary" className="bg-purple-100 text-purple-700 border-purple-200">Suporte</Badge>
+                          )}
+                          <Badge variant="secondary">{squad.members.length} {squad.members.length === 1 ? "membro" : "membros"}</Badge>
+                          {leader && (
+                            <Badge variant="default" className="gap-1">
+                              <Crown className="h-3 w-3" /> {leader.user.name}
+                            </Badge>
+                          )}
+                          {squad.members.filter((m) => m.is_assistant).map((m) => (
+                            <Badge key={m.id} variant="outline" className="gap-1">
+                              <Star className="h-3 w-3" /> {m.user.name}
+                            </Badge>
+                          ))}
+                        </div>
+                      </AccordionTrigger>
+                      <div className="flex shrink-0 items-center gap-0.5 pl-2">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          onClick={() => {
+                            setRenamingSquad(squad.id);
+                            setRenameValue(squad.name);
+                          }}
+                          disabled={saving === squad.id}
+                          aria-label="Renomear squad"
+                          title="Renomear squad"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-rose-600"
+                          onClick={() => deleteSquad(squad)}
+                          disabled={saving === squad.id}
+                          aria-label="Excluir squad"
+                          title="Excluir squad (desativa; histórico preservado)"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                   <AccordionContent>
                     <Table>
                       <TableHeader>
