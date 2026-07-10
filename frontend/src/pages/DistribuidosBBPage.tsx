@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Building2,
+  FileSpreadsheet,
   FileText,
   Loader2,
   ScrollText,
@@ -26,6 +27,7 @@ import {
   Auditoria,
   Evento,
   Processo,
+  baixarPlanilha,
   getAuditoria,
   listarEventos,
   listarProcessos,
@@ -81,6 +83,19 @@ export default function DistribuidosBBPage() {
   const [searchParams] = useSearchParams();
 
   const [aba, setAba] = useState<"processos" | "log">("processos");
+  const [baixando, setBaixando] = useState(false);
+
+  const gerarPlanilha = async () => {
+    setBaixando(true);
+    try {
+      const total = await baixarPlanilha({ status: statusFiltro || "DISTRIBUIDO" });
+      toast({ title: "Planilha gerada", description: `${total} processo(s) exportado(s). Suba o arquivo no Legal One.` });
+    } catch (e) {
+      toast({ title: "Erro ao gerar planilha", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setBaixando(false);
+    }
+  };
 
   // Processos
   const [items, setItems] = useState<Processo[]>([]);
@@ -171,9 +186,15 @@ export default function DistribuidosBBPage() {
           </h1>
           <p className="text-sm text-muted-foreground">Processos capturados no portal do Banco do Brasil e sua auditoria.</p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => navigate("/distribuidos-bb/dashboard")}>
-          Ver dashboard
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button size="sm" onClick={gerarPlanilha} disabled={baixando}>
+            {baixando ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileSpreadsheet className="mr-2 h-4 w-4" />}
+            Gerar planilha
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => navigate("/distribuidos-bb/dashboard")}>
+            Ver dashboard
+          </Button>
+        </div>
       </div>
 
       <Tabs value={aba} onValueChange={(v) => setAba(v as "processos" | "log")}>

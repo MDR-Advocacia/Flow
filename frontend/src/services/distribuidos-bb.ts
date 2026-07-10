@@ -172,6 +172,33 @@ export async function getAuditoria(processoId: number): Promise<Auditoria> {
   return json(await apiFetch(`${BASE}/processos/${processoId}/auditoria`));
 }
 
+export async function baixarPlanilha(params: { ids?: number[]; status?: string }): Promise<number> {
+  const qs = new URLSearchParams();
+  if (params.ids && params.ids.length) qs.set("ids", params.ids.join(","));
+  if (params.status) qs.set("status", params.status);
+  const res = await apiFetch(`${BASE}/planilha?${qs.toString()}`);
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      detail = (await res.json())?.detail || detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  const total = Number(res.headers.get("X-Total-Processos") || "0");
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "PLANILHA_MIGRACAO_DISTRIBUIDOS_BB.xlsx";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return total;
+}
+
 export async function listarEventos(params: {
   secao?: string;
   nivel?: string;

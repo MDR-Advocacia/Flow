@@ -13,6 +13,7 @@ import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -213,6 +214,35 @@ def listar_eventos(
     _require_gestao(current_user)
     return DistribuidosBBService(db).listar_eventos(
         secao=secao, nivel=nivel, processo_id=processo_id, run_id=run_id, limit=limit, offset=offset,
+    )
+
+
+@router.get("/planilha", summary="Gera a planilha de migração do L1 (download xlsx)")
+def baixar_planilha(
+    ids: Optional[str] = Query(None, description="IDs separados por vírgula; vazio = todos os do status."),
+    status_filtro: Optional[str] = Query("DISTRIBUIDO", alias="status"),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    from app.services.distribuidos_bb.planilha_service import gerar_planilha
+
+    _require_gestao(current_user)
+    processo_ids = None
+    if ids:
+        processo_ids = [int(x) for x in ids.split(",") if x.strip().isdigit()]
+    buf, total = gerar_planilha(
+        db, processo_ids=processo_ids, status=None if processo_ids else status_filtro,
+    )
+    if total == 0:
+        raise HTTPException(status_code=404, detail="Nenhum processo para exportar.")
+    nome = "PLANILHA_MIGRACAO_DISTRIBUIDOS_BB.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{nome}"',
+            "X-Total-Processos": str(total),
+        },
     )
 
 
