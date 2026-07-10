@@ -277,6 +277,29 @@ def resolver_position_id(client: Any, nome: Optional[str]) -> Optional[int]:
     return _catalogo_por_nome(client, "LitigationParticipantPositions").get(_chave(nome))
 
 
+def resolver_proximo_folder(client: Any, incremento: int = 0) -> Optional[str]:
+    """Próximo Proc sequencial: (maior folder existente + 1 + incremento).
+
+    A API do L1 EXIGE o `folder` e não auto-numera (só o cadastro manual numera).
+    Formato 'Proc - NNNNNNN'. Ignora folders "fake" altos (>= 9.000.000).
+    Num lote, passe incremento=0,1,2… pra sequenciar; retry se colidir.
+    """
+    maxn = 0
+    try:
+        url = f"{client.base_url}/Lawsuits?$select=id,folder&$orderby=folder desc&$top=10"
+        resp = client._authenticated_request("GET", url)
+        for v in (resp.json().get("value", []) if resp.status_code == 200 else []):
+            m = re.search(r"(\d{3,})", v.get("folder") or "")
+            if m:
+                n = int(m.group(1))
+                if n < 9_000_000 and n > maxn:
+                    maxn = n
+    except Exception:  # noqa: BLE001
+        logger.exception("Cadastro: falha ao obter o próximo folder (Proc).")
+        return None
+    return f"Proc - {maxn + 1 + incremento:07d}" if maxn else None
+
+
 def resolver_contato_por_nome(client: Any, nome: Optional[str]) -> Optional[int]:
     """Contato (Individual) pelo NOME COMPLETO exato → contactId.
 
@@ -332,7 +355,9 @@ def _config(db, chave: str) -> Optional[str]:
     return c.valor if c else None
 
 
-def montar_payload_lawsuit(db, client: Any, processo, *, criar_contatos: bool = False) -> dict[str, Any]:
+def montar_payload_lawsuit(
+    db, client: Any, processo, *, criar_contatos: bool = False, folder_incremento: int = 0,
+) -> dict[str, Any]:
     """Monta o LawsuitModel a partir do distribuído + config + envolvidos.
 
     Devolve {payload, resolucao, avisos}. `resolucao` reporta cada campo
@@ -404,8 +429,13 @@ def montar_payload_lawsuit(db, client: Any, processo, *, criar_contatos: bool = 
                                   "isMainParticipant": False, "positionId": POSICAO_PARTE_CONTRARIA})
     resolucao["partes_contrarias"] = partes_report
 
+    folder = resolver_proximo_folder(client, folder_incremento)
+    if not folder:
+        avisos.append("Não consegui calcular o próximo Proc (folder) — a API exige.")
+
     payload: dict[str, Any] = {
         "type": _config(db, "tipo") or "Judicial",
+        "folder": folder,
         "title": processo.npj,
         "identifierNumber": processo.cnj,
         "statusId": status_id,
@@ -430,6 +460,7 @@ def montar_payload_lawsuit(db, client: Any, processo, *, criar_contatos: bool = 
     payload = {k: v for k, v in payload.items() if v is not None}
 
     resolucao.update({
+        "folder": folder,
         "responsibleOfficeId": {"path": processo.escritorio_path, "id": office_id},
         "originOfficeId": origem_id,
         "natureId": {"nome": processo.natureza, "id": nature_id},
