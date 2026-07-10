@@ -1,0 +1,132 @@
+"""Monitor de cadastro no Legal One (APScheduler).
+
+A partir do momento em que a planilha é gerada, cada processo fica
+`PENDENTE_CADASTRO`. De 2 em 2 minutos este monitor bate na API do Legal One
+procurando a pasta por **CNJ + escritório responsável**; quando acha, marca o
+processo como `CADASTRADO_L1` (guarda o id e o folder da pasta) e loga.
+
+Ciclo: NOVO → (operador gera planilha) PENDENTE_CADASTRO → (monitor acha) CADASTRADO_L1.
+
+Roda em thread do BackgroundScheduler → abre a própria SessionLocal.
+"""
+
+import logging
+from datetime import datetime, timezone
+
+logger = logging.getLogger("distribuidos_bb.monitor_cadastro")
+
+JOB_ID = "distribuidos_bb_monitor_cadastro"
+
+
+def verificar_pendentes(db, *, client=None, limite: int = 300) -> dict:
+    """Varre os PENDENTE_CADASTRO com CNJ e confirma no L1 os que já existem.
+
+    Devolve {verificados, confirmados, sem_cnj_ignorados}.
+    """
+    from app.models.distribuidos_bb import (
+        NIVEL_SUCESSO,
+        POOL_CADASTRADO_L1,
+        POOL_PENDENTE_CADASTRO,
+        SECAO_CADASTRO,
+        BbProcesso,
+    )
+    from app.services.distribuidos_bb import cadastro_l1
+    from app.services.distribuidos_bb.log_service import registrar_evento
+
+    pendentes = (
+        db.query(BbProcesso)
+        .filter(BbProcesso.planilha_status == POOL_PENDENTE_CADASTRO)
+        .order_by(BbProcesso.l1_verificado_em.asc().nullsfirst())
+        .limit(limite)
+        .all()
+    )
+    if not pendentes:
+        return {"verificados": 0, "confirmados": 0, "sem_cnj_ignorados": 0}
+
+    if client is None:
+        from app.services.legal_one_client import LegalOneClient
+
+        client = LegalOneClient()
+
+    office_cache: dict[str, int | None] = {}
+    verificados = confirmados = sem_cnj = 0
+    agora = datetime.now(timezone.utc)
+
+    for p in pendentes:
+        if not p.cnj:
+            sem_cnj += 1
+            continue
+        verificados += 1
+        try:
+            path = p.escritorio_path or ""
+            if path not in office_cache:
+                office_cache[path] = cadastro_l1.resolver_office_por_path(client, path)
+            office_id = office_cache[path]
+
+            res = cadastro_l1.verificar_duplicado(client, p.cnj, office_id)
+            achados = res.get("no_mesmo_escritorio") or []
+            p.l1_verificado_em = agora
+            if achados:
+                pasta = achados[0]
+                p.planilha_status = POOL_CADASTRADO_L1
+                p.l1_lawsuit_id = pasta.get("id")
+                p.l1_folder = pasta.get("folder")
+                p.cadastro_confirmado_em = agora
+                confirmados += 1
+                registrar_evento(
+                    db, secao=SECAO_CADASTRO, nivel=NIVEL_SUCESSO,
+                    acao="Cadastro confirmado no L1",
+                    mensagem=(
+                        f"Cadastro confirmado no Legal One: pasta {pasta.get('folder')} "
+                        f"(id {pasta.get('id')}), CNJ {p.cnj}."
+                    ),
+                    dados={"lawsuit_id": pasta.get("id"), "folder": pasta.get("folder")},
+                    processo_id=p.id, run_id=p.run_id,
+                )
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            logger.exception(
+                "Monitor cadastro: falha ao verificar processo %s (CNJ %s).", p.id, p.cnj,
+            )
+
+    logger.info(
+        "Monitor cadastro L1: %s verificado(s), %s confirmado(s), %s sem CNJ.",
+        verificados, confirmados, sem_cnj,
+    )
+    return {"verificados": verificados, "confirmados": confirmados, "sem_cnj_ignorados": sem_cnj}
+
+
+def _tick() -> None:
+    from app.db.session import SessionLocal
+    from app.services.distribuidos_bb.onelog_client import OneLogClient  # noqa: F401
+
+    db = SessionLocal()
+    try:
+        verificar_pendentes(db)
+    except Exception:  # noqa: BLE001
+        logger.exception("Monitor cadastro L1: erro inesperado no tick.")
+    finally:
+        db.close()
+
+
+def register_distribuidos_bb_monitor_cadastro_job(scheduler) -> None:
+    """Registra o monitor recorrente (default 2 min)."""
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    from app.core.config import settings
+
+    if not settings.distribuidos_bb_monitor_cadastro_ativo:
+        logger.info("Monitor cadastro L1: desligado (distribuidos_bb_monitor_cadastro_ativo=False).")
+        return
+
+    minutos = max(1, int(settings.distribuidos_bb_monitor_intervalo_min or 2))
+    scheduler.add_job(
+        _tick,
+        trigger=IntervalTrigger(minutes=minutos),
+        id=JOB_ID,
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    logger.info("Monitor cadastro L1: registrado (a cada %s min).", minutos)

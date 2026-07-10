@@ -130,7 +130,15 @@ export default function DistribuidosBBDashboardPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setData(await getDashboard());
+      const dash = await getDashboard();
+      setData(dash);
+      // Tracking PERSISTENTE: se há uma coleta rodando no servidor, reengata o
+      // acompanhamento ao montar/atualizar a tela — não depende de o operador
+      // ter ficado na página quando disparou (trocar de tela não perde o track).
+      const ur = dash.ultima_run;
+      if (ur && ur.status === "EM_ANDAMENTO") {
+        setRunAtivo((atual) => (atual && atual.id === ur.id ? atual : ur));
+      }
     } catch (e) {
       toast({ title: "Erro ao carregar", description: String((e as Error).message), variant: "destructive" });
     } finally {
@@ -377,8 +385,20 @@ export default function DistribuidosBBDashboardPage() {
             <div className="text-3xl font-bold">{data?.planilhas?.pool_novos ?? 0}</div>
             <p className="mt-1 text-sm text-muted-foreground">
               Processos novos distribuídos que ainda não entraram em nenhuma planilha. Gere quando
-              quiser — eles viram <strong>"Planilha gerada"</strong> e a próxima coleta traz os novos.
+              quiser — a próxima coleta traz os novos.
             </p>
+            {/* Ciclo do cadastro: Novo → Pendente cadastro → Confirmado no L1 */}
+            <div className="mt-3 flex flex-wrap gap-2 text-xs">
+              <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-700">
+                {data?.planilhas?.pool_novos ?? 0} Novo
+              </span>
+              <span className="rounded-full bg-sky-100 px-2 py-1 text-sky-700">
+                {data?.planilhas?.pendente_cadastro ?? 0} Pendente cadastro
+              </span>
+              <span className="rounded-full bg-emerald-100 px-2 py-1 text-emerald-700">
+                {data?.planilhas?.cadastrado_l1 ?? 0} Confirmado no L1
+              </span>
+            </div>
             <Button
               className="mt-4"
               size="sm"

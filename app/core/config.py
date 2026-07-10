@@ -392,6 +392,11 @@ class Settings(BaseSettings):
     distribuidos_bb_agendamento_ativo: bool = True
     distribuidos_bb_agendamento_horarios: str = "3,12,20"  # horas BRT, separadas por vírgula
 
+    # Monitor de cadastro no Legal One: de X em X min bate na API do L1 procurando
+    # a pasta (por CNJ+escritório) dos processos com planilha já gerada, e confirma.
+    distribuidos_bb_monitor_cadastro_ativo: bool = True
+    distribuidos_bb_monitor_intervalo_min: int = 2
+
     # ── GED LegalOne — envio em lote de arquivos pro GED (ECM) do L1 ──
     # Modulo dedicado a subir arquivos arbitrarios (PDF, docx, xlsx,
     # imagens...) no GED de processos do Legal One a partir de CNJ +

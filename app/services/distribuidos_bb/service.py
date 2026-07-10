@@ -22,7 +22,9 @@ from app.models.distribuidos_bb import (
     BbProcesso,
     BbRun,
     NIVEL_SUCESSO,
+    POOL_CADASTRADO_L1,
     POOL_NOVO,
+    POOL_PENDENTE_CADASTRO,
     PROC_COLETADO,
     PROC_DISTRIBUIDO,
     SECAO_EXTRACAO,
@@ -108,19 +110,18 @@ class DistribuidosBBService:
             .scalar()
             or 0
         )
-        pool_novos = (
-            self.db.query(func.count(BbProcesso.id))
-            .filter(
-                BbProcesso.planilha_status == POOL_NOVO,
-                BbProcesso.status == PROC_DISTRIBUIDO,
-            )
-            .scalar()
-            or 0
+        pool = dict(
+            self.db.query(BbProcesso.planilha_status, func.count(BbProcesso.id))
+            .filter(BbProcesso.status == PROC_DISTRIBUIDO)
+            .group_by(BbProcesso.planilha_status)
+            .all()
         )
         planilhas = {
             "total": int(planilhas_total),
             "pendentes": int(planilhas_pendentes),
-            "pool_novos": int(pool_novos),
+            "pool_novos": int(pool.get(POOL_NOVO, 0)),
+            "pendente_cadastro": int(pool.get(POOL_PENDENTE_CADASTRO, 0)),
+            "cadastrado_l1": int(pool.get(POOL_CADASTRADO_L1, 0)),
             "recentes_pendentes": [
                 {
                     "id": p.id,
@@ -184,6 +185,38 @@ class DistribuidosBBService:
         nomes = self._mapa_nomes({r.responsavel_user_id for r in rows})
         return {"total": total, "items": [self._proc_dto(r, nomes) for r in rows]}
 
+    def detalhe_planilha(self, planilha_id: int) -> Optional[dict[str, Any]]:
+        """Planilha + seus processos com o status de cadastro no L1 (tela de visualização)."""
+        pl = self.db.get(BbPlanilha, planilha_id)
+        if pl is None:
+            return None
+        rows = (
+            self.db.query(BbProcesso)
+            .filter(BbProcesso.planilha_id == planilha_id)
+            .order_by(BbProcesso.id)
+            .all()
+        )
+        nomes = self._mapa_nomes({r.responsavel_user_id for r in rows})
+        cadastrados = sum(1 for p in rows if p.planilha_status == POOL_CADASTRADO_L1)
+        pendentes = sum(1 for p in rows if p.planilha_status == POOL_PENDENTE_CADASTRO)
+        return {
+            "planilha": {
+                "id": pl.id,
+                "nome_arquivo": pl.nome_arquivo,
+                "total_processos": pl.total_processos,
+                "origem": pl.origem,
+                "subido_legalone": pl.subido_legalone,
+                "subido_em": pl.subido_em.isoformat() if pl.subido_em else None,
+                "created_at": pl.created_at.isoformat() if pl.created_at else None,
+            },
+            "progresso": {
+                "total": len(rows),
+                "cadastrados": cadastrados,
+                "pendentes": pendentes,
+            },
+            "processos": [self._proc_dto(r, nomes) for r in rows],
+        }
+
     def _proc_dto(self, p: BbProcesso, nomes: dict[int, str]) -> dict[str, Any]:
         return {
             "id": p.id,
@@ -206,6 +239,9 @@ class DistribuidosBBService:
             "planilha_status": p.planilha_status,
             "planilha_id": p.planilha_id,
             "planilha_gerada_em": p.planilha_gerada_em.isoformat() if p.planilha_gerada_em else None,
+            "cadastro_confirmado_em": p.cadastro_confirmado_em.isoformat() if p.cadastro_confirmado_em else None,
+            "l1_verificado_em": p.l1_verificado_em.isoformat() if p.l1_verificado_em else None,
+            "l1_folder": p.l1_folder,
             "ciencia_dada_em": p.ciencia_dada_em.isoformat() if p.ciencia_dada_em else None,
             "l1_lawsuit_id": p.l1_lawsuit_id,
             "erro": p.erro,

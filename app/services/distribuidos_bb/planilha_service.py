@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app.models.distribuidos_bb import (
     PLANILHA_MANUAL,
     POOL_NOVO,
-    POOL_PLANILHA_GERADA,
+    POOL_PENDENTE_CADASTRO,
     PROC_DISTRIBUIDO,
     BbConfig,
     BbEnvolvido,
@@ -220,10 +220,10 @@ def gerar_e_persistir(
     db.add(planilha)
     db.flush()   # garante planilha.id
 
-    # Marca o pool como PLANILHA_GERADA e vincula à planilha recém-criada.
+    # Marca o pool como PENDENTE_CADASTRO (aguardando o L1) e vincula à planilha.
     agora = datetime.now(timezone.utc)
     for p in processos:
-        p.planilha_status = POOL_PLANILHA_GERADA
+        p.planilha_status = POOL_PENDENTE_CADASTRO
         p.planilha_id = planilha.id
         p.planilha_gerada_em = agora
 

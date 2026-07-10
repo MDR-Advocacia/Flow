@@ -362,6 +362,30 @@ def marcar_planilha_subida(
     return _planilha_dto(p)
 
 
+@router.get("/planilhas/{planilha_id}", summary="Detalhe da planilha + processos e status de cadastro no L1")
+def detalhe_planilha(
+    planilha_id: int,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    res = DistribuidosBBService(db).detalhe_planilha(planilha_id)
+    if res is None:
+        raise HTTPException(status_code=404, detail="Planilha nao encontrada.")
+    return res
+
+
+@router.post("/monitor-cadastro/verificar", summary="Roda o monitor de cadastro no L1 agora (manual)")
+def verificar_cadastro_agora(
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb.cadastro_monitor_worker import verificar_pendentes
+
+    return verificar_pendentes(db)
+
+
 @router.post("/ingerir", summary="Ingere linhas capturadas (RPA legado) e distribui")
 def ingerir(
     payload: IngerirPayload,

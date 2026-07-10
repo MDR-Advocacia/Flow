@@ -386,6 +386,18 @@ async def lifespan(_: FastAPI):
             "Falha ao registrar o agendamento da coleta Distribuídos BB no startup."
         )
 
+    # Distribuídos BB: monitor que confirma o cadastro no L1 (de 2 em 2 min).
+    try:
+        from app.services.distribuidos_bb.cadastro_monitor_worker import (
+            register_distribuidos_bb_monitor_cadastro_job,
+        )
+
+        register_distribuidos_bb_monitor_cadastro_job(scheduler)
+    except Exception:
+        logger.exception(
+            "Falha ao registrar o monitor de cadastro L1 Distribuídos BB no startup."
+        )
+
     try:
         yield
     finally:

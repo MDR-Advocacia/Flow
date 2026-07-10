@@ -79,11 +79,14 @@ SECAO_PLANILHA = "Planilha"  # geração/arquivamento da planilha de migração
 PLANILHA_AUTOMATICA = "AUTOMATICA"  # gerada ao fim de uma coleta (manual ou agendada)
 PLANILHA_MANUAL = "MANUAL"          # gerada pelo botão "Gerar planilha"
 
-# Situação do processo no POOL de planilha (o operador é quem gera a planilha):
-# NOVO = distribuído e ainda não entrou em nenhuma planilha; PLANILHA_GERADA =
-# já foi exportado numa planilha. A próxima coleta traz os novos como NOVO.
+# Ciclo do processo no POOL até o cadastro confirmar no Legal One:
+#   NOVO = distribuído, aguardando o operador gerar a planilha;
+#   PENDENTE_CADASTRO = planilha gerada, aguardando o cadastro aparecer no L1
+#     (o monitor bate na API do L1 de 2 em 2 min procurando por CNJ+escritório);
+#   CADASTRADO_L1 = o monitor achou a pasta no Legal One = cadastro confirmado.
 POOL_NOVO = "NOVO"
-POOL_PLANILHA_GERADA = "PLANILHA_GERADA"
+POOL_PENDENTE_CADASTRO = "PENDENTE_CADASTRO"
+POOL_CADASTRADO_L1 = "CADASTRADO_L1"
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -301,7 +304,7 @@ class BbProcesso(Base):
     l1_workflow_task_id = Column(Integer, nullable=True)
     erro = Column(Text, nullable=True)
 
-    # Pool de planilha: NOVO até o operador gerar a planilha, depois PLANILHA_GERADA.
+    # Pool: NOVO → (gera planilha) PENDENTE_CADASTRO → (monitor L1) CADASTRADO_L1.
     planilha_status = Column(
         String(20), nullable=False, server_default=POOL_NOVO, index=True,
     )
@@ -309,6 +312,10 @@ class BbProcesso(Base):
         Integer, ForeignKey("bbd_planilhas.id", ondelete="SET NULL"), nullable=True, index=True,
     )
     planilha_gerada_em = Column(DateTime(timezone=True), nullable=True)
+    # Monitor de cadastro no Legal One
+    cadastro_confirmado_em = Column(DateTime(timezone=True), nullable=True)
+    l1_verificado_em = Column(DateTime(timezone=True), nullable=True)
+    l1_folder = Column(String(40), nullable=True)
 
     # Auditoria bruta (capa do NPJ / HTML de origem)
     raw = Column(jsonb(), nullable=True)

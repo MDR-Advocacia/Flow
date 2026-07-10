@@ -8,6 +8,7 @@ import {
   FileText,
   History,
   Loader2,
+  RefreshCw,
   ScrollText,
   Search,
 } from "lucide-react";
@@ -30,15 +31,18 @@ import { useToast } from "@/hooks/use-toast";
 import {
   Auditoria,
   Evento,
+  PlanilhaDetalhe,
   PlanilhaHist,
   Processo,
   baixarPlanilhaArquivada,
   gerarPlanilhaNoHistorico,
   getAuditoria,
+  getPlanilhaDetalhe,
   listarEventos,
   listarPlanilhas,
   listarProcessos,
   marcarPlanilhaSubida,
+  verificarCadastroAgora,
 } from "@/services/distribuidos-bb";
 
 const PAGE_SIZES = [25, 50, 100];
@@ -58,7 +62,8 @@ const ORIGEM_META: Record<string, { label: string; cls: string }> = {
 
 const POOL_META: Record<string, { label: string; cls: string }> = {
   NOVO: { label: "Novo", cls: "bg-amber-100 text-amber-700" },
-  PLANILHA_GERADA: { label: "Planilha gerada", cls: "bg-emerald-100 text-emerald-700" },
+  PENDENTE_CADASTRO: { label: "Pendente cadastro", cls: "bg-sky-100 text-sky-700" },
+  CADASTRADO_L1: { label: "Cadastro confirmado no L1", cls: "bg-emerald-100 text-emerald-700" },
 };
 
 const STATUS_META: Record<string, { label: string; cls: string }> = {
@@ -154,6 +159,42 @@ export default function DistribuidosBBPage() {
   const [planilhasPage, setPlanilhasPage] = useState(1);
   const [planilhasLoading, setPlanilhasLoading] = useState(false);
   const [soPendentes, setSoPendentes] = useState(false);
+
+  // Detalhe da planilha (tela de visualização)
+  const [detalhe, setDetalhe] = useState<PlanilhaDetalhe | null>(null);
+  const [detalheOpen, setDetalheOpen] = useState(false);
+  const [detalheLoading, setDetalheLoading] = useState(false);
+  const [verificando, setVerificando] = useState(false);
+
+  const abrirDetalhe = async (id: number) => {
+    setDetalheOpen(true);
+    setDetalheLoading(true);
+    setDetalhe(null);
+    try {
+      setDetalhe(await getPlanilhaDetalhe(id));
+    } catch (e) {
+      toast({ title: "Erro ao abrir planilha", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setDetalheLoading(false);
+    }
+  };
+
+  const verificarCadastro = async () => {
+    setVerificando(true);
+    try {
+      const r = await verificarCadastroAgora();
+      toast({
+        title: "Monitor de cadastro executado",
+        description: `${r.verificados} verificado(s) no L1 · ${r.confirmados} confirmado(s) agora.`,
+      });
+      if (detalhe) setDetalhe(await getPlanilhaDetalhe(detalhe.planilha.id));
+      loadPlanilhas();
+    } catch (e) {
+      toast({ title: "Erro ao verificar", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setVerificando(false);
+    }
+  };
 
   // Auditoria
   const [auditoria, setAuditoria] = useState<Auditoria | null>(null);
@@ -477,7 +518,7 @@ export default function DistribuidosBBPage() {
                       <TableHead className="w-24 text-right">Processos</TableHead>
                       <TableHead className="w-24 text-right">Tamanho</TableHead>
                       <TableHead className="min-w-[200px]">Subido no Legal One</TableHead>
-                      <TableHead className="w-28 text-right">Baixar</TableHead>
+                      <TableHead className="w-40 text-right">Ações</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -531,9 +572,14 @@ export default function DistribuidosBBPage() {
                               </div>
                             </TableCell>
                             <TableCell className="text-right">
-                              <Button size="sm" variant="outline" onClick={() => baixarDoHistorico(pl)}>
-                                <Download className="mr-1.5 h-3.5 w-3.5" /> Baixar
-                              </Button>
+                              <div className="flex justify-end gap-1.5">
+                                <Button size="sm" variant="outline" onClick={() => abrirDetalhe(pl.id)}>
+                                  Ver
+                                </Button>
+                                <Button size="sm" variant="outline" onClick={() => baixarDoHistorico(pl)}>
+                                  <Download className="mr-1.5 h-3.5 w-3.5" /> Baixar
+                                </Button>
+                              </div>
                             </TableCell>
                           </TableRow>
                         );
@@ -780,6 +826,105 @@ export default function DistribuidosBBPage() {
                 </ol>
               </div>
             </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Detalhe da planilha (tela de visualização) */}
+      <Dialog
+        open={detalheOpen}
+        onOpenChange={(o) => {
+          if (!o) {
+            setDetalheOpen(false);
+            setDetalhe(null);
+          }
+        }}
+      >
+        <DialogContent className="max-h-[85vh] max-w-4xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FileSpreadsheet className="h-5 w-5 text-[hsl(var(--dunatech-blue))]" />
+              <span className="truncate font-mono text-sm">
+                {detalhe ? detalhe.planilha.nome_arquivo : "Planilha"}
+              </span>
+            </DialogTitle>
+            <DialogDescription>
+              Processos desta planilha e o status de cadastro no Legal One — o monitor confirma de 2 em 2 min.
+            </DialogDescription>
+          </DialogHeader>
+          {detalheLoading || !detalhe ? (
+            <div className="py-10 text-center">
+              <Loader2 className="mx-auto h-6 w-6 animate-spin text-muted-foreground" />
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="rounded-md border p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-sm font-medium">
+                    {detalhe.progresso.cadastrados} de {detalhe.progresso.total} cadastrados no Legal One
+                  </span>
+                  <Button size="sm" variant="outline" onClick={verificarCadastro} disabled={verificando}>
+                    {verificando ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <RefreshCw className="mr-2 h-4 w-4" />
+                    )}
+                    Verificar agora
+                  </Button>
+                </div>
+                <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full bg-emerald-500 transition-all"
+                    style={{
+                      width: `${
+                        detalhe.progresso.total
+                          ? (detalhe.progresso.cadastrados / detalhe.progresso.total) * 100
+                          : 0
+                      }%`,
+                    }}
+                  />
+                </div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {detalhe.progresso.pendentes} pendente(s) de cadastro · gerada {fmtData(detalhe.planilha.created_at)}
+                </div>
+              </div>
+
+              <div className="overflow-x-auto rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>CNJ / NPJ</TableHead>
+                      <TableHead>Responsável</TableHead>
+                      <TableHead>Status cadastro</TableHead>
+                      <TableHead>Pasta L1</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {detalhe.processos.map((p, idx) => {
+                      const pm = POOL_META[p.planilha_status] ?? {
+                        label: p.planilha_status,
+                        cls: "bg-slate-100 text-slate-700",
+                      };
+                      return (
+                        <TableRow key={p.id} className={idx % 2 === 1 ? "bg-muted/20" : undefined}>
+                          <TableCell className="font-mono text-xs">
+                            <div>{p.cnj ?? <span className="text-muted-foreground">sem CNJ</span>}</div>
+                            <div className="text-muted-foreground">{p.npj ?? "—"}</div>
+                          </TableCell>
+                          <TableCell className="text-sm">{p.responsavel_nome ?? "—"}</TableCell>
+                          <TableCell>
+                            <Badge className={`${pm.cls} hover:${pm.cls}`} variant="secondary">
+                              {pm.label}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="font-mono text-xs">{p.l1_folder ?? "—"}</TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
           )}
         </DialogContent>
       </Dialog>

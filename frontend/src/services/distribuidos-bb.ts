@@ -48,6 +48,8 @@ export interface PlanilhasResumo {
   total: number;
   pendentes: number;
   pool_novos: number;
+  pendente_cadastro: number;
+  cadastrado_l1: number;
   recentes_pendentes: {
     id: number;
     nome_arquivo: string;
@@ -83,9 +85,12 @@ export interface Processo {
   escritorio_path: string | null;
   observacao: string | null;
   status: string;
-  planilha_status: string; // NOVO | PLANILHA_GERADA
+  planilha_status: string; // NOVO | PENDENTE_CADASTRO | CADASTRADO_L1
   planilha_id: number | null;
   planilha_gerada_em: string | null;
+  cadastro_confirmado_em: string | null;
+  l1_verificado_em: string | null;
+  l1_folder: string | null;
   ciencia_dada_em: string | null;
   l1_lawsuit_id: number | null;
   erro: string | null;
@@ -280,6 +285,32 @@ export async function marcarPlanilhaSubida(id: number, subido: boolean): Promise
       body: JSON.stringify({ subido }),
     }),
   );
+}
+
+export interface PlanilhaDetalhe {
+  planilha: {
+    id: number;
+    nome_arquivo: string;
+    total_processos: number;
+    origem: string;
+    subido_legalone: boolean;
+    subido_em: string | null;
+    created_at: string | null;
+  };
+  progresso: { total: number; cadastrados: number; pendentes: number };
+  processos: Processo[];
+}
+
+export async function getPlanilhaDetalhe(id: number): Promise<PlanilhaDetalhe> {
+  return json(await apiFetch(`${BASE}/planilhas/${id}`));
+}
+
+export async function verificarCadastroAgora(): Promise<{
+  verificados: number;
+  confirmados: number;
+  sem_cnj_ignorados: number;
+}> {
+  return json(await apiFetch(`${BASE}/monitor-cadastro/verificar`, { method: "POST" }));
 }
 
 export async function listarEventos(params: {
