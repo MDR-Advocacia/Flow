@@ -61,11 +61,15 @@ class DistribuidosBBService:
         total = sum(por_status.values())
 
         por_escritorio = [
-            {"escritorio": nome or "—", "total": qtd}
-            for nome, qtd in (
-                self.db.query(BbEscritorio.nome, func.count(BbProcesso.id))
+            {"escritorio": path or nome or "—", "total": qtd}
+            for path, nome, qtd in (
+                self.db.query(
+                    BbEscritorio.escritorio_path,
+                    BbEscritorio.nome,
+                    func.count(BbProcesso.id),
+                )
                 .join(BbProcesso, BbProcesso.escritorio_id == BbEscritorio.id)
-                .group_by(BbEscritorio.nome)
+                .group_by(BbEscritorio.escritorio_path, BbEscritorio.nome)
                 .all()
             )
         ]
@@ -287,6 +291,7 @@ class DistribuidosBBService:
         nivel: Optional[str] = None,
         processo_id: Optional[int] = None,
         run_id: Optional[int] = None,
+        busca: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -299,6 +304,20 @@ class DistribuidosBBService:
             q = q.filter(BbEvento.processo_id == processo_id)
         if run_id:
             q = q.filter(BbEvento.run_id == run_id)
+        # Busca por CNJ/NPJ/pasta → auditoria de todo o histórico daquele processo.
+        if busca and busca.strip():
+            termo = f"%{busca.strip()}%"
+            ids = [
+                r[0]
+                for r in self.db.query(BbProcesso.id)
+                .filter(
+                    (BbProcesso.cnj.ilike(termo))
+                    | (BbProcesso.npj.ilike(termo))
+                    | (BbProcesso.adverso_principal.ilike(termo))
+                )
+                .all()
+            ]
+            q = q.filter(BbEvento.processo_id.in_(ids or [0]))
         total = q.count()
         rows = q.order_by(BbEvento.id.desc()).limit(limit).offset(offset).all()
         return {"total": total, "items": [self._evento_dto(r) for r in rows]}

@@ -316,12 +316,14 @@ export async function verificarCadastroAgora(): Promise<{
 export async function listarEventos(params: {
   secao?: string;
   nivel?: string;
+  busca?: string;
   limit?: number;
   offset?: number;
 }): Promise<ListaEventos> {
   const qs = new URLSearchParams();
   if (params.secao) qs.set("secao", params.secao);
   if (params.nivel) qs.set("nivel", params.nivel);
+  if (params.busca) qs.set("busca", params.busca);
   qs.set("limit", String(params.limit ?? 100));
   qs.set("offset", String(params.offset ?? 0));
   return json(await apiFetch(`${BASE}/eventos?${qs.toString()}`));

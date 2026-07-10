@@ -15,7 +15,6 @@ import {
   RefreshCw,
   Settings,
   ShieldAlert,
-  ShieldCheck,
   UserX,
   Users,
 } from "lucide-react";
@@ -315,11 +314,10 @@ export default function DistribuidosBBDashboardPage() {
         </Card>
       )}
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <Kpi label="Total capturados" value={k?.total ?? 0} icon={Inbox} tone="bg-blue-100 text-blue-700" onClick={() => navigate("/distribuidos-bb")} />
-        <Kpi label="Aguardando ciência" value={k?.coletados ?? 0} icon={ShieldCheck} tone="bg-slate-100 text-slate-700" onClick={() => navigate("/distribuidos-bb?status=COLETADO")} />
         <Kpi label="Distribuídos" value={k?.distribuidos ?? 0} icon={Users} tone="bg-sky-100 text-sky-700" onClick={() => navigate("/distribuidos-bb?status=DISTRIBUIDO")} />
-        <Kpi label="Cadastrados no L1" value={k?.cadastrados ?? 0} icon={CheckCircle2} tone="bg-emerald-100 text-emerald-700" onClick={() => navigate("/distribuidos-bb?status=CADASTRADO")} />
+        <Kpi label="Cadastrados no L1" value={data?.planilhas?.cadastrado_l1 ?? 0} icon={CheckCircle2} tone="bg-emerald-100 text-emerald-700" onClick={() => navigate("/distribuidos-bb")} />
         <Kpi label="Sem responsável" value={k?.sem_responsavel ?? 0} icon={UserX} tone="bg-amber-100 text-amber-700" />
         <Kpi label="Erros / revisão" value={(k?.erros ?? 0) + (k?.revisao ?? 0)} icon={AlertTriangle} tone="bg-rose-100 text-rose-700" onClick={() => navigate("/distribuidos-bb?status=ERRO")} />
       </div>

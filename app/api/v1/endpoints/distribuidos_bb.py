@@ -208,6 +208,7 @@ def listar_eventos(
     nivel: Optional[str] = Query(None),
     processo_id: Optional[int] = Query(None),
     run_id: Optional[int] = Query(None),
+    busca: Optional[str] = Query(None, description="CNJ, NPJ ou adverso — histórico do processo."),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -215,7 +216,8 @@ def listar_eventos(
 ):
     _require_gestao(current_user)
     return DistribuidosBBService(db).listar_eventos(
-        secao=secao, nivel=nivel, processo_id=processo_id, run_id=run_id, limit=limit, offset=offset,
+        secao=secao, nivel=nivel, processo_id=processo_id, run_id=run_id,
+        busca=busca, limit=limit, offset=offset,
     )
 
 

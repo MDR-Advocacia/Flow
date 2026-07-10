@@ -151,6 +151,8 @@ export default function DistribuidosBBPage() {
   const [secaoFiltro, setSecaoFiltro] = useState<string>("");
   const [nivelFiltro, setNivelFiltro] = useState<string>("");
   const [logPage, setLogPage] = useState(1);
+  const [logBuscaInput, setLogBuscaInput] = useState("");
+  const [logBusca, setLogBusca] = useState("");
 
   // Planilhas
   const [planilhas, setPlanilhas] = useState<PlanilhaHist[]>([]);
@@ -227,6 +229,7 @@ export default function DistribuidosBBPage() {
       const resp = await listarEventos({
         secao: secaoFiltro || undefined,
         nivel: nivelFiltro || undefined,
+        busca: logBusca || undefined,
         limit: 100,
         offset: (logPage - 1) * 100,
       });
@@ -235,7 +238,7 @@ export default function DistribuidosBBPage() {
     } catch (e) {
       toast({ title: "Erro ao carregar log", description: String((e as Error).message), variant: "destructive" });
     }
-  }, [secaoFiltro, nivelFiltro, logPage, toast]);
+  }, [secaoFiltro, nivelFiltro, logBusca, logPage, toast]);
 
   const loadPlanilhas = useCallback(async () => {
     setPlanilhasLoading(true);
@@ -622,13 +625,41 @@ export default function DistribuidosBBPage() {
       {aba === "log" && (
         <>
           <div className="flex flex-wrap items-center gap-2">
+            <div className="relative w-full lg:w-96">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                className="w-full pl-8"
+                placeholder="Auditar por CNJ, NPJ ou adverso — histórico do processo"
+                value={logBuscaInput}
+                onChange={(e) => setLogBuscaInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    setLogPage(1);
+                    setLogBusca(logBuscaInput.trim());
+                  }
+                }}
+              />
+            </div>
+            {logBusca && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setLogBuscaInput("");
+                  setLogBusca("");
+                  setLogPage(1);
+                }}
+              >
+                Limpar auditoria
+              </Button>
+            )}
             <Select value={secaoFiltro || "__all__"} onValueChange={(v) => { setLogPage(1); setSecaoFiltro(v === "__all__" ? "" : v); }}>
               <SelectTrigger className="w-48">
                 <SelectValue placeholder="Seção" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__all__">Todas as seções</SelectItem>
-                {["Coleta", "Extração", "Ciência", "Distribuição", "Envolvidos", "Contatos", "Cadastro", "Configuração", "Sessão"].map((s) => (
+                {["Coleta", "Extração", "Ciência", "Distribuição", "Envolvidos", "Contatos", "Cadastro", "Planilha", "Configuração", "Sessão"].map((s) => (
                   <SelectItem key={s} value={s}>{s}</SelectItem>
                 ))}
               </SelectContent>
@@ -645,6 +676,11 @@ export default function DistribuidosBBPage() {
               </SelectContent>
             </Select>
           </div>
+          {logBusca && (
+            <p className="-mt-1 text-xs text-muted-foreground">
+              Auditoria de <span className="font-mono">{logBusca}</span> — todo o histórico do(s) processo(s) que casam, em ordem cronológica inversa.
+            </p>
+          )}
 
           <Card>
             <CardContent className="p-0">
