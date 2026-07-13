@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
+  BarChart3,
   Building2,
   CheckCircle2,
+  List,
   CloudDownload,
   Download,
   FileSpreadsheet,
@@ -126,6 +128,7 @@ export default function DistribuidosBBDashboardPage() {
   const { toast } = useToast();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(false);
+  const [escViewGrafico, setEscViewGrafico] = useState(false);
 
   // Coleta
   const [coletaOpen, setColetaOpen] = useState(false);
@@ -403,12 +406,53 @@ export default function DistribuidosBBDashboardPage() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
-          <CardHeader className="pb-3">
+          <CardHeader className="flex-row items-center justify-between space-y-0 pb-3">
             <CardTitle className="text-base">Por escritório responsável</CardTitle>
+            <div className="flex items-center gap-0.5 rounded-md border p-0.5">
+              <button
+                type="button"
+                onClick={() => setEscViewGrafico(false)}
+                title="Lista"
+                className={`rounded p-1 ${!escViewGrafico ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/50"}`}
+              >
+                <List className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setEscViewGrafico(true)}
+                title="Gráfico"
+                className={`rounded p-1 ${escViewGrafico ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/50"}`}
+              >
+                <BarChart3 className="h-4 w-4" />
+              </button>
+            </div>
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
             {(data?.por_escritorio ?? []).length === 0 ? (
               <div className="py-6 text-center text-sm text-muted-foreground">Sem processos ainda.</div>
+            ) : escViewGrafico ? (
+              <div style={{ height: Math.max(140, data!.por_escritorio.length * 44) }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={data!.por_escritorio} layout="vertical" margin={{ left: 8, right: 20 }}>
+                    <XAxis type="number" fontSize={11} allowDecimals={false} hide />
+                    <YAxis
+                      type="category"
+                      dataKey="escritorio"
+                      width={150}
+                      fontSize={11}
+                      tickLine={false}
+                      axisLine={false}
+                      tickFormatter={(v) => String(v).split("/").pop()?.trim() ?? String(v)}
+                    />
+                    <RTooltip />
+                    <Bar dataKey="total" fill="#3b82f6" radius={[0, 4, 4, 0]}>
+                      {data!.por_escritorio.map((_, i) => (
+                        <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
             ) : (
               data!.por_escritorio.map((row) => (
                 <button
@@ -418,7 +462,7 @@ export default function DistribuidosBBDashboardPage() {
                   className="flex items-center justify-between rounded-md border bg-card px-3 py-2 text-sm transition-colors hover:bg-muted/50"
                 >
                   <span className="flex items-center gap-2">
-                    <Building2 className="h-4 w-4 text-muted-foreground" />
+                    <Building2 className="h-4 w-4 shrink-0 text-muted-foreground" />
                     {row.escritorio}
                   </span>
                   <span className="font-semibold">{row.total}</span>
