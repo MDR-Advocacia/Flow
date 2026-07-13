@@ -168,6 +168,7 @@ export default function DistribuidosBBPage() {
   const [detalheOpen, setDetalheOpen] = useState(false);
   const [detalheLoading, setDetalheLoading] = useState(false);
   const [verificando, setVerificando] = useState(false);
+  const [cadastrandoL1, setCadastrandoL1] = useState(false);
 
   const abrirDetalhe = async (id: number) => {
     setDetalheOpen(true);
@@ -199,7 +200,6 @@ export default function DistribuidosBBPage() {
     }
   };
 
-  const [cadastrandoL1, setCadastrandoL1] = useState(false);
   const cadastrarNoL1 = async (dryRun: boolean) => {
     if (!detalhe) return;
     if (!dryRun) {
@@ -302,6 +302,26 @@ export default function DistribuidosBBPage() {
       await baixarPlanilhaArquivada(pl.id, pl.nome_arquivo);
     } catch (e) {
       toast({ title: "Erro ao baixar", description: String((e as Error).message), variant: "destructive" });
+    }
+  };
+
+  const cadastrarDaLista = async (pl: PlanilhaHist) => {
+    const ok = window.confirm(
+      `Cadastrar no Legal One os processos NOVOS da planilha "${pl.nome_arquivo}"? Cria as pastas e dispara o workflow (ação irreversível). Os que já existem no L1 são ignorados.`,
+    );
+    if (!ok) return;
+    setCadastrandoL1(true);
+    try {
+      const rel = await cadastrarPlanilhaL1(pl.id, false);
+      toast({
+        title: "Import enviado ao Legal One",
+        description: `${rel.resultado} O monitor confirma os cadastros de 2 em 2 min.`,
+      });
+      loadPlanilhas();
+    } catch (e) {
+      toast({ title: "Erro no import", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setCadastrandoL1(false);
     }
   };
 
@@ -550,7 +570,7 @@ export default function DistribuidosBBPage() {
                       <TableHead className="w-24 text-right">Processos</TableHead>
                       <TableHead className="w-24 text-right">Tamanho</TableHead>
                       <TableHead className="min-w-[200px]">Subido no Legal One</TableHead>
-                      <TableHead className="w-40 text-right">Ações</TableHead>
+                      <TableHead className="min-w-[240px] text-right">Ações</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -605,6 +625,13 @@ export default function DistribuidosBBPage() {
                             </TableCell>
                             <TableCell className="text-right">
                               <div className="flex justify-end gap-1.5">
+                                <Button
+                                  size="sm"
+                                  onClick={() => cadastrarDaLista(pl)}
+                                  disabled={cadastrandoL1}
+                                >
+                                  Cadastrar
+                                </Button>
                                 <Button size="sm" variant="outline" onClick={() => abrirDetalhe(pl.id)}>
                                   Ver
                                 </Button>

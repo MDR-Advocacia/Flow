@@ -397,6 +397,11 @@ class Settings(BaseSettings):
     distribuidos_bb_monitor_cadastro_ativo: bool = True
     distribuidos_bb_monitor_intervalo_min: int = 2
 
+    # Cadastro 100% automático: ao fim de uma coleta com processos distribuídos,
+    # gera a planilha e importa no L1 (cria as pastas + dispara o workflow) sem
+    # precisar do operador clicar. O monitor depois confirma cada pasta.
+    distribuidos_bb_auto_cadastro_ativo: bool = True
+
     # ── GED LegalOne — envio em lote de arquivos pro GED (ECM) do L1 ──
     # Modulo dedicado a subir arquivos arbitrarios (PDF, docx, xlsx,
     # imagens...) no GED de processos do Legal One a partir de CNJ +

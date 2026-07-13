@@ -36,6 +36,7 @@ from app.models.distribuidos_bb import (
     RUN_CONCLUIDO,
     RUN_EM_ANDAMENTO,
     RUN_ERRO,
+    SECAO_CADASTRO,
     SECAO_CIENCIA,
     SECAO_COLETA,
     SECAO_ENVOLVIDOS,
@@ -245,6 +246,43 @@ def _processar_notificacao(
     db.commit()
 
 
+def _auto_cadastrar(db: Session, run: BbRun) -> None:
+    """Gera a planilha do pool NOVO e importa no L1 (cria pastas + workflow).
+
+    Best-effort: quem chama já embrulha em try/except. Marca os processos como
+    PENDENTE_CADASTRO (via gerar_e_persistir) e dispara o import interno; o monitor
+    confirma cada pasta depois (→ CADASTRADO_L1).
+    """
+    from app.services.distribuidos_bb.import_l1_service import cadastrar_planilha
+    from app.services.distribuidos_bb.planilha_service import gerar_e_persistir
+
+    planilha = gerar_e_persistir(db)  # varre todo o pool NOVO
+    if planilha is None:
+        return
+    db.commit()
+    registrar_evento(
+        db, secao=SECAO_CADASTRO, nivel=NIVEL_INFO, acao="Auto-cadastro iniciado",
+        mensagem=(
+            f"Planilha '{planilha.nome_arquivo}' ({planilha.total_processos} processo[s]) "
+            f"gerada; importando no Legal One automaticamente…"
+        ),
+        dados={"planilha_id": planilha.id}, run_id=run.id,
+    )
+    db.commit()
+
+    rel = cadastrar_planilha(bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False)
+    novos = rel.get("novos", 0)
+    registrar_evento(
+        db, secao=SECAO_CADASTRO, nivel=NIVEL_SUCESSO, acao="Auto-cadastro enviado",
+        mensagem=(
+            f"Import no Legal One enviado: {novos} pasta(s) nova(s) criada(s). "
+            f"{rel.get('resultado', '')} O monitor confirma cada uma nos próximos ciclos."
+        ),
+        dados={"novos": novos, "planilha_id": planilha.id}, run_id=run.id,
+    )
+    db.commit()
+
+
 def executar_coleta(
     db: Session,
     run: BbRun,
@@ -374,6 +412,21 @@ def executar_coleta(
             logger.warning(
                 "Distribuídos BB: falha ao sinalizar o pool (run %s): %s", run.id, exc_pool,
             )
+
+        # Cadastro 100% automático (best-effort, nunca derruba o run): se ligado e
+        # veio processo novo, gera a planilha do pool e importa no L1 (cria pastas
+        # + dispara workflow). O monitor confirma cada pasta depois.
+        if settings.distribuidos_bb_auto_cadastro_ativo and run.total_distribuidos > 0:
+            try:
+                _auto_cadastrar(db, run)
+            except Exception as exc_ac:  # noqa: BLE001
+                registrar_evento(
+                    db, secao=SECAO_CADASTRO, nivel=NIVEL_ERRO, acao="Falha no auto-cadastro",
+                    mensagem=f"Coleta ok, mas o cadastro automático no L1 falhou: {exc_ac}",
+                    run_id=run.id,
+                )
+                db.commit()
+                logger.exception("Distribuídos BB: auto-cadastro falhou (run %s).", run.id)
     except Exception as exc:  # noqa: BLE001
         run.status = RUN_ERRO
         run.erro = str(exc)

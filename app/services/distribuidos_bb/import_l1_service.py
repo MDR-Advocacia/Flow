@@ -213,21 +213,22 @@ def _import_status(sess, h) -> dict:
     return (r.json() or {}).get("data") or {} if r.status_code == 200 else {}
 
 
-def _save(sess, h) -> dict:
+def _save(sess, h, selected_ids=None) -> dict:
+    model = {
+        "ignoredIds": [],
+        "selectedIds": list(selected_ids or []),
+        "searchModel": {
+            "importValidationStatus": "0", "filterEmptyNature": "false",
+            "importLitigationOriginOffice": "", "importLitigationResponsibleOffice": "",
+            "importLitigationStatus": "", "importLitigationNature": "",
+            "importLitigationNumber": "", "startLoadDate": "", "endLoadDate": "",
+            "userId": None, "searchStatus": 0, "contactsSearchFilter": "",
+            "checkedContacts": "", "contactPosition": "",
+        },
+    }
     body = {
         "excelSpreadsheetBlobName": "", "excelSpreadsheetFolder": "", "email": "",
-        "excelSpreadsheetLength": 0,
-        "litigationBatchOperationApiModel": {
-            "ignoredIds": [], "selectedIds": [],
-            "searchModel": {
-                "importValidationStatus": "0", "filterEmptyNature": "false",
-                "importLitigationOriginOffice": "", "importLitigationResponsibleOffice": "",
-                "importLitigationStatus": "", "importLitigationNature": "",
-                "importLitigationNumber": "", "startLoadDate": "", "endLoadDate": "",
-                "userId": None, "searchStatus": 0, "contactsSearchFilter": "",
-                "checkedContacts": "", "contactPosition": "",
-            },
-        },
+        "excelSpreadsheetLength": 0, "litigationBatchOperationApiModel": model,
     }
     r = sess.post(
         f"{_GATEWAY}/litigationImport/LitigationOperations/save",
@@ -238,6 +239,36 @@ def _save(sess, h) -> dict:
     return r.json()
 
 
+def _listar_staging(sess, h) -> list[dict]:
+    """Todas as linhas na revisão do import (paginado)."""
+    rows: list[dict] = []
+    for page in range(0, 40):
+        r = sess.get(
+            f"{_GATEWAY}/litigationImport/LitigationData/GetImportDataPaginated",
+            params={"page": page, "count": 30, "filterUserId": "null"}, headers=h, timeout=60,
+        )
+        d = (r.json() or {}).get("data") or {} if r.status_code == 200 else {}
+        rows += d.get("data") or []
+        if (page + 1) * 30 >= (d.get("total") or 0):
+            break
+    return rows
+
+
+def _linhas_novas(rows: list[dict]) -> list[dict]:
+    """Linhas genuinamente novas = não-duplicadas e sem erro (são as que a nossa
+    planilha acabou de subir; os dupes antigos ficam de fora). Casa CNJ E sem-CNJ
+    pela flag `duplicated`, não pelo número — então pré-judicial também entra."""
+    return [
+        x for x in rows
+        if not x.get("duplicated") and not (x.get("errors") or x.get("errorMessage"))
+    ]
+
+
+def _is_unauthorized(exc: Exception) -> bool:
+    s = str(exc)
+    return "401" in s or "Unauthorized" in s or "invalid credentials" in s
+
+
 def cadastrar_planilha(
     conteudo: bytes,
     file_name: str,
@@ -246,52 +277,67 @@ def cadastrar_planilha(
     dry_run: bool = True,
     poll_max_s: int = 180,
 ) -> dict[str, Any]:
-    """Sobe a planilha e importa via API interna. dry_run=True para antes do save.
+    """Sobe a planilha e importa via API interna, commitando SÓ as linhas novas
+    (não-duplicadas) via selectedIds — NUNCA varre o staging inteiro. Retry
+    automático 1x se o token tiver expirado (401). Devolve relatório por passo."""
+    try:
+        return _cadastrar_once(
+            conteudo, file_name, firm_id=firm_id, dry_run=dry_run,
+            poll_max_s=poll_max_s, tok=obter_token(),
+        )
+    except ImportL1Error as exc:
+        if not _is_unauthorized(exc):
+            raise
+        logger.warning("Import L1: 401 — recapturando token e tentando de novo.")
+        return _cadastrar_once(
+            conteudo, file_name, firm_id=firm_id, dry_run=dry_run,
+            poll_max_s=poll_max_s, tok=obter_token(forcar=True),
+        )
 
-    Devolve um relatório com cada passo (pra auditoria/log).
-    """
+
+def _cadastrar_once(conteudo, file_name, *, firm_id, dry_run, poll_max_s, tok) -> dict[str, Any]:
     rel: dict[str, Any] = {"passos": [], "dry_run": dry_run, "file": file_name}
     size = len(conteudo)
-    tok = obter_token()
     rel["importado_por"] = {"user_id": tok.get("user_id"), "nome": tok.get("user_name")}
-
     sess = requests.Session()
     h = _headers(tok)
 
     sas = _get_sas(sess, h, file_name)
     rel["passos"].append({"passo": "GetStorageSas", "ok": True})
-
     _upload_blob(sas, file_name, conteudo)
     rel["passos"].append({"passo": "upload_blob", "ok": True, "bytes": size})
-
     if _already_processing(sess, h, file_name, size):
         raise ImportL1Error("Essa planilha já está sendo processada no L1 (mesmo nome/tamanho).")
-    rel["passos"].append({"passo": "IsAlreadyProcessing", "ok": True})
-
     load = _spreadsheet_load(sess, h, tok, file_name, size, firm_id)
     rel["passos"].append({"passo": "SpreadSheetLoad", "ok": True, "message": load.get("message")})
 
-    # Poll até o parse terminar (revising/importing zeram).
+    # Poll até o parse terminar.
     inicio = time.time()
     status: dict = {}
     while time.time() - inicio < poll_max_s:
         status = _import_status(sess, h)
-        if not status.get("isLoadingData", True) and (
-            status.get("revisingLitigationsCount", 0) or 0
-        ) >= 0:
-            # Achou dados carregados (revising>0) OU já terminou de carregar.
-            if not status.get("isLoadingData", False):
-                break
+        if status and not status.get("isLoadingData", True):
+            break
         time.sleep(4)
     rel["status_import"] = status
-    rel["passos"].append({"passo": "poll_parse", "ok": True, "status": status})
+
+    novos = _linhas_novas(_listar_staging(sess, h))
+    novos_ids = [x["id"] for x in novos]
+    rel["novos"] = len(novos_ids)
+    rel["passos"].append({"passo": "match_novos", "ok": True, "novos": len(novos_ids)})
 
     if dry_run:
-        rel["resultado"] = "DRY_RUN — parou antes do save (nenhuma pasta criada)."
+        rel["resultado"] = f"DRY_RUN — {len(novos_ids)} linha(s) nova(s) prontas (nada criado)."
+        return rel
+    if not novos_ids:
+        rel["resultado"] = "Nada novo a cadastrar (todas as linhas já existem no L1)."
         return rel
 
-    saved = _save(sess, h)
-    rel["passos"].append({"passo": "save", "ok": bool(saved.get("success")), "message": saved.get("message")})
+    saved = _save(sess, h, selected_ids=novos_ids)
+    rel["passos"].append({
+        "passo": "save", "ok": bool(saved.get("success")),
+        "selecionados": len(novos_ids), "message": saved.get("message"),
+    })
     rel["resultado"] = saved.get("message") or "save concluído"
     rel["salvo_em"] = datetime.now(timezone.utc).isoformat()
     return rel
