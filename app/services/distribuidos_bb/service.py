@@ -234,7 +234,7 @@ class DistribuidosBBService:
         }
 
     # ── Listagem de processos ────────────────────────────────────────────
-    def listar_processos(
+    def _q_processos_ordenada(
         self,
         *,
         status: Optional[str] = None,
@@ -244,9 +244,9 @@ class DistribuidosBBService:
         posicao: Optional[str] = None,
         cadastro_de: Optional[str] = None,
         cadastro_ate: Optional[str] = None,
-        limit: int = 50,
-        offset: int = 0,
-    ) -> dict[str, Any]:
+    ):
+        """Query filtrada + ordenada (pendente no topo, depois por data). Reusada
+        pela listagem paginada e pela exportação."""
         from datetime import datetime, time as _time
 
         from sqlalchemy import case
@@ -286,27 +286,31 @@ class DistribuidosBBService:
         if cadastro_ate and (da := _parse(cadastro_ate, fim=True)):
             q = q.filter(BbProcesso.cadastro_confirmado_em <= da)
 
-        # Ordenação default: pendente cadastro em cima, depois novo, depois
-        # cadastrado; secundária por data de cadastro (mais recente primeiro).
         ordem_pool = case(
             (BbProcesso.planilha_status == POOL_PENDENTE_CADASTRO, 0),
             (BbProcesso.planilha_status == POOL_NOVO, 1),
             (BbProcesso.planilha_status == POOL_CADASTRADO_L1, 2),
             else_=3,
         )
-        total = q.count()
-        rows = (
-            q.order_by(
-                ordem_pool,
-                BbProcesso.cadastro_confirmado_em.desc().nullslast(),
-                BbProcesso.id.desc(),
-            )
-            .limit(limit)
-            .offset(offset)
-            .all()
+        return q.order_by(
+            ordem_pool,
+            BbProcesso.cadastro_confirmado_em.desc().nullslast(),
+            BbProcesso.id.desc(),
         )
+
+    def listar_processos(self, *, limit: int = 50, offset: int = 0, **filtros) -> dict[str, Any]:
+        q = self._q_processos_ordenada(**filtros)
+        total = q.count()
+        rows = q.limit(limit).offset(offset).all()
         nomes = self._mapa_nomes({r.responsavel_user_id for r in rows})
         return {"total": total, "items": [self._proc_dto(r, nomes) for r in rows]}
+
+    def exportar_processos(self, **filtros):
+        """xlsx bonitinho dos processos do filtro atual (todas as infos). Sem
+        paginação. Devolve (BytesIO, total)."""
+        rows = self._q_processos_ordenada(**filtros).all()
+        nomes = self._mapa_nomes({r.responsavel_user_id for r in rows})
+        return _montar_xlsx_processos(rows, nomes), len(rows)
 
     def detalhe_planilha(self, planilha_id: int) -> Optional[dict[str, Any]]:
         """Planilha + seus processos com o status de cadastro no L1 (tela de visualização)."""
@@ -525,3 +529,80 @@ class DistribuidosBBService:
 
         self.db.commit()
         return {"criados": criados, "atualizados": atualizados, "total": criados + atualizados}
+
+
+# ── Exportação xlsx da lista de processos (filtro atual, formatado) ────────
+def _montar_xlsx_processos(rows, nomes):
+    """Planilha bonitinha com todas as infos dos processos (não é o formato do
+    import do L1 — é um export legível pra auditoria/relatório)."""
+    import io
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+
+    from app.models.distribuidos_bb import (
+        POOL_CADASTRADO_L1,
+        POOL_NOVO,
+        POOL_PENDENTE_CADASTRO,
+    )
+
+    pool_label = {
+        POOL_NOVO: "Novo",
+        POOL_PENDENTE_CADASTRO: "Pendente cadastro",
+        POOL_CADASTRADO_L1: "Cadastrado no L1",
+    }
+    cols = [
+        ("Situação cadastro", 20), ("CNJ", 24), ("NPJ", 18), ("Posição", 11),
+        ("Polo", 10), ("Natureza", 14), ("Ação", 28), ("Adverso principal", 30),
+        ("Responsável", 26), ("Escritório responsável", 42), ("Observação", 15),
+        ("Valor da causa", 16), ("Data ajuizamento", 15), ("Situação (BB)", 26),
+        ("Data cadastro L1", 18), ("Pasta L1", 14), ("Capturado em", 18),
+    ]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Processos"
+
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    header_font = Font(bold=True, color="FFFFFF")
+    thin = Side(style="thin", color="D9D9D9")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    for ci, (name, w) in enumerate(cols, start=1):
+        c = ws.cell(row=1, column=ci, value=name)
+        c.fill = header_fill
+        c.font = header_font
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = border
+        ws.column_dimensions[get_column_letter(ci)].width = w
+    ws.row_dimensions[1].height = 22
+
+    def _dt(x):
+        return x.strftime("%d/%m/%Y %H:%M") if x else ""
+
+    for ri, p in enumerate(rows, start=2):
+        vals = [
+            pool_label.get(p.planilha_status, p.planilha_status),
+            p.cnj or "", p.npj or "", p.posicao or "", p.polo or "",
+            p.natureza or "", p.acao or "", p.adverso_principal or "",
+            nomes.get(p.responsavel_user_id) or "", p.escritorio_path or "",
+            p.observacao or "",
+            float(p.valor_causa) if p.valor_causa is not None else None,
+            p.data_ajuizamento or "", p.situacao or "",
+            _dt(p.cadastro_confirmado_em), p.l1_folder or "", _dt(p.created_at),
+        ]
+        for ci, v in enumerate(vals, start=1):
+            cell = ws.cell(row=ri, column=ci, value=v)
+            cell.border = border
+            cell.alignment = Alignment(vertical="center", wrap_text=ci in (7, 8, 9, 10))
+            if ci == 12 and v is not None:
+                cell.number_format = "R$ #,##0.00"
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(cols))}{max(1, len(rows) + 1)}"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf

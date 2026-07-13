@@ -38,6 +38,7 @@ import {
   Processo,
   baixarPlanilhaArquivada,
   cadastrarPlanilhaL1,
+  exportarProcessos,
   gerarPlanilhaNoHistorico,
   getAuditoria,
   getPlanilhaDetalhe,
@@ -150,6 +151,7 @@ export default function DistribuidosBBPage() {
   const [items, setItems] = useState<Processo[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [exportando, setExportando] = useState(false);
   const [statusFiltro, setStatusFiltro] = useState<string>(searchParams.get("status") ?? "");
   const [poolFiltro, setPoolFiltro] = useState<string>("");
   const [escritorioFiltro, setEscritorioFiltro] = useState<string>("");
@@ -273,6 +275,26 @@ export default function DistribuidosBBPage() {
       setLoading(false);
     }
   }, [statusFiltro, poolFiltro, escritorioFiltro, posicaoFiltro, cadastroDe, cadastroAte, busca, page, pageSize, toast]);
+
+  const exportarExcel = async () => {
+    setExportando(true);
+    try {
+      const t = await exportarProcessos({
+        status: statusFiltro || undefined,
+        planilhaStatus: poolFiltro || undefined,
+        escritorio_id: escritorioFiltro ? Number(escritorioFiltro) : undefined,
+        posicao: posicaoFiltro || undefined,
+        cadastroDe: cadastroDe || undefined,
+        cadastroAte: cadastroAte || undefined,
+        busca: busca || undefined,
+      });
+      toast({ title: "Exportado", description: `${t} processo(s) do filtro atual exportado(s) em Excel.` });
+    } catch (e) {
+      toast({ title: "Erro ao exportar", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setExportando(false);
+    }
+  };
 
   const loadEventos = useCallback(async () => {
     try {
@@ -541,6 +563,20 @@ export default function DistribuidosBBPage() {
                 }}
               />
             </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-auto"
+              onClick={exportarExcel}
+              disabled={exportando}
+            >
+              {exportando ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <FileSpreadsheet className="mr-2 h-4 w-4" />
+              )}
+              Exportar Excel
+            </Button>
           </div>
 
           <Card>

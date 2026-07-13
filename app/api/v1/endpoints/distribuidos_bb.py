@@ -196,6 +196,37 @@ def listar_processos(
     )
 
 
+@router.get("/processos/exportar", summary="Exporta os processos do filtro atual em Excel")
+def exportar_processos(
+    status_filtro: Optional[str] = Query(None, alias="status"),
+    escritorio_id: Optional[int] = Query(None),
+    busca: Optional[str] = Query(None),
+    planilha_status: Optional[str] = Query(None),
+    posicao: Optional[str] = Query(None),
+    cadastro_de: Optional[str] = Query(None),
+    cadastro_ate: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    from datetime import datetime
+
+    _require_gestao(current_user)
+    buf, total = DistribuidosBBService(db).exportar_processos(
+        status=status_filtro, escritorio_id=escritorio_id, busca=busca,
+        planilha_status=planilha_status, posicao=posicao,
+        cadastro_de=cadastro_de, cadastro_ate=cadastro_ate,
+    )
+    nome = f"processos_cadastro_bb_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{nome}"',
+            "X-Total": str(total),
+        },
+    )
+
+
 @router.get("/processos/{processo_id}/auditoria", summary="Auditoria completa de um processo")
 def auditoria_processo(
     processo_id: int,

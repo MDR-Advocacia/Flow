@@ -204,6 +204,46 @@ export async function listarProcessos(params: {
   return json(await apiFetch(`${BASE}/processos?${qs.toString()}`));
 }
 
+export async function exportarProcessos(params: {
+  status?: string;
+  escritorio_id?: number;
+  busca?: string;
+  planilhaStatus?: string;
+  posicao?: string;
+  cadastroDe?: string;
+  cadastroAte?: string;
+}): Promise<number> {
+  const qs = new URLSearchParams();
+  if (params.status) qs.set("status", params.status);
+  if (params.escritorio_id) qs.set("escritorio_id", String(params.escritorio_id));
+  if (params.busca) qs.set("busca", params.busca);
+  if (params.planilhaStatus) qs.set("planilha_status", params.planilhaStatus);
+  if (params.posicao) qs.set("posicao", params.posicao);
+  if (params.cadastroDe) qs.set("cadastro_de", params.cadastroDe);
+  if (params.cadastroAte) qs.set("cadastro_ate", params.cadastroAte);
+  const res = await apiFetch(`${BASE}/processos/exportar?${qs.toString()}`);
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      detail = (await res.json())?.detail || detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  const total = Number(res.headers.get("X-Total") || "0");
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `processos_cadastro_bb.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return total;
+}
+
 export async function getAuditoria(processoId: number): Promise<Auditoria> {
   return json(await apiFetch(`${BASE}/processos/${processoId}/auditoria`));
 }
