@@ -52,6 +52,7 @@ def verificar_pendentes(db, *, client=None, limite: int = 300) -> dict:
 
     office_cache: dict[str, int | None] = {}
     verificados = confirmados = sem_id = 0
+    planilhas_afetadas: set[int] = set()
     agora = datetime.now(timezone.utc)
 
     for p in pendentes:
@@ -91,6 +92,8 @@ def verificar_pendentes(db, *, client=None, limite: int = 300) -> dict:
                 p.l1_folder = pasta.get("folder")
                 p.cadastro_confirmado_em = agora
                 confirmados += 1
+                if p.planilha_id:
+                    planilhas_afetadas.add(p.planilha_id)
                 registrar_evento(
                     db, secao=SECAO_CADASTRO, nivel=NIVEL_SUCESSO,
                     acao="Cadastro confirmado no L1",
@@ -108,6 +111,28 @@ def verificar_pendentes(db, *, client=None, limite: int = 300) -> dict:
                 "Monitor cadastro: falha ao verificar processo %s (CNJ %s / NPJ %s).",
                 p.id, p.cnj, p.npj,
             )
+
+    # Rede de segurança: marca como SUBIDA a planilha cujos processos já estão
+    # TODOS cadastrados no L1 (não deixa "pendente de envio" na tela, mesmo que o
+    # cadastro tenha vindo por um caminho que não marcou na hora).
+    if planilhas_afetadas:
+        from app.models.distribuidos_bb import BbPlanilha
+
+        for pid in planilhas_afetadas:
+            restam = (
+                db.query(BbProcesso)
+                .filter(
+                    BbProcesso.planilha_id == pid,
+                    BbProcesso.planilha_status == POOL_PENDENTE_CADASTRO,
+                )
+                .count()
+            )
+            if restam == 0:
+                pl = db.get(BbPlanilha, pid)
+                if pl is not None and not pl.subido_legalone:
+                    pl.subido_legalone = True
+                    pl.subido_em = agora
+        db.commit()
 
     logger.info(
         "Monitor cadastro L1: %s verificado(s), %s confirmado(s), %s sem identificador.",
