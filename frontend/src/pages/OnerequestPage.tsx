@@ -8,7 +8,7 @@
 // setor/responsável/data (motor parametrizado), processo clicável -> L1,
 // tarefas pendentes/concluídas na pasta, e log de anotações por DMI.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Card,
@@ -519,6 +519,46 @@ export default function OnerequestPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Auto-verificação no L1: sempre que a listagem carrega, checa em 2º plano
+  // (silencioso) as DMIs desta página AINDA NÃO checadas — a linha atualiza
+  // sozinha de "não checado" pro status real. As já checadas ficam em cache e
+  // não re-batem no L1. O botão "Verificar L1" continua pra forçar re-checagem.
+  const autoVerifyInFlight = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    if (loading) return;
+    const pend = items.filter(
+      (s) =>
+        (s.proc_utilizavel || s.npj_direcionador) &&
+        !s.proc_l1_checado_em &&
+        !autoVerifyInFlight.current.has(s.id),
+    );
+    if (pend.length === 0) return;
+    pend.forEach((s) => autoVerifyInFlight.current.add(s.id));
+    const fila = [...pend];
+    const worker = async () => {
+      while (fila.length) {
+        const sol = fila.shift();
+        if (!sol) break;
+        try {
+          const r = await verificarProcessoL1(sol.id);
+          setItems((prev) =>
+            prev.map((it) =>
+              it.id === sol.id
+                ? { ...it, proc_l1_encontrado: r.encontrado, proc_l1_via: r.via, proc_l1_checado_em: new Date().toISOString() }
+                : it,
+            ),
+          );
+        } catch {
+          /* mantém a linha como estava; segue */
+        } finally {
+          autoVerifyInFlight.current.delete(sol.id);
+        }
+      }
+    };
+    // Concorrência 4 (mesmo teto do botão) — o L1 é rate-limitado.
+    void Promise.all(Array.from({ length: Math.min(4, pend.length) }, worker));
+  }, [items, loading]);
 
   useEffect(() => {
     getOptions().then((o) => setSetores(o.setores)).catch(() => {});
@@ -1231,7 +1271,7 @@ export default function OnerequestPage() {
             variant="outline"
             onClick={verificarProcessoL1Pagina}
             disabled={checkingProc || loading || items.length === 0}
-            title="Verifica no Legal One se o processo de cada DMI desta página existe (CNJ/NPJ) — sem criar tarefa"
+            title="Re-verifica TODAS as DMIs da página no Legal One (as não checadas já verificam sozinhas ao carregar) — útil quando a pasta foi criada depois"
           >
             {checkingProc ? (
               <>
