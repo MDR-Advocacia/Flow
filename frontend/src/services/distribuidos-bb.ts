@@ -65,6 +65,10 @@ export interface DashboardData {
   por_escritorio: { escritorio: string; total: number }[];
   ultima_run: RunResumo | null;
   planilhas?: PlanilhasResumo;
+  por_natureza?: { natureza: string; total: number }[];
+  por_posicao?: { posicao: string; total: number }[];
+  por_responsavel?: { responsavel: string; total: number }[];
+  por_estado?: { uf: string; total: number }[];
 }
 
 export interface Processo {

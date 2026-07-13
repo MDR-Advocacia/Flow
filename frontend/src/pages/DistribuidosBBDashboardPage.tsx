@@ -18,6 +18,17 @@ import {
   UserX,
   Users,
 } from "lucide-react";
+import {
+  Bar,
+  BarChart,
+  Cell,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip as RTooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,6 +53,11 @@ import {
   getRun,
   rodarSeed,
 } from "@/services/distribuidos-bb";
+
+const CHART_COLORS = [
+  "#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#ef4444",
+  "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#6366f1",
+];
 
 function fmtDataCurta(iso: string | null): string {
   if (!iso) return "—";
@@ -350,20 +366,105 @@ export default function DistribuidosBBDashboardPage() {
         </Card>
 
         <Card>
-          <CardHeader className="pb-3 flex-row items-center justify-between space-y-0">
-            <CardTitle className="text-base">Envolvidos com contato pendente</CardTitle>
-            <Download className="h-4 w-4 text-muted-foreground" />
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Por natureza</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold">{k?.envolvidos_pendentes ?? 0}</div>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Envolvidos capturados na capa do NPJ que ainda não foram casados por CPF/CNPJ no Legal One.
-            </p>
+            {(data?.por_natureza ?? []).length === 0 ? (
+              <div className="py-10 text-center text-sm text-muted-foreground">Sem processos ainda.</div>
+            ) : (
+              <>
+                <div className="h-[190px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={data!.por_natureza}
+                        dataKey="total"
+                        nameKey="natureza"
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={42}
+                        outerRadius={78}
+                        paddingAngle={2}
+                      >
+                        {data!.por_natureza!.map((_, i) => (
+                          <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                        ))}
+                      </Pie>
+                      <RTooltip />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                  {data!.por_natureza!.map((n, i) => (
+                    <span key={n.natureza} className="flex items-center gap-1.5">
+                      <span
+                        className="h-2.5 w-2.5 rounded-full"
+                        style={{ background: CHART_COLORS[i % CHART_COLORS.length] }}
+                      />
+                      {n.natureza} ({n.total})
+                    </span>
+                  ))}
+                </div>
+              </>
+            )}
             {data?.ultima_run && (
-              <div className="mt-4 rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
-                Última coleta: {data.ultima_run.total_coletados} capturados ·{" "}
-                {data.ultima_run.confirmar_ciencia ? "ciência confirmada" : "modo seguro (sem ciência)"} ·{" "}
-                {data.ultima_run.status}
+              <div className="mt-3 rounded-md border bg-muted/30 p-2 text-xs text-muted-foreground">
+                Última coleta: {data.ultima_run.total_coletados} capturados · {data.ultima_run.status}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Gráficos: por estado (UF) + por responsável */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Distribuição por estado (UF)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(data?.por_estado ?? []).length === 0 ? (
+              <div className="py-10 text-center text-sm text-muted-foreground">Sem processos ainda.</div>
+            ) : (
+              <div className="h-[220px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={data!.por_estado} margin={{ left: -12, right: 8, top: 4 }}>
+                    <XAxis dataKey="uf" fontSize={11} tickLine={false} />
+                    <YAxis fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} width={28} />
+                    <RTooltip />
+                    <Bar dataKey="total" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Por responsável</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(data?.por_responsavel ?? []).length === 0 ? (
+              <div className="py-10 text-center text-sm text-muted-foreground">Sem processos ainda.</div>
+            ) : (
+              <div style={{ height: Math.max(160, data!.por_responsavel!.length * 28) }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={data!.por_responsavel} layout="vertical" margin={{ left: 8, right: 16 }}>
+                    <XAxis type="number" fontSize={11} allowDecimals={false} hide />
+                    <YAxis
+                      type="category"
+                      dataKey="responsavel"
+                      width={140}
+                      fontSize={11}
+                      tickLine={false}
+                      axisLine={false}
+                    />
+                    <RTooltip />
+                    <Bar dataKey="total" fill="#10b981" radius={[0, 4, 4, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
               </div>
             )}
           </CardContent>

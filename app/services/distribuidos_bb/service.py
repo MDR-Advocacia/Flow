@@ -138,12 +138,60 @@ class DistribuidosBBService:
             ],
         }
 
+        # ── Gráficos do dashboard ────────────────────────────────────────
+        por_natureza = [
+            {"natureza": nat or "—", "total": int(q)}
+            for nat, q in (
+                self.db.query(BbProcesso.natureza, func.count(BbProcesso.id))
+                .group_by(BbProcesso.natureza)
+                .all()
+            )
+        ]
+        por_posicao = [
+            {"posicao": pos or "—", "total": int(q)}
+            for pos, q in (
+                self.db.query(BbProcesso.posicao, func.count(BbProcesso.id))
+                .group_by(BbProcesso.posicao)
+                .all()
+            )
+        ]
+        resp_rows = (
+            self.db.query(BbProcesso.responsavel_user_id, func.count(BbProcesso.id))
+            .group_by(BbProcesso.responsavel_user_id)
+            .all()
+        )
+        nomes_resp = self._mapa_nomes({rid for rid, _ in resp_rows if rid})
+        por_responsavel = sorted(
+            [
+                {"responsavel": nomes_resp.get(rid) or "— sem responsável", "total": int(q)}
+                for rid, q in resp_rows
+            ],
+            key=lambda x: -x["total"],
+        )[:12]
+        # Estado (UF) — parse da tramitação BB.
+        from collections import Counter
+
+        from app.services.distribuidos_bb.cadastro_l1 import parse_tramitacao
+
+        uf_counter: Counter = Counter()
+        for (tram,) in self.db.query(BbProcesso.tramitacao).all():
+            uf = (parse_tramitacao(tram) or {}).get("uf") or "—"
+            uf_counter[uf] += 1
+        por_estado = sorted(
+            [{"uf": uf, "total": t} for uf, t in uf_counter.items()],
+            key=lambda x: -x["total"],
+        )
+
         return {
             "kpis": kpis,
             "por_status": por_status,
             "por_escritorio": por_escritorio,
             "ultima_run": self._run_dto(ultima_run) if ultima_run else None,
             "planilhas": planilhas,
+            "por_natureza": por_natureza,
+            "por_posicao": por_posicao,
+            "por_responsavel": por_responsavel,
+            "por_estado": por_estado,
         }
 
     def _run_dto(self, run: BbRun) -> dict[str, Any]:
