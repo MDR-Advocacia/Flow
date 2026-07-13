@@ -411,10 +411,26 @@ def cadastrar_planilha_l1(
     pl = db.get(BbPlanilha, planilha_id)
     if pl is None:
         raise HTTPException(status_code=404, detail="Planilha nao encontrada.")
+    # Guarda anti-reimport: planilha já subida não sobe de novo (evita duplicar
+    # pré-judicial, onde o L1 não detecta duplicidade por falta de CNJ).
+    if pl.subido_legalone and not dry_run:
+        raise HTTPException(
+            status_code=409,
+            detail="Esta planilha já foi cadastrada no Legal One (marcada como subida).",
+        )
     try:
         rel = cadastrar_planilha(bytes(pl.conteudo), pl.nome_arquivo, dry_run=dry_run)
     except ImportL1Error as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+    # Cadastro real bem-sucedido → marca a planilha como subida (o robô subiu).
+    if not dry_run:
+        from datetime import datetime, timezone
+
+        pl.subido_legalone = True
+        pl.subido_em = datetime.now(timezone.utc)
+        pl.subido_por_user_id = current_user.id
+        db.commit()
     return rel
 
 

@@ -272,6 +272,9 @@ def _auto_cadastrar(db: Session, run: BbRun) -> None:
 
     rel = cadastrar_planilha(bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False)
     novos = rel.get("novos", 0)
+    # O robô subiu a planilha → marca como subida (não fica pendente na tela).
+    planilha.subido_legalone = True
+    planilha.subido_em = datetime.now(timezone.utc)
     registrar_evento(
         db, secao=SECAO_CADASTRO, nivel=NIVEL_SUCESSO, acao="Auto-cadastro enviado",
         mensagem=(

@@ -255,13 +255,21 @@ def _listar_staging(sess, h) -> list[dict]:
 
 
 def _linhas_novas(rows: list[dict]) -> list[dict]:
-    """Linhas genuinamente novas = não-duplicadas e sem erro (são as que a nossa
-    planilha acabou de subir; os dupes antigos ficam de fora). Casa CNJ E sem-CNJ
-    pela flag `duplicated`, não pelo número — então pré-judicial também entra."""
-    return [
-        x for x in rows
-        if not x.get("duplicated") and not (x.get("errors") or x.get("errorMessage"))
-    ]
+    """Linhas a cadastrar = sem erro real, descartando SÓ as duplicatas COM CNJ.
+
+    A flag `duplicated` do L1 só é confiável quando há CNJ. Em BB Autor/pré-judicial
+    (SEM CNJ) o L1 acusa "duplicado" comparando apenas o nome do autor — falso
+    positivo que o fluxo manual ignora e cadastra assim mesmo. Então: dup COM CNJ =
+    duplicata real (fora); dup SEM CNJ = falso positivo (entra)."""
+    out = []
+    for x in rows:
+        if x.get("errors") or x.get("errorMessage"):
+            continue  # erro real sempre fora
+        tem_cnj = bool((x.get("identifierNumber") or "").strip())
+        if x.get("duplicated") and tem_cnj:
+            continue  # duplicata confiável (com CNJ) → fora
+        out.append(x)
+    return out
 
 
 def _is_unauthorized(exc: Exception) -> bool:
@@ -302,6 +310,11 @@ def _cadastrar_once(conteudo, file_name, *, firm_id, dry_run, poll_max_s, tok) -
     sess = requests.Session()
     h = _headers(tok)
 
+    # BASELINE: linhas já no staging ANTES do nosso upload (dupes antigos, lixo de
+    # outros imports). Depois pegamos só o que ENTROU com esta planilha (diff) —
+    # senão re-commitaríamos linhas sem-CNJ velhas e duplicaríamos.
+    baseline_ids = {r.get("id") for r in _listar_staging(sess, h)}
+
     sas = _get_sas(sess, h, file_name)
     rel["passos"].append({"passo": "GetStorageSas", "ok": True})
     _upload_blob(sas, file_name, conteudo)
@@ -321,7 +334,9 @@ def _cadastrar_once(conteudo, file_name, *, firm_id, dry_run, poll_max_s, tok) -
         time.sleep(4)
     rel["status_import"] = status
 
-    novos = _linhas_novas(_listar_staging(sess, h))
+    # Só as linhas DESTA planilha (id não estava no baseline) e cadastráveis.
+    desta_planilha = [r for r in _listar_staging(sess, h) if r.get("id") not in baseline_ids]
+    novos = _linhas_novas(desta_planilha)
     novos_ids = [x["id"] for x in novos]
     rel["novos"] = len(novos_ids)
     rel["passos"].append({"passo": "match_novos", "ok": True, "novos": len(novos_ids)})
