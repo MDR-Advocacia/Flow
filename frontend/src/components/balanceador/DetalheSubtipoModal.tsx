@@ -161,8 +161,13 @@ export default function DetalheSubtipoModal({
                         />
                       </TableCell>
                       <TableCell className="max-w-[440px] text-sm">
-                        <div className="font-medium leading-snug">
-                          {(t.l1_task_id && descMap[t.l1_task_id]) || t.descricao || t.cnj || t.pasta || "—"}
+                        <div className="flex items-center gap-1.5 font-medium leading-snug">
+                          {t.origem === "compromisso" && (
+                            <span className="shrink-0 rounded bg-violet-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-violet-700">
+                              Compromisso
+                            </span>
+                          )}
+                          <span>{(t.l1_task_id && descMap[t.l1_task_id]) || t.descricao || t.cnj || t.pasta || "—"}</span>
                         </div>
                         <div className="text-[10px] text-muted-foreground">
                           {[t.cnj, t.pasta].filter(Boolean).join(" · ")}

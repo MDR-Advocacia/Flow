@@ -77,14 +77,21 @@ def _papel_ids(parts: list) -> dict:
     return out
 
 
-def _reatribuir_uma(c, task_id: int, cid: int) -> dict:
+def _reatribuir_uma(c, task_id: int, cid: int, origem: str = "tarefa") -> dict:
     """Lê participantes atuais, preserva o solicitante e troca responsável +
     executante pro `cid`. Devolve {"reason", "http", "papeis"} — os papéis
-    atuais alimentam o fallback web (DE→PARA) quando a tarefa é de Workflow."""
+    atuais alimentam o fallback web (DE→PARA) quando a tarefa é de Workflow.
+
+    `origem`: "tarefa" (/Tasks) | "compromisso" (/Appointments) — mesmo modelo
+    de participante, endpoint diferente. Compromissos costumam dar 400 de
+    validação no PATCH (o modelo revalida `startDateTime`) → caem no caminho
+    web (fase 2), que trata compromisso e tarefa juntos (validado em prod)."""
+    ent_get = "appointments" if origem == "compromisso" else "tasks"
+    ent_patch = "Appointments" if origem == "compromisso" else "Tasks"
     try:
-        atuais = c.get_task_participants(task_id)
+        atuais = c.get_task_participants(task_id, entity=ent_get)
     except Exception:  # noqa: BLE001
-        logger.exception("get_task_participants falhou (task %s)", task_id)
+        logger.exception("get_task_participants falhou (%s %s)", origem, task_id)
         return {"reason": "error", "http": None, "papeis": None}
 
     papeis = _papel_ids(atuais)
@@ -100,7 +107,7 @@ def _reatribuir_uma(c, task_id: int, cid: int) -> dict:
         desired = [
             {"contact": {"id": cid}, "isResponsible": True, "isExecuter": True, "isRequester": True},
         ]
-    res = c.update_task_participants(task_id, desired)
+    res = c.update_task_participants(task_id, desired, entity=ent_patch)
     res["papeis"] = papeis
     return res
 
@@ -183,7 +190,8 @@ def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
         ainda: list = []
         for it in pendentes:
             try:
-                papeis = _papel_ids(c.get_task_participants(int(it["task_id"])))
+                _ent = "appointments" if it.get("origem") == "compromisso" else "tasks"
+                papeis = _papel_ids(c.get_task_participants(int(it["task_id"]), entity=_ent))
                 ok_exec = (not it["exec_de"] or it["exec_de"] == it["cid"]) or papeis["executer"] == it["cid"]
                 ok_resp = (not it["resp_de"] or it["resp_de"] == it["cid"]) or papeis["responsible"] == it["cid"]
                 if ok_exec and ok_resp:
@@ -268,6 +276,7 @@ def _run(job_id: str, team: str, itens: list, movimentos: list, dry_run: bool) -
             task_id = it.get("task_id")
             to_id = it.get("to_id")
             to_nome = it.get("to_nome")
+            origem = it.get("origem") or "tarefa"
             key = (to_id, to_nome)
             if key not in destino_cache:
                 destino_cache[key] = _resolver_destino_cid(db, to_id, to_nome)
@@ -278,12 +287,15 @@ def _run(job_id: str, team: str, itens: list, movimentos: list, dry_run: bool) -
                 reason, http = "destino_nao_resolvido", None
             elif dry_run:
                 try:
-                    c.get_task_participants(int(task_id))
+                    c.get_task_participants(
+                        int(task_id),
+                        entity="appointments" if origem == "compromisso" else "tasks",
+                    )
                     reason, http = "dry_ok", None
                 except Exception:  # noqa: BLE001
                     reason, http = "error", None
             else:
-                res = _reatribuir_uma(c, int(task_id), int(cid))
+                res = _reatribuir_uma(c, int(task_id), int(cid), origem)
                 reason, http = res.get("reason", "error"), res.get("http")
                 papeis = res.get("papeis")
 
@@ -300,12 +312,14 @@ def _run(job_id: str, team: str, itens: list, movimentos: list, dry_run: bool) -
                 job.falhas = (job.falhas or 0) + 1
 
             detalhe.append(
-                {"task_id": task_id, "to_id": to_id, "to_nome": to_nome, "reason": reason, "http": http}
+                {"task_id": task_id, "to_id": to_id, "to_nome": to_nome,
+                 "origem": origem, "reason": reason, "http": http}
             )
             if reason == "web_pendente":
                 wf_queue.append(
                     {
                         "task_id": int(task_id), "cid": int(cid), "idx": len(detalhe) - 1,
+                        "origem": origem,
                         "exec_de": (papeis or {}).get("executer"),
                         "resp_de": (papeis or {}).get("responsible"),
                     }

@@ -1377,13 +1377,15 @@ class LegalOneApiClient:
             )
             return False
 
-    def get_task_participants(self, task_id: int) -> List[Dict[str, Any]]:
+    def get_task_participants(self, task_id: int, entity: str = "tasks") -> List[Dict[str, Any]]:
         """
-        Participantes (Envolvidos) atuais da tarefa. Ler SEMPRE antes de
-        escrever — o PATCH de participants substitui a coleção inteira
+        Participantes (Envolvidos) atuais da tarefa OU compromisso. Ler SEMPRE
+        antes de escrever — o PATCH de participants substitui a coleção inteira
         (REPLACE). Ver docs/legalone-reatribuir-responsavel-executante-tarefa.md.
+        `entity`: "tasks" (Tarefa) | "appointments" (Compromisso) — mesmo modelo.
         """
-        url = f"{self.base_url}/tasks/{task_id}/participants"
+        ent = "appointments" if entity == "appointments" else "tasks"
+        url = f"{self.base_url}/{ent}/{task_id}/participants"
         resp = self._request_with_retry("GET", url)
         return (resp.json() or {}).get("value", [])
 
@@ -1402,7 +1404,7 @@ class LegalOneApiClient:
             pass
         return False
 
-    def update_task_participants(self, task_id: int, participants: list) -> dict:
+    def update_task_participants(self, task_id: int, participants: list, entity: str = "Tasks") -> dict:
         """
         Substitui a coleção de participantes (Envolvidos) — troca responsável /
         executante / solicitante. Semântica de REPLACE: mande a lista final
@@ -1410,11 +1412,13 @@ class LegalOneApiClient:
 
         Cada item: {"contact": {"id": int}, "isResponsible": bool,
                     "isExecuter": bool, "isRequester": bool}  (grafia: Executer).
+        `entity`: "Tasks" (Tarefa) | "Appointments" (Compromisso) — mesmo PATCH.
 
         Retorna {"ok": bool, "reason": "reassigned"|"workflow_locked"|"error",
                  "http": int|None}. Tarefa de Workflow = HTTP 400 travado.
         """
-        url = f"{self.base_url}/Tasks/{task_id}"
+        ent = "Appointments" if entity == "Appointments" else "Tasks"
+        url = f"{self.base_url}/{ent}/{task_id}"
         try:
             resp = self._request_with_retry(
                 "PATCH", url, json={"participants": participants}
@@ -1437,8 +1441,8 @@ class LegalOneApiClient:
             if self.is_workflow_locked(body):
                 return {"ok": False, "reason": "workflow_locked", "http": http}
             self.logger.error(
-                "Falha PATCH participants /Tasks/%s: HTTP %s. %s",
-                task_id, http, (getattr(resp, "text", "") or "")[:400],
+                "Falha PATCH participants /%s/%s: HTTP %s. %s",
+                ent, task_id, http, (getattr(resp, "text", "") or "")[:400],
             )
             return {"ok": False, "reason": "error", "http": http}
 

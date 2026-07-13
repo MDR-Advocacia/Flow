@@ -293,6 +293,32 @@ class BalanceadorService:
         self.db.commit()
         return {"ok": True, "registrados": len(alvos or [])}
 
+    @staticmethod
+    def _carregar_l1_pool(client, endpoint: str, flt: str, max_itens: int) -> tuple:
+        """Pagina UM endpoint do L1 (/Tasks ou /Appointments) com o filtro dado.
+        Os dois compartilham o modelo (participants, statusId, endDateTime,
+        subTypeId) — só o endpoint muda. Retorna (raw, total_real, capado)."""
+        raw, skip, total_real, capado = [], 0, None, False
+        while skip < max_itens:
+            params = {
+                "$filter": flt, "$top": "30", "$skip": str(skip),
+                "$orderby": "endDateTime", "$select": "id,subTypeId,endDateTime,description",
+            }
+            if skip == 0:
+                params["$count"] = "true"
+            r = client._request_with_retry("GET", f"{client.base_url}{endpoint}", params=params)
+            j = r.json()
+            if total_real is None:
+                total_real = j.get("@odata.count")
+            batch = j.get("value", [])
+            raw.extend(batch)
+            if len(batch) < 30:
+                break
+            skip += 30
+        else:
+            capado = True
+        return raw, (total_real or 0), capado
+
     # ── LIVE: pendentes não-iniciadas de uma pessoa, direto do L1 ──
     def live_pessoa(self, team: str, pessoa_id: int, dias: int, incluir_atrasadas: bool = True) -> dict:
         """Pendentes NÃO iniciadas (statusId=0) da pessoa, AO VIVO do L1 (filtro
@@ -330,26 +356,20 @@ class BalanceadorService:
         if dias and dias > 0:
             teto = hoje + _dt.timedelta(days=dias)
             flt += f" and endDateTime le {teto.isoformat()}T23:59:59-03:00"
-        raw, skip, total_real, capado = [], 0, None, False
-        MAX_TAREFAS = 180  # ~6 páginas; cobre a maioria e capa os backlogs gigantes
-        while skip < MAX_TAREFAS:
-            params = {
-                "$filter": flt, "$top": "30", "$skip": str(skip),
-                "$orderby": "endDateTime", "$select": "id,subTypeId,endDateTime,description",
-            }
-            if skip == 0:
-                params["$count"] = "true"
-            r = client._request_with_retry("GET", f"{client.base_url}/Tasks", params=params)
-            j = r.json()
-            if total_real is None:
-                total_real = j.get("@odata.count")
-            batch = j.get("value", [])
-            raw.extend(batch)
-            if len(batch) < 30:
-                break
-            skip += 30
-        else:
-            capado = True  # estourou o teto de páginas — há mais além das mais urgentes
+        # No L1 "Compromissos e Tarefas" são entidades SEPARADAS na API (/Tasks e
+        # /Appointments), mesmo modelo. A agenda de execução é a UNIÃO das duas —
+        # ler só /Tasks perdia os compromissos (audiências, prazos internos,
+        # peticionamentos) e subcontava a carga (ver docs/balanceador-compromissos-plano.md).
+        MAX_POR_ENDPOINT = 180  # ~6 páginas por endpoint; capa backlogs gigantes
+        raw_t, total_t, cap_t = self._carregar_l1_pool(client, "/Tasks", flt, MAX_POR_ENDPOINT)
+        raw_a, total_a, cap_a = self._carregar_l1_pool(client, "/Appointments", flt, MAX_POR_ENDPOINT)
+        for it in raw_t:
+            it["_origem"] = "tarefa"
+        for it in raw_a:
+            it["_origem"] = "compromisso"
+        raw = raw_t + raw_a
+        total_real = total_t + total_a
+        capado = cap_t or cap_a
 
         sub_ids = {t.get("subTypeId") for t in raw if t.get("subTypeId")}
         nomes = {
@@ -393,6 +413,9 @@ class BalanceadorService:
                 {
                     "l1_task_id": t.get("id"), "subtipo": sub, "descricao": t.get("description"),
                     "prazo": dl, "situacao": sit,
+                    # "tarefa" | "compromisso" — o front distingue e a reatribuição
+                    # sabe qual endpoint (/Tasks ou /Appointments) bater no PATCH.
+                    "origem": t.get("_origem", "tarefa"),
                 }
             )
 

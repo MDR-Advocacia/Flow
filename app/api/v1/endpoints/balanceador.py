@@ -125,6 +125,7 @@ class ReatribuirItem(BaseModel):
     task_id: int
     to_id: int | None = None
     to_nome: str | None = None
+    origem: str | None = "tarefa"  # "tarefa" (/Tasks) | "compromisso" (/Appointments)
 
 
 class ReatribuirReq(BaseModel):

@@ -213,12 +213,21 @@ export default function RedistribuicaoModal({
       s.add(id);
       consumido.set(key, s);
     };
+    // L1 separa Tarefa (/Tasks) de Compromisso (/Appointments): o job precisa
+    // saber qual endpoint bater. Mapa id→origem a partir de tudo que carregamos.
+    const origemPorId = new Map<number, "tarefa" | "compromisso">();
+    for (const lst of Object.values(tarefas)) {
+      for (const t of lst || []) {
+        if (t.l1_task_id != null) origemPorId.set(t.l1_task_id, t.origem === "compromisso" ? "compromisso" : "tarefa");
+      }
+    }
+    const origemDe = (id: number): "tarefa" | "compromisso" => origemPorId.get(id) ?? "tarefa";
     const itens: ReatribuirItem[] = [];
     for (const m of lista) {
       const key = `${m.fromId}|${m.subtipo}`;
       if (m.taskIds && m.taskIds.length) {
         for (const tid of m.taskIds) {
-          itens.push({ task_id: tid, to_id: m.toId, to_nome: m.toNome });
+          itens.push({ task_id: tid, to_id: m.toId, to_nome: m.toNome, origem: origemDe(tid) });
           marcar(key, tid);
         }
         continue;
@@ -228,8 +237,9 @@ export default function RedistribuicaoModal({
         (t) => t.subtipo === m.subtipo && t.l1_task_id != null && !usados.has(t.l1_task_id),
       );
       for (const t of pool.slice(0, m.qtd)) {
-        itens.push({ task_id: t.l1_task_id as number, to_id: m.toId, to_nome: m.toNome });
-        marcar(key, t.l1_task_id as number);
+        const tid = t.l1_task_id as number;
+        itens.push({ task_id: tid, to_id: m.toId, to_nome: m.toNome, origem: t.origem === "compromisso" ? "compromisso" : "tarefa" });
+        marcar(key, tid);
       }
     }
     return itens;

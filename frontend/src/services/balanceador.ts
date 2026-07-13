@@ -49,6 +49,7 @@ export interface TarefaDetalhe {
   uf?: string | null;
   prazo: string | null;
   situacao: Situacao;
+  origem?: "tarefa" | "compromisso"; // L1 separa /Tasks de /Appointments
 }
 
 // ── LIVE: pendentes de uma pessoa direto do L1 (matriz + detalhe) ──
@@ -263,6 +264,7 @@ export interface ReatribuirItem {
   task_id: number;
   to_id: number | null;
   to_nome: string | null;
+  origem?: "tarefa" | "compromisso";
 }
 
 export interface ReatribuirStatus {
