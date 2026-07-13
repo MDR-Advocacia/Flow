@@ -4,6 +4,7 @@ import {
   Building2,
   CheckCircle2,
   Download,
+  ExternalLink,
   FileSpreadsheet,
   FileText,
   History,
@@ -84,6 +85,13 @@ const NIVEL_META: Record<string, string> = {
   ERRO: "bg-rose-100 text-rose-700",
 };
 
+const POOL_FILTROS = [
+  { value: "", label: "Todo o pool" },
+  { value: "PENDENTE_CADASTRO", label: "Pendente cadastro" },
+  { value: "NOVO", label: "Novo" },
+  { value: "CADASTRADO_L1", label: "Cadastrado no L1" },
+];
+
 const STATUS_FILTROS = [
   { value: "", label: "Todos os status" },
   { value: "COLETADO", label: "Aguardando ciência" },
@@ -141,6 +149,9 @@ export default function DistribuidosBBPage() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [statusFiltro, setStatusFiltro] = useState<string>(searchParams.get("status") ?? "");
+  const [poolFiltro, setPoolFiltro] = useState<string>("");
+  const [cadastroDe, setCadastroDe] = useState<string>("");
+  const [cadastroAte, setCadastroAte] = useState<string>("");
   const [buscaInput, setBuscaInput] = useState("");
   const [busca, setBusca] = useState("");
   const [page, setPage] = useState(1);
@@ -240,6 +251,9 @@ export default function DistribuidosBBPage() {
     try {
       const resp = await listarProcessos({
         status: statusFiltro || undefined,
+        planilhaStatus: poolFiltro || undefined,
+        cadastroDe: cadastroDe || undefined,
+        cadastroAte: cadastroAte || undefined,
         busca: busca || undefined,
         limit: pageSize,
         offset: (page - 1) * pageSize,
@@ -251,7 +265,7 @@ export default function DistribuidosBBPage() {
     } finally {
       setLoading(false);
     }
-  }, [statusFiltro, busca, page, pageSize, toast]);
+  }, [statusFiltro, poolFiltro, cadastroDe, cadastroAte, busca, page, pageSize, toast]);
 
   const loadEventos = useCallback(async () => {
     try {
@@ -411,6 +425,59 @@ export default function DistribuidosBBPage() {
                 ))}
               </SelectContent>
             </Select>
+            <Select
+              value={poolFiltro || "__all__"}
+              onValueChange={(v) => {
+                setPage(1);
+                setPoolFiltro(v === "__all__" ? "" : v);
+              }}
+            >
+              <SelectTrigger className="w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {POOL_FILTROS.map((s) => (
+                  <SelectItem key={s.value || "__all__"} value={s.value || "__all__"}>
+                    {s.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-muted-foreground">Cadastro de</span>
+              <Input
+                type="date"
+                className="w-[150px]"
+                value={cadastroDe}
+                onChange={(e) => {
+                  setPage(1);
+                  setCadastroDe(e.target.value);
+                }}
+              />
+              <span className="text-xs text-muted-foreground">até</span>
+              <Input
+                type="date"
+                className="w-[150px]"
+                value={cadastroAte}
+                onChange={(e) => {
+                  setPage(1);
+                  setCadastroAte(e.target.value);
+                }}
+              />
+              {(cadastroDe || cadastroAte) && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setPage(1);
+                    setCadastroDe("");
+                    setCadastroAte("");
+                  }}
+                >
+                  Limpar
+                </Button>
+              )}
+            </div>
             <div className="relative w-full lg:w-80">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -823,15 +890,36 @@ export default function DistribuidosBBPage() {
                     ["Data ajuizamento", auditoria.processo.data_ajuizamento ?? "—"],
                     ["Situação", auditoria.processo.situacao ?? "—"],
                     ["Responsável", auditoria.processo.responsavel_nome ?? "—"],
-                    ["Escritório", auditoria.processo.escritorio_path ?? "—"],
                     ["Observação", auditoria.processo.observacao ?? "—"],
-                    ["Cadastro L1", auditoria.processo.l1_lawsuit_id ? String(auditoria.processo.l1_lawsuit_id) : "—"],
                   ].map(([label, val]) => (
                     <div key={label} className="min-w-0">
                       <div className="text-xs text-muted-foreground">{label}</div>
                       <div className="truncate">{val}</div>
                     </div>
                   ))}
+                </div>
+                {/* Escritório responsável (path completo) + link da pasta no L1 */}
+                <div className="mt-2 grid gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                  <div className="min-w-0">
+                    <div className="text-xs text-muted-foreground">Escritório responsável</div>
+                    <div className="break-words">{auditoria.processo.escritorio_path ?? "—"}</div>
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs text-muted-foreground">Cadastro no Legal One</div>
+                    {auditoria.processo.l1_lawsuit_id ? (
+                      <a
+                        href={`https://mdradvocacia.novajus.com.br/processos/Processos/details/${auditoria.processo.l1_lawsuit_id}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 font-medium text-primary hover:underline"
+                      >
+                        {auditoria.processo.l1_folder ?? `id ${auditoria.processo.l1_lawsuit_id}`}
+                        <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                      </a>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </div>
                 </div>
               </div>
 

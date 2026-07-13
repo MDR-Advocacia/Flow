@@ -217,12 +217,27 @@ class DistribuidosBBService:
         status: Optional[str] = None,
         escritorio_id: Optional[int] = None,
         busca: Optional[str] = None,
+        planilha_status: Optional[str] = None,
+        cadastro_de: Optional[str] = None,
+        cadastro_ate: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
+        from datetime import datetime, time as _time
+
+        from sqlalchemy import case
+
+        from app.models.distribuidos_bb import (
+            POOL_CADASTRADO_L1,
+            POOL_NOVO,
+            POOL_PENDENTE_CADASTRO,
+        )
+
         q = self.db.query(BbProcesso)
         if status:
             q = q.filter(BbProcesso.status == status)
+        if planilha_status:
+            q = q.filter(BbProcesso.planilha_status == planilha_status)
         if escritorio_id:
             q = q.filter(BbProcesso.escritorio_id == escritorio_id)
         if busca:
@@ -232,8 +247,38 @@ class DistribuidosBBService:
                 | (BbProcesso.npj.ilike(termo))
                 | (BbProcesso.adverso_principal.ilike(termo))
             )
+
+        def _parse(d: str, fim: bool = False):
+            try:
+                dt = datetime.strptime(d.strip(), "%Y-%m-%d")
+                return datetime.combine(dt.date(), _time.max if fim else _time.min)
+            except Exception:  # noqa: BLE001
+                return None
+
+        if cadastro_de and (dd := _parse(cadastro_de)):
+            q = q.filter(BbProcesso.cadastro_confirmado_em >= dd)
+        if cadastro_ate and (da := _parse(cadastro_ate, fim=True)):
+            q = q.filter(BbProcesso.cadastro_confirmado_em <= da)
+
+        # Ordenação default: pendente cadastro em cima, depois novo, depois
+        # cadastrado; secundária por data de cadastro (mais recente primeiro).
+        ordem_pool = case(
+            (BbProcesso.planilha_status == POOL_PENDENTE_CADASTRO, 0),
+            (BbProcesso.planilha_status == POOL_NOVO, 1),
+            (BbProcesso.planilha_status == POOL_CADASTRADO_L1, 2),
+            else_=3,
+        )
         total = q.count()
-        rows = q.order_by(BbProcesso.id.desc()).limit(limit).offset(offset).all()
+        rows = (
+            q.order_by(
+                ordem_pool,
+                BbProcesso.cadastro_confirmado_em.desc().nullslast(),
+                BbProcesso.id.desc(),
+            )
+            .limit(limit)
+            .offset(offset)
+            .all()
+        )
         nomes = self._mapa_nomes({r.responsavel_user_id for r in rows})
         return {"total": total, "items": [self._proc_dto(r, nomes) for r in rows]}
 

@@ -178,6 +178,9 @@ def listar_processos(
     status_filtro: Optional[str] = Query(None, alias="status"),
     escritorio_id: Optional[int] = Query(None),
     busca: Optional[str] = Query(None),
+    planilha_status: Optional[str] = Query(None, description="NOVO | PENDENTE_CADASTRO | CADASTRADO_L1"),
+    cadastro_de: Optional[str] = Query(None, description="Data de cadastro no L1 (AAAA-MM-DD)."),
+    cadastro_ate: Optional[str] = Query(None, description="Data de cadastro no L1 (AAAA-MM-DD)."),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -185,7 +188,9 @@ def listar_processos(
 ):
     _require_gestao(current_user)
     return DistribuidosBBService(db).listar_processos(
-        status=status_filtro, escritorio_id=escritorio_id, busca=busca, limit=limit, offset=offset,
+        status=status_filtro, escritorio_id=escritorio_id, busca=busca,
+        planilha_status=planilha_status, cadastro_de=cadastro_de, cadastro_ate=cadastro_ate,
+        limit=limit, offset=offset,
     )
 
 

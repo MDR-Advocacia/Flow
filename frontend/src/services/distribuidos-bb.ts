@@ -182,6 +182,9 @@ export async function listarProcessos(params: {
   status?: string;
   escritorio_id?: number;
   busca?: string;
+  planilhaStatus?: string;
+  cadastroDe?: string;
+  cadastroAte?: string;
   limit?: number;
   offset?: number;
 }): Promise<ListaProcessos> {
@@ -189,6 +192,9 @@ export async function listarProcessos(params: {
   if (params.status) qs.set("status", params.status);
   if (params.escritorio_id) qs.set("escritorio_id", String(params.escritorio_id));
   if (params.busca) qs.set("busca", params.busca);
+  if (params.planilhaStatus) qs.set("planilha_status", params.planilhaStatus);
+  if (params.cadastroDe) qs.set("cadastro_de", params.cadastroDe);
+  if (params.cadastroAte) qs.set("cadastro_ate", params.cadastroAte);
   qs.set("limit", String(params.limit ?? 50));
   qs.set("offset", String(params.offset ?? 0));
   return json(await apiFetch(`${BASE}/processos?${qs.toString()}`));
