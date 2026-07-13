@@ -4,7 +4,7 @@
 // do Excel com os resultados. Aberto pelo botão no header da seção.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, ChevronDown, FileSpreadsheet, Loader2, RefreshCw } from "lucide-react";
+import { Activity, ChevronDown, FileSpreadsheet, Loader2, RefreshCw, RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +20,7 @@ import {
   downloadExecucaoExcel,
   getExecucaoDetalhe,
   listarExecucoes,
+  retentarExecucao,
 } from "@/services/balanceador";
 
 const PAGE = 10;
@@ -65,6 +66,7 @@ export default function ExecucoesDialog({ team, onClose }: { team: string; onClo
   const [aberto, setAberto] = useState<string | null>(null);
   const [tarefas, setTarefas] = useState<Record<string, ExecucaoTarefa[]>>({});
   const [baixando, setBaixando] = useState<string | null>(null);
+  const [retentando, setRetentando] = useState<string | null>(null);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(
@@ -130,6 +132,23 @@ export default function ExecucoesDialog({ team, onClose }: { team: string; onClo
       toast({ title: "Falha ao gerar o Excel", description: String((e as Error).message), variant: "destructive" });
     } finally {
       setBaixando(null);
+    }
+  };
+
+  // Refaz só as pendentes/falhas dessa execução → novo job (aparece no topo,
+  // ao vivo). Volta pra página 0 pra acompanhar.
+  const retentar = async (j: ExecucaoJob) => {
+    setRetentando(j.job_id);
+    try {
+      const r = await retentarExecucao(team, j.job_id);
+      toast({ title: "Retentativa iniciada", description: `${r.total} tarefa(s) sendo refeitas no L1.` });
+      setAberto(null);
+      if (pagina === 0) load();
+      else setPagina(0);
+    } catch (e) {
+      toast({ title: "Não foi possível refazer", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setRetentando(null);
     }
   };
 
@@ -212,20 +231,39 @@ export default function ExecucoesDialog({ team, onClose }: { team: string; onClo
                         <span className="text-[11px] text-muted-foreground">
                           {j.total} tarefa(s) · {j.dry_run ? "simulação (não gravou no L1)" : "escrita real no L1"}
                         </span>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-7 gap-1 text-xs"
-                          disabled={baixando === j.job_id}
-                          onClick={() => baixar(j.job_id)}
-                        >
-                          {baixando === j.job_id ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <FileSpreadsheet className="h-3.5 w-3.5" />
+                        <div className="flex items-center gap-1.5">
+                          {j.status === "done" && !j.dry_run && j.falhas + j.workflow_bloqueadas > 0 && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 gap-1 border-amber-300 text-xs text-amber-800 hover:bg-amber-50"
+                              disabled={retentando === j.job_id}
+                              onClick={() => retentar(j)}
+                              title="Refaz só as tarefas que falharam ou ficaram pendentes"
+                            >
+                              {retentando === j.job_id ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <RotateCcw className="h-3.5 w-3.5" />
+                              )}
+                              Tentar novamente ({j.falhas + j.workflow_bloqueadas})
+                            </Button>
                           )}
-                          Excel
-                        </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 gap-1 text-xs"
+                            disabled={baixando === j.job_id}
+                            onClick={() => baixar(j.job_id)}
+                          >
+                            {baixando === j.job_id ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <FileSpreadsheet className="h-3.5 w-3.5" />
+                            )}
+                            Excel
+                          </Button>
+                        </div>
                       </div>
                       {!tarefas[j.job_id] ? (
                         <p className="py-2 text-center text-[11px] text-muted-foreground">

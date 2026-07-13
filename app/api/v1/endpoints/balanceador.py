@@ -267,6 +267,50 @@ def reatribuir_job_detalhe(job_id: str, team: str = Query(...), db: Session = De
     }
 
 
+# Reasons que contam como SUCESSO — o resto (falha/pendência/manual) é
+# retentável. dry_ok não conta: simulação não gravou nada pra "refazer".
+_REASON_OK = {"reassigned", "reassigned_web", "dry_ok"}
+
+
+@router.post(
+    "/reatribuir/jobs/{job_id}/retry",
+    summary="Refaz só as tarefas que falharam/ficaram pendentes numa execução",
+    dependencies=[_team],
+)
+def reatribuir_job_retry(
+    job_id: str,
+    team: str = Query(...),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(get_current_user),
+):
+    from app.models.performance import BalanceadorReatribuirJob
+    from app.services.performance import reatribuir_job
+
+    j = db.get(BalanceadorReatribuirJob, job_id)
+    if not j or j.team != team:
+        raise HTTPException(status_code=404, detail="Execução não encontrada")
+    if j.status != "done":
+        raise HTTPException(status_code=409, detail="A execução ainda está em andamento")
+    if j.dry_run:
+        raise HTTPException(status_code=400, detail="Simulação não grava no L1 — nada a refazer")
+
+    itens = [
+        {
+            "task_id": int(d["task_id"]),
+            "to_id": d.get("to_id"),
+            "to_nome": d.get("to_nome"),
+            "origem": d.get("origem") or "tarefa",
+        }
+        for d in (j.detalhe or [])
+        if d.get("task_id") and d.get("reason") not in _REASON_OK
+    ]
+    if not itens:
+        raise HTTPException(status_code=400, detail="Não há tarefas pendentes pra refazer nessa execução")
+
+    novo = reatribuir_job.iniciar(team, itens, [], False, current_user)
+    return {"job_id": novo, "total": len(itens), "status": reatribuir_job.status(novo)}
+
+
 @router.get(
     "/reatribuir/jobs/{job_id}/excel",
     summary="Excel com o resultado de uma execução de reatribuição",

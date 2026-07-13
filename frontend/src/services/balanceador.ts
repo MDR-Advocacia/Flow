@@ -243,6 +243,17 @@ export async function getExecucaoDetalhe(team: string, jobId: string): Promise<E
   return r.tarefas;
 }
 
+// Refaz só as tarefas que falharam/ficaram pendentes numa execução — dispara um
+// novo job (server-backed) com esses itens (preserva origem tarefa/compromisso).
+export async function retentarExecucao(
+  team: string,
+  jobId: string,
+): Promise<{ job_id: string; total: number }> {
+  return json(
+    await apiFetch(`${BASE}/reatribuir/jobs/${jobId}/retry?team=${team}`, { method: "POST" }),
+  );
+}
+
 export async function downloadExecucaoExcel(team: string, jobId: string): Promise<void> {
   const res = await apiFetch(`${BASE}/reatribuir/jobs/${jobId}/excel?team=${team}`);
   if (!res.ok) throw new Error(`Erro ${res.status} ao gerar o Excel`);
