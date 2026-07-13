@@ -181,6 +181,27 @@ class DistribuidosBBService:
             [{"uf": uf, "total": t} for uf, t in uf_counter.items()],
             key=lambda x: -x["total"],
         )
+        # Distribuição por data de captura (created_at) — timeline.
+        por_data = [
+            {"data": str(d), "total": int(q)}
+            for d, q in (
+                self.db.query(func.date(BbProcesso.created_at), func.count(BbProcesso.id))
+                .group_by(func.date(BbProcesso.created_at))
+                .order_by(func.date(BbProcesso.created_at))
+                .all()
+            )
+        ]
+        ultima_passagem = None
+        if ultima_run is not None:
+            ultima_passagem = {
+                "data": (
+                    ultima_run.concluido_em or ultima_run.iniciado_em
+                ).isoformat()
+                if (ultima_run.concluido_em or ultima_run.iniciado_em)
+                else None,
+                "capturados": ultima_run.total_coletados,
+                "status": ultima_run.status,
+            }
 
         return {
             "kpis": kpis,
@@ -192,6 +213,8 @@ class DistribuidosBBService:
             "por_posicao": por_posicao,
             "por_responsavel": por_responsavel,
             "por_estado": por_estado,
+            "por_data": por_data,
+            "ultima_passagem": ultima_passagem,
         }
 
     def _run_dto(self, run: BbRun) -> dict[str, Any]:
@@ -218,6 +241,7 @@ class DistribuidosBBService:
         escritorio_id: Optional[int] = None,
         busca: Optional[str] = None,
         planilha_status: Optional[str] = None,
+        posicao: Optional[str] = None,
         cadastro_de: Optional[str] = None,
         cadastro_ate: Optional[str] = None,
         limit: int = 50,
@@ -238,6 +262,8 @@ class DistribuidosBBService:
             q = q.filter(BbProcesso.status == status)
         if planilha_status:
             q = q.filter(BbProcesso.planilha_status == planilha_status)
+        if posicao:
+            q = q.filter(BbProcesso.posicao == posicao)
         if escritorio_id:
             q = q.filter(BbProcesso.escritorio_id == escritorio_id)
         if busca:

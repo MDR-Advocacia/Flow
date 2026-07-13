@@ -31,6 +31,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useToast } from "@/hooks/use-toast";
 import {
   Auditoria,
+  Escritorio,
   Evento,
   PlanilhaDetalhe,
   PlanilhaHist,
@@ -40,6 +41,7 @@ import {
   gerarPlanilhaNoHistorico,
   getAuditoria,
   getPlanilhaDetalhe,
+  listarEscritorios,
   listarEventos,
   listarPlanilhas,
   listarProcessos,
@@ -150,6 +152,9 @@ export default function DistribuidosBBPage() {
   const [loading, setLoading] = useState(false);
   const [statusFiltro, setStatusFiltro] = useState<string>(searchParams.get("status") ?? "");
   const [poolFiltro, setPoolFiltro] = useState<string>("");
+  const [escritorioFiltro, setEscritorioFiltro] = useState<string>("");
+  const [posicaoFiltro, setPosicaoFiltro] = useState<string>("");
+  const [escritorios, setEscritorios] = useState<Escritorio[]>([]);
   const [cadastroDe, setCadastroDe] = useState<string>("");
   const [cadastroAte, setCadastroAte] = useState<string>("");
   const [buscaInput, setBuscaInput] = useState("");
@@ -252,6 +257,8 @@ export default function DistribuidosBBPage() {
       const resp = await listarProcessos({
         status: statusFiltro || undefined,
         planilhaStatus: poolFiltro || undefined,
+        escritorio_id: escritorioFiltro ? Number(escritorioFiltro) : undefined,
+        posicao: posicaoFiltro || undefined,
         cadastroDe: cadastroDe || undefined,
         cadastroAte: cadastroAte || undefined,
         busca: busca || undefined,
@@ -265,7 +272,7 @@ export default function DistribuidosBBPage() {
     } finally {
       setLoading(false);
     }
-  }, [statusFiltro, poolFiltro, cadastroDe, cadastroAte, busca, page, pageSize, toast]);
+  }, [statusFiltro, poolFiltro, escritorioFiltro, posicaoFiltro, cadastroDe, cadastroAte, busca, page, pageSize, toast]);
 
   const loadEventos = useCallback(async () => {
     try {
@@ -339,6 +346,9 @@ export default function DistribuidosBBPage() {
     }
   };
 
+  useEffect(() => {
+    listarEscritorios().then(setEscritorios).catch(() => setEscritorios([]));
+  }, []);
   useEffect(() => {
     if (aba === "processos") loadProcessos();
   }, [aba, loadProcessos]);
@@ -439,6 +449,44 @@ export default function DistribuidosBBPage() {
                 {POOL_FILTROS.map((s) => (
                   <SelectItem key={s.value || "__all__"} value={s.value || "__all__"}>
                     {s.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select
+              value={escritorioFiltro || "__all__"}
+              onValueChange={(v) => {
+                setPage(1);
+                setEscritorioFiltro(v === "__all__" ? "" : v);
+              }}
+            >
+              <SelectTrigger className="w-56">
+                <SelectValue placeholder="Escritório responsável" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">Todos os escritórios</SelectItem>
+                {escritorios.map((e) => (
+                  <SelectItem key={e.id} value={String(e.id)}>
+                    {e.nome}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select
+              value={posicaoFiltro || "__all__"}
+              onValueChange={(v) => {
+                setPage(1);
+                setPosicaoFiltro(v === "__all__" ? "" : v);
+              }}
+            >
+              <SelectTrigger className="w-40">
+                <SelectValue placeholder="Polo" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">Todos os polos</SelectItem>
+                {["Réu", "Autor", "Interessado"].map((p) => (
+                  <SelectItem key={p} value={p}>
+                    {p}
                   </SelectItem>
                 ))}
               </SelectContent>

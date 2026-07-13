@@ -69,6 +69,8 @@ export interface DashboardData {
   por_posicao?: { posicao: string; total: number }[];
   por_responsavel?: { responsavel: string; total: number }[];
   por_estado?: { uf: string; total: number }[];
+  por_data?: { data: string; total: number }[];
+  ultima_passagem?: { data: string | null; capturados: number; status: string } | null;
 }
 
 export interface Processo {
@@ -183,6 +185,7 @@ export async function listarProcessos(params: {
   escritorio_id?: number;
   busca?: string;
   planilhaStatus?: string;
+  posicao?: string;
   cadastroDe?: string;
   cadastroAte?: string;
   limit?: number;
@@ -193,6 +196,7 @@ export async function listarProcessos(params: {
   if (params.escritorio_id) qs.set("escritorio_id", String(params.escritorio_id));
   if (params.busca) qs.set("busca", params.busca);
   if (params.planilhaStatus) qs.set("planilha_status", params.planilhaStatus);
+  if (params.posicao) qs.set("posicao", params.posicao);
   if (params.cadastroDe) qs.set("cadastro_de", params.cadastroDe);
   if (params.cadastroAte) qs.set("cadastro_ate", params.cadastroAte);
   qs.set("limit", String(params.limit ?? 50));

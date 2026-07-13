@@ -19,8 +19,11 @@ import {
   Users,
 } from "lucide-react";
 import {
+  Area,
+  AreaChart,
   Bar,
   BarChart,
+  CartesianGrid,
   Cell,
   Pie,
   PieChart,
@@ -62,6 +65,16 @@ const CHART_COLORS = [
 function fmtDataCurta(iso: string | null): string {
   if (!iso) return "—";
   return new Date(iso).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
+}
+
+function fmtDiaMes(d: string): string {
+  const m = d.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[3]}/${m[2]}` : d;
+}
+
+function fmtDataDMA(d: string): string {
+  const m = d.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : d;
 }
 
 function Kpi({
@@ -337,6 +350,56 @@ export default function DistribuidosBBDashboardPage() {
         <Kpi label="Sem responsável" value={k?.sem_responsavel ?? 0} icon={UserX} tone="bg-amber-100 text-amber-700" />
         <Kpi label="Erros / revisão" value={(k?.erros ?? 0) + (k?.revisao ?? 0)} icon={AlertTriangle} tone="bg-rose-100 text-rose-700" onClick={() => navigate("/distribuidos-bb?status=ERRO")} />
       </div>
+
+      {/* Distribuição por data (capturas) + última passagem */}
+      <Card>
+        <CardHeader className="flex-row items-center justify-between space-y-0 pb-3">
+          <CardTitle className="text-base">Distribuição por data (capturas)</CardTitle>
+          {data?.ultima_passagem?.data && (
+            <span className="rounded-md bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground">
+              Última passagem:{" "}
+              <strong className="text-foreground">{fmtDataCurta(data.ultima_passagem.data)}</strong> ·{" "}
+              <strong className="text-foreground">{data.ultima_passagem.capturados}</strong> capturados
+            </span>
+          )}
+        </CardHeader>
+        <CardContent>
+          {(data?.por_data ?? []).length === 0 ? (
+            <div className="py-10 text-center text-sm text-muted-foreground">Sem capturas ainda.</div>
+          ) : (
+            <div className="h-[210px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={data!.por_data} margin={{ left: -14, right: 8, top: 6 }}>
+                  <defs>
+                    <linearGradient id="gData" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.35} />
+                      <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+                  <XAxis
+                    dataKey="data"
+                    fontSize={11}
+                    tickLine={false}
+                    minTickGap={24}
+                    tickFormatter={fmtDiaMes}
+                  />
+                  <YAxis fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} width={28} />
+                  <RTooltip labelFormatter={(l) => fmtDataDMA(String(l))} />
+                  <Area
+                    type="monotone"
+                    dataKey="total"
+                    name="Capturados"
+                    stroke="#3b82f6"
+                    fill="url(#gData)"
+                    strokeWidth={2}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
