@@ -75,6 +75,7 @@ import {
   Lightbulb,
   Loader2,
   type LucideIcon,
+  ChevronsUpDown,
   Pause,
   Pencil,
   Play,
@@ -662,22 +663,27 @@ export default function OnerequestPage() {
   const [respEditFor, setRespEditFor] = useState<number | null>(null);
   const [respSaving, setRespSaving] = useState<number | null>(null);
 
-  const trocarResponsavel = async (sol: OnerequestSolicitacao, u: FormUser) => {
+  const trocarResponsavel = async (sol: OnerequestSolicitacao, u: FormUser | null) => {
     setRespSaving(sol.id);
+    setRespEditFor(null);
     try {
-      await updateTratamento(sol.id, { responsavel_user_id: u.id });
+      await updateTratamento(sol.id, { responsavel_user_id: u ? u.id : null });
       // Atualiza a linha localmente (sem reload da página inteira).
       setItems((prev) =>
         prev.map((it) =>
-          it.id === sol.id ? { ...it, responsavel_user_id: u.id, responsavel_nome: u.name } : it,
+          it.id === sol.id
+            ? { ...it, responsavel_user_id: u ? u.id : null, responsavel_nome: u ? u.name : null }
+            : it,
         ),
       );
-      toast({ title: "Responsável atualizado", description: `${sol.numero_solicitacao} → ${u.name}` });
+      toast({
+        title: u ? "Responsável atualizado" : "Responsável removido",
+        description: u ? `${sol.numero_solicitacao} → ${u.name}` : sol.numero_solicitacao,
+      });
     } catch (e) {
       toast({ title: "Erro ao trocar responsável", description: String((e as Error).message), variant: "destructive" });
     } finally {
       setRespSaving(null);
-      setRespEditFor(null);
     }
   };
 
@@ -1483,7 +1489,8 @@ export default function OnerequestPage() {
                         )}
                       </TableCell>
                       <TableCell className="text-sm">
-                        {/* Troca inline: clica no nome (ou no —) e escolhe no combobox. */}
+                        {/* Dropdown de responsável (busca por nome) direto na listagem —
+                            troca sem abrir o Tratar nem mexer no L1. */}
                         <Popover
                           open={respEditFor === sol.id}
                           onOpenChange={(o) => setRespEditFor(o ? sol.id : null)}
@@ -1491,25 +1498,23 @@ export default function OnerequestPage() {
                           <PopoverTrigger asChild>
                             <button
                               type="button"
-                              className="group inline-flex max-w-[180px] items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-muted/60"
+                              className="inline-flex w-full max-w-[190px] items-center justify-between gap-1 rounded-md border bg-background px-2 py-1 text-left text-xs shadow-sm transition-colors hover:bg-muted/60"
                               title="Trocar o responsável"
                               disabled={respSaving === sol.id}
                             >
                               {respSaving === sol.id ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
                               ) : (
-                                <>
-                                  <span className="truncate">
-                                    {sol.responsavel_nome ?? <span className="text-muted-foreground">—</span>}
-                                  </span>
-                                  <Pencil className="h-3 w-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
-                                </>
+                                <span className={`truncate ${sol.responsavel_nome ? "" : "text-muted-foreground"}`}>
+                                  {sol.responsavel_nome ?? "Atribuir…"}
+                                </span>
                               )}
+                              <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                             </button>
                           </PopoverTrigger>
                           <PopoverContent className="w-72 p-0" align="start">
                             <Command>
-                              <CommandInput placeholder="Buscar colaborador…" />
+                              <CommandInput placeholder="Buscar por nome…" />
                               <CommandList className="max-h-56">
                                 <CommandEmpty>Ninguém encontrado.</CommandEmpty>
                                 <CommandGroup>
