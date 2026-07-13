@@ -556,7 +556,7 @@ export default function DistribuidosBBPage() {
                       <TableHead>Natureza</TableHead>
                       <TableHead className="min-w-[180px]">Adverso principal</TableHead>
                       <TableHead>Responsável</TableHead>
-                      <TableHead>Observação</TableHead>
+                      <TableHead className="whitespace-nowrap">Data do cadastro</TableHead>
                       <TableHead className="text-right">Valor</TableHead>
                       <TableHead className="text-right">Auditoria</TableHead>
                     </TableRow>
@@ -594,7 +594,9 @@ export default function DistribuidosBBPage() {
                           <TableCell>{p.natureza ?? "—"}</TableCell>
                           <TableCell className="max-w-[240px] truncate">{p.adverso_principal ?? "—"}</TableCell>
                           <TableCell>{p.responsavel_nome ?? <span className="text-amber-600">sem responsável</span>}</TableCell>
-                          <TableCell>{p.observacao ?? "—"}</TableCell>
+                          <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                            {fmtData(p.cadastro_confirmado_em)}
+                          </TableCell>
                           <TableCell className="text-right">{fmtValor(p.valor_causa)}</TableCell>
                           <TableCell className="text-right">
                             <Button size="sm" variant="outline" onClick={() => abrirAuditoria(p)}>
