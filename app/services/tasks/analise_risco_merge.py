@@ -1,19 +1,15 @@
 """Acessório "Análise de Risco" da Tarefas por Planilha.
 
 O banco (BB) manda a planilha de agendamento no formato-modelo, mas SEM o CNJ
-(só o NPJ). A "Base Analítica" traz o relacional NPJ -> Nº do Processo (CNJ) +
-a coluna "Validação nº CNJ" (CNJ CORRETO/INCORRETO). Este módulo faz o join por
-NPJ e devolve a MESMA planilha de agendamento com a coluna CNJ preenchida, pronta
-pra subir em Tarefas por Planilha.
+(só o NPJ). A "Base Analítica" traz o relacional NPJ -> Nº do Processo (CNJ).
+Este módulo faz o join por NPJ e devolve a MESMA planilha de agendamento com a
+coluna CNJ preenchida, pronta pra subir em Tarefas por Planilha.
 
-Regra de resolução por NPJ (um NPJ pode ter >1 processo na base — coluna
-"Variação"):
-  - 1 CNJ marcado "CNJ CORRETO"            -> preenche (ok)
-  - vários "CNJ CORRETO" distintos          -> deixa em branco (ambíguo, revisar)
-  - nenhum correto, 1 número só             -> em branco + revisar (cnj_incorreto)
-  - nenhum correto, vários números          -> em branco (ambíguo, revisar)
-  - NPJ ausente na base                     -> em branco (não encontrado, revisar)
-  - linha da análise que JÁ tinha CNJ       -> preserva o que veio (ja_tinha_cnj)
+Regra (puro relacional — NÃO avalia consistência/dígito do CNJ):
+  - NPJ com 1 número na base   -> usa esse número (ok)
+  - NPJ com vários números      -> em branco + revisar (o relacional tem +de1 resposta)
+  - NPJ ausente na base         -> em branco + revisar (não encontrado)
+  - linha que JÁ tinha CNJ       -> preserva o que veio (ja_tinha_cnj)
 
 Preserva a planilha original (formatação/colunas) e acrescenta as abas "Revisar"
 e "Resumo". Não toca no L1 — é um transform de planilha puro.
@@ -23,9 +19,7 @@ from __future__ import annotations
 from io import BytesIO
 from typing import Dict, List, Tuple
 
-from openpyxl import Workbook, load_workbook
-
-VALIDACAO_OK = "cnj correto"
+from openpyxl import load_workbook
 
 
 def _norm(v) -> str:
@@ -55,8 +49,8 @@ def _col_index(headers: List[str], *nomes: str) -> int | None:
     return None
 
 
-def _carregar_base(base_bytes: bytes) -> Dict[str, List[Tuple[str, str]]]:
-    """NPJ -> lista de (nº do processo/CNJ, validação). read_only pela base ser grande."""
+def _carregar_base(base_bytes: bytes) -> Dict[str, List[str]]:
+    """NPJ -> lista de números de processo (CNJ). read_only pela base ser grande."""
     wb = load_workbook(BytesIO(base_bytes), read_only=True, data_only=True)
     ws = wb.active
     it = ws.iter_rows(values_only=True)
@@ -67,7 +61,6 @@ def _carregar_base(base_bytes: bytes) -> Dict[str, List[Tuple[str, str]]]:
         raise ValueError("Base Analítica vazia (sem cabeçalho).")
     i_npj = _col_index(header, "NPJ")
     i_proc = _col_index(header, "Nº do Processo", "N° do Processo", "Numero do Processo", "CNJ")
-    i_val = _col_index(header, "Validação nº CNJ", "Validacao nº CNJ", "Validação")
     if i_npj is None or i_proc is None:
         wb.close()
         raise ValueError(
@@ -78,7 +71,7 @@ def _carregar_base(base_bytes: bytes) -> Dict[str, List[Tuple[str, str]]]:
     def g(row, idx):
         return row[idx] if idx is not None and idx < len(row) else None
 
-    mapa: Dict[str, List[Tuple[str, str]]] = {}
+    mapa: Dict[str, List[str]] = {}
     for row in it:
         if not row or all(c is None for c in row):
             continue
@@ -86,33 +79,25 @@ def _carregar_base(base_bytes: bytes) -> Dict[str, List[Tuple[str, str]]]:
         if not npj:
             continue
         proc = _norm(g(row, i_proc))
-        val = (_norm(g(row, i_val)) or "").lower()
-        mapa.setdefault(npj, []).append((proc, val))
+        if proc:
+            mapa.setdefault(npj, []).append(proc)
     wb.close()
     return mapa
 
 
-def _resolver(npj: str, mapa: Dict[str, List[Tuple[str, str]]]) -> Tuple[str, str, List[str]]:
-    """Devolve (cnj, status, candidatos). status ∈ ok|ambiguo|cnj_incorreto|nao_encontrado."""
-    candidatos = mapa.get(npj)
-    if not candidatos:
+def _resolver(npj: str, mapa: Dict[str, List[str]]) -> Tuple[str, str, List[str]]:
+    """Devolve (cnj, status, candidatos). status ∈ ok|ambiguo|nao_encontrado.
+    Puro relacional: usa o número que está na base, sem julgar o dígito."""
+    distintos = sorted(set(mapa.get(npj) or []))
+    if not distintos:
         return "", "nao_encontrado", []
-    corretos = sorted({p for p, v in candidatos if p and v == VALIDACAO_OK})
-    todos = sorted({p for p, v in candidatos if p})
-    if len(corretos) == 1:
-        return corretos[0], "ok", corretos
-    if len(corretos) > 1:
-        return "", "ambiguo", corretos
-    if len(todos) == 1:
-        return "", "cnj_incorreto", todos  # existe 1 número, mas reprovou validação
-    if len(todos) > 1:
-        return "", "ambiguo", todos
-    return "", "nao_encontrado", []
+    if len(distintos) == 1:
+        return distintos[0], "ok", distintos
+    return "", "ambiguo", distintos
 
 
 _MOTIVOS = {
-    "ambiguo": "Mais de um CNJ para o NPJ — escolher manualmente",
-    "cnj_incorreto": "Único CNJ da base reprovou na validação (CNJ INCORRETO)",
+    "ambiguo": "Mais de um número de processo para o NPJ — escolher manualmente",
     "nao_encontrado": "NPJ não encontrado na Base Analítica",
 }
 
@@ -134,7 +119,7 @@ def gerar_planilha_com_cnj(analise_bytes: bytes, base_bytes: bytes) -> Tuple[byt
     col_npj, col_cnj = i_npj + 1, i_cnj + 1  # openpyxl é 1-based
 
     resumo = {"total": 0, "resolvidos": 0, "ja_tinha_cnj": 0,
-              "ambiguo": 0, "cnj_incorreto": 0, "nao_encontrado": 0}
+              "ambiguo": 0, "nao_encontrado": 0}
     revisar: List[dict] = []
 
     for r in range(2, ws.max_row + 1):
@@ -162,10 +147,10 @@ def gerar_planilha_com_cnj(analise_bytes: bytes, base_bytes: bytes) -> Tuple[byt
     # Aba Revisar
     if revisar:
         wr = wb.create_sheet("Revisar")
-        wr.append(["Linha", "NPJ", "Motivo", "CNJ candidatos"])
+        wr.append(["Linha", "NPJ", "Motivo", "Números candidatos"])
         for it in revisar:
             wr.append([it["linha"], it["npj"], it["motivo"], it["candidatos"]])
-        for col, w in zip("ABCD", (8, 16, 46, 60)):
+        for col, w in zip("ABCD", (8, 16, 50, 60)):
             wr.column_dimensions[col].width = w
 
     # Aba Resumo
@@ -175,13 +160,12 @@ def gerar_planilha_com_cnj(analise_bytes: bytes, base_bytes: bytes) -> Tuple[byt
         ("Total de linhas", resumo["total"]),
         ("CNJ preenchido (resolvido)", resumo["resolvidos"]),
         ("Já tinham CNJ", resumo["ja_tinha_cnj"]),
-        ("Revisar — ambíguo (vários CNJ)", resumo["ambiguo"]),
-        ("Revisar — CNJ incorreto", resumo["cnj_incorreto"]),
+        ("Revisar — vários processos p/ o NPJ", resumo["ambiguo"]),
         ("Revisar — NPJ não encontrado", resumo["nao_encontrado"]),
     ]
     for k, v in linhas_resumo:
         wr.append([k, v])
-    wr.column_dimensions["A"].width = 34
+    wr.column_dimensions["A"].width = 36
     wr.column_dimensions["B"].width = 12
 
     out = BytesIO()

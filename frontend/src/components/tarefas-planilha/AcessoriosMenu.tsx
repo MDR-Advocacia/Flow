@@ -44,7 +44,6 @@ interface Resumo {
   resolvidos: number;
   ja_tinha_cnj: number;
   ambiguo: number;
-  cnj_incorreto: number;
   nao_encontrado: number;
   revisar_total: number;
 }
@@ -181,20 +180,19 @@ export default function AcessoriosMenu() {
                 Processo</strong>.
               </li>
               <li>
-                Eu caso linha a linha pelo <strong>NPJ</strong> e preencho o <strong>CNJ</strong>,
-                preferindo os que a base marca como <strong>"CNJ CORRETO"</strong>.
+                Eu caso linha a linha pelo <strong>NPJ</strong> e copio o{" "}
+                <strong>Nº do Processo</strong> da base pra coluna <strong>CNJ</strong> — puro
+                relacional, uso o número que está na base.
               </li>
               <li>
-                Baixa a <strong>mesma planilha</strong> com o CNJ preenchido, mais as abas{" "}
-                <strong>Revisar</strong> (o que precisou de atenção, com os CNJs candidatos) e{" "}
-                <strong>Resumo</strong>.
+                Baixa a <strong>mesma planilha</strong> com o CNJ preenchido, mais a aba{" "}
+                <strong>Resumo</strong> (e <strong>Revisar</strong>, se sobrar algo).
               </li>
             </ol>
             <p className="mt-2 text-muted-foreground">
-              NPJ com <strong>mais de um processo</strong>, com <strong>CNJ incorreto</strong> na
-              base, ou <strong>fora da base</strong> ficam <strong>sem CNJ</strong> na aba
-              Agendamentos e vão pra <strong>Revisar</strong> — pra você decidir, sem risco de
-              cadastrar tarefa no processo errado.
+              Só ficam <strong>sem CNJ</strong> (e vão pra <strong>Revisar</strong>) o NPJ que não
+              está na base ou o que tem <strong>mais de um processo</strong> — aí o relacional tem
+              duas respostas e quem escolhe é você.
             </p>
           </div>
 
@@ -247,39 +245,26 @@ export default function AcessoriosMenu() {
                 </AlertDescription>
               </Alert>
 
-              {resultado.cnj_incorreto > 0 && (
+              {(resultado.ambiguo > 0 || resultado.nao_encontrado > 0) && (
                 <Alert className="border-amber-300 bg-amber-50 text-amber-900">
                   <AlertTriangle className="h-4 w-4 !text-amber-600" />
                   <AlertTitle>
-                    ⚠️ {resultado.cnj_incorreto} processo(s) com <strong>CNJ INCORRETO</strong> na base
+                    {resultado.revisar_total} linha(s) sem CNJ — ver aba <strong>Revisar</strong>
                   </AlertTitle>
                   <AlertDescription className="text-amber-800">
-                    A Base Analítica marcou esse(s) CNJ como reprovado na validação, então{" "}
-                    <strong>deixei em branco</strong> na aba Agendamentos pra não subir um número
-                    inválido. Veja a aba <strong>Revisar</strong>: o CNJ candidato está lá — confira
-                    e, se estiver certo, cole manualmente antes de agendar.
-                  </AlertDescription>
-                </Alert>
-              )}
-
-              {(resultado.ambiguo > 0 || resultado.nao_encontrado > 0) && (
-                <Alert className="border-slate-300 bg-slate-50 text-slate-800">
-                  <Info className="h-4 w-4 !text-slate-500" />
-                  <AlertTitle>Outras linhas pra revisar</AlertTitle>
-                  <AlertDescription className="text-slate-700">
                     {resultado.ambiguo > 0 && (
                       <div>
-                        <strong>{resultado.ambiguo}</strong> ambíguo(s) — o NPJ tem mais de um CNJ na
-                        base.
+                        <strong>{resultado.ambiguo}</strong> com mais de um processo pro NPJ (o
+                        relacional tem duas respostas — escolha manualmente).
                       </div>
                     )}
                     {resultado.nao_encontrado > 0 && (
                       <div>
-                        <strong>{resultado.nao_encontrado}</strong> não encontrado(s) — NPJ fora da
-                        Base Analítica.
+                        <strong>{resultado.nao_encontrado}</strong> com NPJ fora da Base Analítica.
                       </div>
                     )}
-                    Todas ficaram sem CNJ e estão listadas na aba <strong>Revisar</strong>.
+                    Ficaram em branco na aba Agendamentos e estão listadas em{" "}
+                    <strong>Revisar</strong> com os números candidatos.
                   </AlertDescription>
                 </Alert>
               )}
