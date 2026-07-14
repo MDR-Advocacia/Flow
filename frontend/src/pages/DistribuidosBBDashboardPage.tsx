@@ -451,18 +451,18 @@ export default function DistribuidosBBDashboardPage() {
             {(data?.por_escritorio ?? []).length === 0 ? (
               <div className="py-6 text-center text-sm text-muted-foreground">Sem processos ainda.</div>
             ) : escViewGrafico ? (
-              <div style={{ height: Math.max(140, data!.por_escritorio.length * 44) }}>
+              <div style={{ height: Math.max(160, data!.por_escritorio.length * 46) }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={data!.por_escritorio} layout="vertical" margin={{ left: 8, right: 20 }}>
                     <XAxis type="number" fontSize={11} allowDecimals={false} hide />
                     <YAxis
                       type="category"
                       dataKey="escritorio"
-                      width={150}
-                      fontSize={11}
+                      width={320}
+                      fontSize={10}
+                      interval={0}
                       tickLine={false}
                       axisLine={false}
-                      tickFormatter={(v) => String(v).split("/").pop()?.trim() ?? String(v)}
                     />
                     <RTooltip />
                     <Bar dataKey="total" fill="#3b82f6" radius={[0, 4, 4, 0]}>

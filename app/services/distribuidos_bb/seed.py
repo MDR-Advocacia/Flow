@@ -227,18 +227,18 @@ def seed_all(db: Session, *, forcar: bool = False) -> dict:
     nao_resolvidos: list[str] = list(nao_resolvidos_aj)
 
     esc_reu = _criar_escritorio(
-        db, nome="Réu", sufixo="Réu", criterio_polo="Passivo",
+        db, nome="Banco do Brasil - Réu", sufixo="Réu", criterio_polo="Passivo",
         observacao_padrao="Cadastro", ordem=1,
     )
     nao_resolvidos += _povoar_fila(db, esc_reu, _RESP_REU)
 
     esc_autor = _criar_escritorio(
-        db, nome="Autor", sufixo="Autor", criterio_polo="Ativo", ordem=2,
+        db, nome="Banco do Brasil - Autor", sufixo="Autor", criterio_polo="Ativo", ordem=2,
     )
     nao_resolvidos += _povoar_fila(db, esc_autor, _RESP_AUTOR)
 
     esc_interessado = _criar_escritorio(
-        db, nome="Interessado", sufixo="Interessado", criterio_polo="Neutro", ordem=3,
+        db, nome="Banco do Brasil - Interessado", sufixo="Interessado", criterio_polo="Neutro", ordem=3,
     )
     # Interessado reusa a fila de Autor no legado
     nao_resolvidos += _povoar_fila(db, esc_interessado, _RESP_AUTOR)
@@ -247,7 +247,7 @@ def seed_all(db: Session, *, forcar: bool = False) -> dict:
     if fixo_id is None:
         nao_resolvidos.append(_RESP_TRABALHISTA_FIXO)
     _criar_escritorio(
-        db, nome="Trabalhista", sufixo="Trabalhista", criterio_natureza="Trabalhista",
+        db, nome="Banco do Brasil - Trabalhista", sufixo="Trabalhista", criterio_natureza="Trabalhista",
         responsavel_fixo_id=fixo_id, observacao_padrao="Cadastro", ordem=4,
     )
 

@@ -14,6 +14,7 @@ TEAMS = [
     {"key": "bb-cadastro", "label": "BB Cadastro"},
     {"key": "master-reu", "label": "Master Réu"},
     {"key": "ativos-reu", "label": "Ativos Réu"},
+    {"key": "trabalhista", "label": "Trabalhista"},
     # Autor (Recuperação de Crédito) — 2026-06-29
     {"key": "bb-autor-processual", "label": "BB Autor — Processual"},
     {"key": "ativos-autor", "label": "Ativos Autor"},
