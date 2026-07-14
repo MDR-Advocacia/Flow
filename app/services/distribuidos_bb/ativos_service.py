@@ -26,11 +26,54 @@ from app.models.distribuidos_bb import (
     POOL_NOVO,
     PROC_DISTRIBUIDO,
     BbAtivosLote,
+    BbConfig,
+    BbEscritorio,
     BbProcesso,
 )
 from app.services.distribuidos_bb.datajud_ativos import consultar_capa, formatar_cnj
 
 logger = logging.getLogger("distribuidos_bb.ativos")
+
+# Classes que fazem do Ativos o AUTOR (cobrança ativa). Como o pré-cadastro NÃO
+# tem as partes, o polo/escritório vem da CLASSE (determinístico, do DataJud):
+# execução de título extrajudicial, monitória, carta precatória → Autor; o resto
+# (procedimento comum etc.) → Réu. Editável via config `ativos_classes_autor`.
+_CLASSES_AUTOR_DEFAULT = "execu,monit,precat"
+
+
+def _cfg(db: Session, chave: str, default: str) -> str:
+    c = db.get(BbConfig, chave)
+    return c.valor if (c and c.valor is not None) else default
+
+
+def _classe_para_polo(db: Session, classe: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """(posicao, polo) a partir da classe. (None, None) se a classe é desconhecida."""
+    cl = (classe or "").strip().lower()
+    if not cl:
+        return None, None
+    kws = _cfg(db, "ativos_classes_autor", _CLASSES_AUTOR_DEFAULT)
+    if any(k.strip() and k.strip() in cl for k in kws.split(",")):
+        return "Autor", "Ativo"
+    return "Réu", "Passivo"
+
+
+def _escritorio_ativos(db: Session, posicao: str) -> BbEscritorio:
+    """Get-or-create do escritório Ativos - Réu/Autor. O path é placeholder editável
+    na tela de Configuração (o operador ajusta pro path real do L1)."""
+    nome = f"Ativos - {posicao}"
+    esc = db.query(BbEscritorio).filter(BbEscritorio.nome == nome).first()
+    if esc is None:
+        esc = BbEscritorio(
+            nome=nome,
+            escritorio_path=f"MDR Advocacia / Área operacional / Ativos / {posicao}",
+            criterio_polo=("Ativo" if posicao == "Autor" else "Passivo"),
+            ativo=True,
+            ordem=90,
+        )
+        db.add(esc)
+        db.commit()
+        db.refresh(esc)
+    return esc
 
 
 def extrair_cnjs(conteudo: bytes, nome_arquivo: str) -> list[str]:
@@ -126,6 +169,16 @@ def ingerir_lote_background(lote_id: int, cnjs: list[str]) -> None:
                     proc.situacao = "Sem capa no DataJud"
                     proc.raw = {"datajud": None}
                     lote.nao_encontrados += 1
+
+                # Polo + escritório pela CLASSE (o pré-cadastro Ativos não tem partes):
+                # execução/monitória/precatória → Autor; comuns → Réu.
+                posicao, polo = _classe_para_polo(db, proc.natureza)
+                if posicao:
+                    esc = _escritorio_ativos(db, posicao)
+                    proc.posicao = posicao
+                    proc.polo = polo
+                    proc.escritorio_id = esc.id
+                    proc.escritorio_path = esc.escritorio_path
 
                 db.add(proc)
                 lote.criados += 1
