@@ -12,6 +12,7 @@ import {
   RefreshCw,
   ScrollText,
   Search,
+  Upload,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -30,6 +31,7 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import {
+  AtivosLote,
   Auditoria,
   Escritorio,
   Evento,
@@ -41,7 +43,9 @@ import {
   exportarProcessos,
   gerarPlanilhaNoHistorico,
   getAuditoria,
+  getLoteAtivos,
   getPlanilhaDetalhe,
+  importarAtivos,
   listarEscritorios,
   listarEventos,
   listarPlanilhas,
@@ -64,6 +68,17 @@ const ORIGEM_META: Record<string, { label: string; cls: string }> = {
   AUTOMATICA: { label: "Automática", cls: "bg-sky-100 text-sky-700" },
   MANUAL: { label: "Manual", cls: "bg-slate-100 text-slate-700" },
 };
+
+const CLIENTE_META: Record<string, { label: string; cls: string }> = {
+  BB: { label: "Banco do Brasil", cls: "bg-yellow-100 text-yellow-800" },
+  ATIVOS: { label: "Ativos", cls: "bg-violet-100 text-violet-700" },
+};
+
+const CLIENTE_FILTROS = [
+  { value: "", label: "Todos os clientes" },
+  { value: "BB", label: "Banco do Brasil" },
+  { value: "ATIVOS", label: "Ativos" },
+];
 
 const POOL_META: Record<string, { label: string; cls: string }> = {
   NOVO: { label: "Novo", cls: "bg-amber-100 text-amber-700" },
@@ -156,7 +171,14 @@ export default function DistribuidosBBPage() {
   const [poolFiltro, setPoolFiltro] = useState<string>("");
   const [escritorioFiltro, setEscritorioFiltro] = useState<string>("");
   const [posicaoFiltro, setPosicaoFiltro] = useState<string>("");
+  const [clienteFiltro, setClienteFiltro] = useState<string>("");
   const [escritorios, setEscritorios] = useState<Escritorio[]>([]);
+
+  // Upload de lista Ativos
+  const [ativosOpen, setAtivosOpen] = useState(false);
+  const [ativosFile, setAtivosFile] = useState<File | null>(null);
+  const [ativosLote, setAtivosLote] = useState<AtivosLote | null>(null);
+  const [ativosImportando, setAtivosImportando] = useState(false);
   const [cadastroDe, setCadastroDe] = useState<string>("");
   const [cadastroAte, setCadastroAte] = useState<string>("");
   const [buscaInput, setBuscaInput] = useState("");
@@ -261,6 +283,7 @@ export default function DistribuidosBBPage() {
         planilhaStatus: poolFiltro || undefined,
         escritorio_id: escritorioFiltro ? Number(escritorioFiltro) : undefined,
         posicao: posicaoFiltro || undefined,
+        cliente: clienteFiltro || undefined,
         cadastroDe: cadastroDe || undefined,
         cadastroAte: cadastroAte || undefined,
         busca: busca || undefined,
@@ -274,7 +297,30 @@ export default function DistribuidosBBPage() {
     } finally {
       setLoading(false);
     }
-  }, [statusFiltro, poolFiltro, escritorioFiltro, posicaoFiltro, cadastroDe, cadastroAte, busca, page, pageSize, toast]);
+  }, [statusFiltro, poolFiltro, escritorioFiltro, posicaoFiltro, clienteFiltro, cadastroDe, cadastroAte, busca, page, pageSize, toast]);
+
+  const importarAtivosLista = async () => {
+    if (!ativosFile) return;
+    setAtivosImportando(true);
+    setAtivosLote(null);
+    try {
+      const { lote_id } = await importarAtivos(ativosFile);
+      // Poll do progresso até concluir.
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const lote = await getLoteAtivos(lote_id);
+        setAtivosLote(lote);
+        if (lote.status !== "EM_ANDAMENTO") break;
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      toast({ title: "Importação Ativos concluída", description: "Processos criados a partir do DataJud." });
+      if (aba === "processos") loadProcessos();
+    } catch (e) {
+      toast({ title: "Erro na importação", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setAtivosImportando(false);
+    }
+  };
 
   const exportarExcel = async () => {
     setExportando(true);
@@ -407,6 +453,18 @@ export default function DistribuidosBBPage() {
           <p className="text-sm text-muted-foreground">Processos capturados no portal do Banco do Brasil e sua auditoria.</p>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setAtivosFile(null);
+              setAtivosLote(null);
+              setAtivosOpen(true);
+            }}
+          >
+            <Upload className="mr-2 h-4 w-4" />
+            Importar lista (Ativos)
+          </Button>
           <Button size="sm" onClick={gerarPlanilha} disabled={baixando}>
             {baixando ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileSpreadsheet className="mr-2 h-4 w-4" />}
             Gerar planilha
@@ -513,6 +571,24 @@ export default function DistribuidosBBPage() {
                 ))}
               </SelectContent>
             </Select>
+            <Select
+              value={clienteFiltro || "__all__"}
+              onValueChange={(v) => {
+                setPage(1);
+                setClienteFiltro(v === "__all__" ? "" : v);
+              }}
+            >
+              <SelectTrigger className="w-44">
+                <SelectValue placeholder="Cliente" />
+              </SelectTrigger>
+              <SelectContent>
+                {CLIENTE_FILTROS.map((c) => (
+                  <SelectItem key={c.value || "__all__"} value={c.value || "__all__"}>
+                    {c.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <div className="flex items-center gap-1.5">
               <span className="text-xs text-muted-foreground">Cadastro de</span>
               <Input
@@ -585,6 +661,7 @@ export default function DistribuidosBBPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
+                      <TableHead>Cliente</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead>Pool</TableHead>
                       <TableHead>CNJ / NPJ</TableHead>
@@ -600,19 +677,25 @@ export default function DistribuidosBBPage() {
                   <TableBody>
                     {loading && items.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={10} className="py-10 text-center">
+                        <TableCell colSpan={11} className="py-10 text-center">
                           <Loader2 className="mx-auto h-6 w-6 animate-spin text-muted-foreground" />
                         </TableCell>
                       </TableRow>
                     ) : items.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={10} className="py-10 text-center text-muted-foreground">
+                        <TableCell colSpan={11} className="py-10 text-center text-muted-foreground">
                           Nenhum processo encontrado.
                         </TableCell>
                       </TableRow>
                     ) : (
                       items.map((p, idx) => (
                         <TableRow key={p.id} className={idx % 2 === 1 ? "bg-muted/20" : undefined}>
+                          <TableCell>
+                            {(() => {
+                              const cm = CLIENTE_META[p.cliente] ?? { label: p.cliente, cls: "bg-slate-100 text-slate-700" };
+                              return <Badge className={`${cm.cls} hover:${cm.cls}`} variant="secondary">{cm.label}</Badge>;
+                            })()}
+                          </TableCell>
                           <TableCell>
                             <StatusBadge status={p.status} />
                           </TableCell>
@@ -1212,6 +1295,66 @@ export default function DistribuidosBBPage() {
               </div>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Importar lista seca (Ativos) → DataJud */}
+      <Dialog open={ativosOpen} onOpenChange={(o) => !ativosImportando && setAtivosOpen(o)}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Upload className="h-5 w-5 text-violet-600" />
+              Importar lista de processos — Ativos
+            </DialogTitle>
+            <DialogDescription>
+              Suba a planilha/CSV com os números (é o que a Ativos manda). O DataJud preenche a capa
+              (classe, assunto, órgão, comarca, grau, tribunal, ajuizamento). Partes e valor da causa
+              ficam para preencher depois.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Input
+              type="file"
+              accept=".xlsx,.xls,.csv,.txt"
+              onChange={(e) => setAtivosFile(e.target.files?.[0] ?? null)}
+              disabled={ativosImportando}
+            />
+            {ativosLote && (
+              <div className="rounded-md border p-3 text-sm">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="font-medium">
+                    {ativosLote.processados} de {ativosLote.total} processados
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    {ativosLote.status === "EM_ANDAMENTO" ? "em andamento…" : ativosLote.status.toLowerCase()}
+                  </span>
+                </div>
+                <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full bg-violet-500 transition-all"
+                    style={{
+                      width: `${ativosLote.total ? (ativosLote.processados / ativosLote.total) * 100 : 0}%`,
+                    }}
+                  />
+                </div>
+                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                  <span className="text-emerald-700">{ativosLote.encontrados} com capa (DataJud)</span>
+                  <span className="text-amber-700">{ativosLote.nao_encontrados} sem capa</span>
+                  <span>{ativosLote.duplicados} duplicado(s)</span>
+                  {ativosLote.invalidos > 0 && <span className="text-rose-600">{ativosLote.invalidos} inválido(s)</span>}
+                </div>
+              </div>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => setAtivosOpen(false)} disabled={ativosImportando}>
+                Fechar
+              </Button>
+              <Button size="sm" onClick={importarAtivosLista} disabled={!ativosFile || ativosImportando}>
+                {ativosImportando ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+                Importar e enriquecer
+              </Button>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

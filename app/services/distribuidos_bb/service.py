@@ -139,6 +139,14 @@ class DistribuidosBBService:
         }
 
         # ── Gráficos do dashboard ────────────────────────────────────────
+        por_cliente = [
+            {"cliente": cli or "BB", "total": int(q)}
+            for cli, q in (
+                self.db.query(BbProcesso.cliente, func.count(BbProcesso.id))
+                .group_by(BbProcesso.cliente)
+                .all()
+            )
+        ]
         por_natureza = [
             {"natureza": nat or "—", "total": int(q)}
             for nat, q in (
@@ -215,6 +223,7 @@ class DistribuidosBBService:
             "por_estado": por_estado,
             "por_data": por_data,
             "ultima_passagem": ultima_passagem,
+            "por_cliente": por_cliente,
         }
 
     def _run_dto(self, run: BbRun) -> dict[str, Any]:
@@ -242,6 +251,7 @@ class DistribuidosBBService:
         busca: Optional[str] = None,
         planilha_status: Optional[str] = None,
         posicao: Optional[str] = None,
+        cliente: Optional[str] = None,
         cadastro_de: Optional[str] = None,
         cadastro_ate: Optional[str] = None,
     ):
@@ -260,6 +270,8 @@ class DistribuidosBBService:
         q = self.db.query(BbProcesso)
         if status:
             q = q.filter(BbProcesso.status == status)
+        if cliente:
+            q = q.filter(BbProcesso.cliente == cliente)
         if planilha_status:
             q = q.filter(BbProcesso.planilha_status == planilha_status)
         if posicao:
@@ -347,6 +359,7 @@ class DistribuidosBBService:
     def _proc_dto(self, p: BbProcesso, nomes: dict[int, str]) -> dict[str, Any]:
         return {
             "id": p.id,
+            "cliente": p.cliente,
             "cnj": p.cnj,
             "npj": p.npj,
             "polo": p.polo,

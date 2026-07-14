@@ -72,15 +72,25 @@ def gerar_planilha(
         ws_e.delete_rows(2, ws_e.max_row)
 
     # Constantes editáveis (Valores Padrão)
-    cliente_nome = _cfg(db, "cliente_nome", "Banco do Brasil S.A.")
-    cliente_cpf = _cfg(db, "cliente_cpf_cnpj", "00.000.000/0001-91")
-    cliente_tipo = _cfg(db, "cliente_tipo", "PJ")
     tipo_registro = _cfg(db, "tipo_registro", "Processo")
     tipo = _cfg(db, "tipo", "Judicial")
     status_v = _cfg(db, "status", "Ativo")
     origem = _cfg(db, "escritorio_origem", "MDR Advocacia")
     situacao_env = _cfg(db, "situacao_envolvido", "Outros")
-    doc_cliente = norm.apenas_digitos(cliente_cpf)
+
+    # Cliente por linha (BB × Ativos): nome/CNPJ/tipo do dono do processo.
+    def _cliente_cfg(cli: str) -> tuple[str, str, str]:
+        if cli == "ATIVOS":
+            return (
+                _cfg(db, "ativos_cliente_nome", "Ativos S.A. Securitizadora de Créditos Financeiros"),
+                _cfg(db, "ativos_cliente_cpf_cnpj", "05.437.257/0001-29"),
+                _cfg(db, "ativos_cliente_tipo", "PJ"),
+            )
+        return (
+            _cfg(db, "cliente_nome", "Banco do Brasil S.A."),
+            _cfg(db, "cliente_cpf_cnpj", "00.000.000/0001-91"),
+            _cfg(db, "cliente_tipo", "PJ"),
+        )
 
     # Nomes dos responsáveis
     resp_ids = {p.responsavel_user_id for p in processos if p.responsavel_user_id}
@@ -100,7 +110,9 @@ def gerar_planilha(
     chave = 1
     for p in processos:
         tram = parse_tramitacao(p.tramitacao)
-        # Contrário principal (1º envolvido com doc que NÃO seja o cliente/BB)
+        cliente_nome, cliente_cpf, cliente_tipo = _cliente_cfg(p.cliente)
+        doc_cliente = norm.apenas_digitos(cliente_cpf)
+        # Contrário principal (1º envolvido com doc que NÃO seja o cliente)
         adverso_cpf = adverso_tipo = None
         for e in db.query(BbEnvolvido).filter(BbEnvolvido.processo_id == p.id).all():
             if e.cpf_cnpj and norm.apenas_digitos(e.cpf_cnpj) != doc_cliente:
@@ -123,7 +135,7 @@ def gerar_planilha(
         linha[13] = adverso_tipo
         linha[15] = p.data_ajuizamento
         linha[16] = p.acao
-        linha[17] = p.npj
+        linha[17] = p.npj if p.cliente == "BB" else ""
         linha[19] = tram["uf"]
         linha[20] = tram["cidade"]
         linha[21] = tram["orgao"]

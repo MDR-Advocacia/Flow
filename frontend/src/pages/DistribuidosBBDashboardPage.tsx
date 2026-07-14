@@ -354,6 +354,26 @@ export default function DistribuidosBBDashboardPage() {
         <Kpi label="Erros / revisão" value={(k?.erros ?? 0) + (k?.revisao ?? 0)} icon={AlertTriangle} tone="bg-rose-100 text-rose-700" onClick={() => navigate("/distribuidos-bb?status=ERRO")} />
       </div>
 
+      {/* Por cliente (BB / Ativos) */}
+      {data?.por_cliente && data.por_cliente.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Por cliente</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-3">
+            {data.por_cliente.map((c) => (
+              <div key={c.cliente} className="flex items-center gap-2 rounded-md border bg-card px-3 py-2">
+                <span
+                  className={`h-2.5 w-2.5 rounded-full ${c.cliente === "ATIVOS" ? "bg-violet-500" : "bg-yellow-500"}`}
+                />
+                <span className="text-sm">{c.cliente === "ATIVOS" ? "Ativos" : "Banco do Brasil"}</span>
+                <span className="text-base font-semibold">{c.total}</span>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
       {/* Distribuição por data (capturas) + última passagem */}
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0 pb-3">
@@ -431,18 +451,18 @@ export default function DistribuidosBBDashboardPage() {
             {(data?.por_escritorio ?? []).length === 0 ? (
               <div className="py-6 text-center text-sm text-muted-foreground">Sem processos ainda.</div>
             ) : escViewGrafico ? (
-              <div style={{ height: Math.max(140, data!.por_escritorio.length * 44) }}>
+              <div style={{ height: Math.max(160, data!.por_escritorio.length * 46) }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={data!.por_escritorio} layout="vertical" margin={{ left: 8, right: 20 }}>
                     <XAxis type="number" fontSize={11} allowDecimals={false} hide />
                     <YAxis
                       type="category"
                       dataKey="escritorio"
-                      width={150}
-                      fontSize={11}
+                      width={320}
+                      fontSize={10}
+                      interval={0}
                       tickLine={false}
                       axisLine={false}
-                      tickFormatter={(v) => String(v).split("/").pop()?.trim() ?? String(v)}
                     />
                     <RTooltip />
                     <Bar dataKey="total" fill="#3b82f6" radius={[0, 4, 4, 0]}>
