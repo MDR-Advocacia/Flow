@@ -12,6 +12,7 @@ export const TEAMS = [
   { key: "bb-cadastro", label: "BB Cadastro", grupo: GRUPO_PASSIVO },
   { key: "master-reu", label: "Master Réu", grupo: GRUPO_PASSIVO },
   { key: "ativos-reu", label: "Ativos Réu", grupo: GRUPO_PASSIVO },
+  { key: "trabalhista", label: "Trabalhista", grupo: GRUPO_PASSIVO },
   { key: "bb-autor-processual", label: "BB Autor — Processual", grupo: GRUPO_CREDITO },
   { key: "ativos-autor", label: "Ativos Autor", grupo: GRUPO_CREDITO },
   { key: "autor-recursal", label: "Autor — Recursal", grupo: GRUPO_CREDITO },
