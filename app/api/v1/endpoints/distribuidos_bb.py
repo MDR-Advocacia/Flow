@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func
@@ -180,6 +180,7 @@ def listar_processos(
     busca: Optional[str] = Query(None),
     planilha_status: Optional[str] = Query(None, description="NOVO | PENDENTE_CADASTRO | CADASTRADO_L1"),
     posicao: Optional[str] = Query(None, description="Réu | Autor | Interessado"),
+    cliente: Optional[str] = Query(None, description="BB | ATIVOS"),
     cadastro_de: Optional[str] = Query(None, description="Data de cadastro no L1 (AAAA-MM-DD)."),
     cadastro_ate: Optional[str] = Query(None, description="Data de cadastro no L1 (AAAA-MM-DD)."),
     limit: int = Query(50, ge=1, le=500),
@@ -190,7 +191,7 @@ def listar_processos(
     _require_gestao(current_user)
     return DistribuidosBBService(db).listar_processos(
         status=status_filtro, escritorio_id=escritorio_id, busca=busca,
-        planilha_status=planilha_status, posicao=posicao,
+        planilha_status=planilha_status, posicao=posicao, cliente=cliente,
         cadastro_de=cadastro_de, cadastro_ate=cadastro_ate,
         limit=limit, offset=offset,
     )
@@ -203,6 +204,7 @@ def exportar_processos(
     busca: Optional[str] = Query(None),
     planilha_status: Optional[str] = Query(None),
     posicao: Optional[str] = Query(None),
+    cliente: Optional[str] = Query(None),
     cadastro_de: Optional[str] = Query(None),
     cadastro_ate: Optional[str] = Query(None),
     db: Session = Depends(get_db),
@@ -213,7 +215,7 @@ def exportar_processos(
     _require_gestao(current_user)
     buf, total = DistribuidosBBService(db).exportar_processos(
         status=status_filtro, escritorio_id=escritorio_id, busca=busca,
-        planilha_status=planilha_status, posicao=posicao,
+        planilha_status=planilha_status, posicao=posicao, cliente=cliente,
         cadastro_de=cadastro_de, cadastro_ate=cadastro_ate,
     )
     nome = f"processos_cadastro_bb_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
@@ -225,6 +227,82 @@ def exportar_processos(
             "X-Total": str(total),
         },
     )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Ativos — ingestão de lista seca (upload) enriquecida via DataJud
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _lote_dto(lote) -> dict[str, Any]:
+    return {
+        "id": lote.id,
+        "nome_arquivo": lote.nome_arquivo,
+        "total": lote.total,
+        "processados": lote.processados,
+        "encontrados": lote.encontrados,
+        "nao_encontrados": lote.nao_encontrados,
+        "criados": lote.criados,
+        "duplicados": lote.duplicados,
+        "invalidos": lote.invalidos,
+        "status": lote.status,
+        "erro": lote.erro,
+        "iniciado_em": lote.iniciado_em.isoformat() if lote.iniciado_em else None,
+        "concluido_em": lote.concluido_em.isoformat() if lote.concluido_em else None,
+    }
+
+
+@router.post("/ativos/importar", summary="Sobe a lista seca da Ativos e dispara o enriquecimento via DataJud")
+async def importar_ativos(
+    arquivo: UploadFile = File(..., description="Planilha/CSV com os numeros de processo."),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb.ativos_service import disparar_ingestao
+
+    conteudo = await arquivo.read()
+    if not conteudo:
+        raise HTTPException(status_code=400, detail="Arquivo vazio.")
+    try:
+        res = disparar_ingestao(
+            db, conteudo=conteudo, nome_arquivo=arquivo.filename or "lista.xlsx",
+            user_id=current_user.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return res
+
+
+@router.get("/ativos/lotes/{lote_id}", summary="Progresso de um lote de ingestao Ativos")
+def get_lote_ativos(
+    lote_id: int,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.models.distribuidos_bb import BbAtivosLote
+
+    lote = db.get(BbAtivosLote, lote_id)
+    if lote is None:
+        raise HTTPException(status_code=404, detail="Lote nao encontrado.")
+    return _lote_dto(lote)
+
+
+@router.get("/ativos/lotes", summary="Lista os lotes de ingestao Ativos (paginado)")
+def listar_lotes_ativos(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.models.distribuidos_bb import BbAtivosLote
+
+    q = db.query(BbAtivosLote).order_by(BbAtivosLote.id.desc())
+    total = q.count()
+    rows = q.limit(limit).offset(offset).all()
+    return {"total": total, "items": [_lote_dto(x) for x in rows]}
 
 
 @router.get("/processos/{processo_id}/auditoria", summary="Auditoria completa de um processo")

@@ -71,10 +71,28 @@ export interface DashboardData {
   por_estado?: { uf: string; total: number }[];
   por_data?: { data: string; total: number }[];
   ultima_passagem?: { data: string | null; capturados: number; status: string } | null;
+  por_cliente?: { cliente: string; total: number }[];
+}
+
+export interface AtivosLote {
+  id: number;
+  nome_arquivo: string | null;
+  total: number;
+  processados: number;
+  encontrados: number;
+  nao_encontrados: number;
+  criados: number;
+  duplicados: number;
+  invalidos: number;
+  status: string; // EM_ANDAMENTO | CONCLUIDO | ERRO
+  erro: string | null;
+  iniciado_em: string | null;
+  concluido_em: string | null;
 }
 
 export interface Processo {
   id: number;
+  cliente: string; // BB | ATIVOS
   cnj: string | null;
   npj: string | null;
   polo: string | null;
@@ -186,6 +204,7 @@ export async function listarProcessos(params: {
   busca?: string;
   planilhaStatus?: string;
   posicao?: string;
+  cliente?: string;
   cadastroDe?: string;
   cadastroAte?: string;
   limit?: number;
@@ -197,6 +216,7 @@ export async function listarProcessos(params: {
   if (params.busca) qs.set("busca", params.busca);
   if (params.planilhaStatus) qs.set("planilha_status", params.planilhaStatus);
   if (params.posicao) qs.set("posicao", params.posicao);
+  if (params.cliente) qs.set("cliente", params.cliente);
   if (params.cadastroDe) qs.set("cadastro_de", params.cadastroDe);
   if (params.cadastroAte) qs.set("cadastro_ate", params.cadastroAte);
   qs.set("limit", String(params.limit ?? 50));
@@ -210,6 +230,7 @@ export async function exportarProcessos(params: {
   busca?: string;
   planilhaStatus?: string;
   posicao?: string;
+  cliente?: string;
   cadastroDe?: string;
   cadastroAte?: string;
 }): Promise<number> {
@@ -219,6 +240,7 @@ export async function exportarProcessos(params: {
   if (params.busca) qs.set("busca", params.busca);
   if (params.planilhaStatus) qs.set("planilha_status", params.planilhaStatus);
   if (params.posicao) qs.set("posicao", params.posicao);
+  if (params.cliente) qs.set("cliente", params.cliente);
   if (params.cadastroDe) qs.set("cadastro_de", params.cadastroDe);
   if (params.cadastroAte) qs.set("cadastro_ate", params.cadastroAte);
   const res = await apiFetch(`${BASE}/processos/exportar?${qs.toString()}`);
@@ -627,4 +649,15 @@ export async function listarValores(): Promise<ValorPadrao[]> {
 }
 export async function atualizarValores(valores: Record<string, string | null>): Promise<ValorPadrao[]> {
   return json(await apiFetch(`${BASE}/config/valores`, { method: "PATCH", body: JSON.stringify({ valores }) }));
+}
+
+// ── Ativos: ingestão de lista seca (upload → DataJud) ─────────────────────
+export async function importarAtivos(file: File): Promise<{ lote_id: number; total: number }> {
+  const fd = new FormData();
+  fd.append("arquivo", file);
+  return json(await apiFetch(`${BASE}/ativos/importar`, { method: "POST", body: fd }));
+}
+
+export async function getLoteAtivos(id: number): Promise<AtivosLote> {
+  return json(await apiFetch(`${BASE}/ativos/lotes/${id}`));
 }

@@ -79,6 +79,12 @@ SECAO_PLANILHA = "Planilha"  # geração/arquivamento da planilha de migração
 PLANILHA_AUTOMATICA = "AUTOMATICA"  # gerada ao fim de uma coleta (manual ou agendada)
 PLANILHA_MANUAL = "MANUAL"          # gerada pelo botão "Gerar planilha"
 
+# Cliente dono do processo (mesma interface, motores de ingestão diferentes):
+# BB vem do portal do Banco do Brasil (coleta+ciência); ATIVOS vem de lista seca
+# enriquecida via DataJud. Default BB (os existentes são todos do Banco do Brasil).
+CLIENTE_BB = "BB"
+CLIENTE_ATIVOS = "ATIVOS"
+
 # Ciclo do processo no POOL até o cadastro confirmar no Legal One:
 #   NOVO = distribuído, aguardando o operador gerar a planilha;
 #   PENDENTE_CADASTRO = planilha gerada, aguardando o cadastro aparecer no L1
@@ -262,6 +268,7 @@ class BbProcesso(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
+    cliente = Column(String(20), nullable=False, server_default=CLIENTE_BB, index=True)
     run_id = Column(Integer, ForeignKey("bbd_runs.id", ondelete="SET NULL"), nullable=True, index=True)
 
     # Identidade / dedup (fingerprint = cnj or npj)
@@ -540,3 +547,38 @@ class BbPlanilha(Base):
 
     run = relationship("BbRun")
     subido_por = relationship("LegalOneUser", foreign_keys=[subido_por_user_id])
+
+
+# Status de um lote de ingestão Ativos
+LOTE_EM_ANDAMENTO = "EM_ANDAMENTO"
+LOTE_CONCLUIDO = "CONCLUIDO"
+LOTE_ERRO = "ERRO"
+
+
+class BbAtivosLote(Base):
+    """Um upload de lista seca da Ativos (números de processo).
+
+    Rastreia o enriquecimento via DataJud com progresso (server-backed): cada CNJ
+    vira um processo (cliente=ATIVOS) com a capa preenchida; partes e valor ficam
+    de lacuna manual.
+    """
+
+    __tablename__ = "bbd_ativos_lotes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    nome_arquivo = Column(String(200), nullable=True)
+    total = Column(Integer, nullable=False, server_default="0")
+    processados = Column(Integer, nullable=False, server_default="0")
+    encontrados = Column(Integer, nullable=False, server_default="0")     # DataJud achou a capa
+    nao_encontrados = Column(Integer, nullable=False, server_default="0")  # sem capa no DataJud
+    criados = Column(Integer, nullable=False, server_default="0")          # processos novos
+    duplicados = Column(Integer, nullable=False, server_default="0")       # já existiam
+    invalidos = Column(Integer, nullable=False, server_default="0")        # número inválido
+
+    status = Column(String(20), nullable=False, server_default=LOTE_EM_ANDAMENTO, index=True)
+    erro = Column(Text, nullable=True)
+    disparado_por_user_id = Column(
+        Integer, ForeignKey("legal_one_users.id", ondelete="SET NULL"), nullable=True,
+    )
+    iniciado_em = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    concluido_em = Column(DateTime(timezone=True), nullable=True)
