@@ -85,6 +85,17 @@ PLANILHA_MANUAL = "MANUAL"          # gerada pelo botão "Gerar planilha"
 CLIENTE_BB = "BB"
 CLIENTE_ATIVOS = "ATIVOS"
 
+# Marca a parte contrária quando a planilha da Ativos não traz o nome (só 16%
+# das linhas vêm preenchidas). O operador completa depois.
+PARTE_A_CLASSIFICAR = "À CLASSIFICAR"
+
+# Status do enriquecimento DataJud (Ativos):
+#   PENDENTE = ainda não consultado / consultado e não achou (reconsulta depois);
+#   OK = capa encontrada e aplicada; SEM_CAPA = desistiu após N tentativas.
+DATAJUD_PENDENTE = "pendente"
+DATAJUD_OK = "ok"
+DATAJUD_SEM_CAPA = "sem_capa"
+
 # Ciclo do processo no POOL até o cadastro confirmar no Legal One:
 #   NOVO = distribuído, aguardando o operador gerar a planilha;
 #   PENDENTE_CADASTRO = planilha gerada, aguardando o cadastro aparecer no L1
@@ -323,6 +334,12 @@ class BbProcesso(Base):
     cadastro_confirmado_em = Column(DateTime(timezone=True), nullable=True)
     l1_verificado_em = Column(DateTime(timezone=True), nullable=True)
     l1_folder = Column(String(40), nullable=True)
+
+    # Enriquecimento DataJud (Ativos): a planilha é a fonte primária; o DataJud
+    # complementa de forma ASSÍNCRONA (reconsulta os pendentes, pois o processo
+    # recém-distribuído pode ainda não estar indexado na base pública).
+    datajud_status = Column(String(20), nullable=True, index=True)  # pendente | ok | sem_capa
+    datajud_verificado_em = Column(DateTime(timezone=True), nullable=True)
 
     # Auditoria bruta (capa do NPJ / HTML de origem)
     raw = Column(jsonb(), nullable=True)

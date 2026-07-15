@@ -313,7 +313,7 @@ export default function DistribuidosBBPage() {
         if (lote.status !== "EM_ANDAMENTO") break;
         await new Promise((r) => setTimeout(r, 1500));
       }
-      toast({ title: "Importação Ativos concluída", description: "Processos criados a partir do DataJud." });
+      toast({ title: "Importação Ativos concluída", description: "Processos criados a partir da planilha. O DataJud enriquece a capa em segundo plano." });
       if (aba === "processos") loadProcessos();
     } catch (e) {
       toast({ title: "Erro na importação", description: String((e as Error).message), variant: "destructive" });
@@ -1307,9 +1307,10 @@ export default function DistribuidosBBPage() {
               Importar lista de processos — Ativos
             </DialogTitle>
             <DialogDescription>
-              Suba a planilha/CSV com os números (é o que a Ativos manda). O DataJud preenche a capa
-              (classe, assunto, órgão, comarca, grau, tribunal, ajuizamento). Partes e valor da causa
-              ficam para preencher depois.
+              Suba a planilha da Ativos. Lemos a aba <strong>PARA CADASTRO</strong> (a aba JÁ CADASTRADO
+              é ignorada) e criamos os processos direto com os dados dela — CNJ, UF, data e a parte
+              quando vier. A classe/assunto/órgão vêm do <strong>DataJud em segundo plano</strong>
+              (reconsulta os recém-distribuídos que ainda não indexaram). Valor da causa é manual.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
@@ -1338,9 +1339,8 @@ export default function DistribuidosBBPage() {
                   />
                 </div>
                 <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                  <span className="text-emerald-700">{ativosLote.encontrados} com capa (DataJud)</span>
-                  <span className="text-amber-700">{ativosLote.nao_encontrados} sem capa</span>
-                  <span>{ativosLote.duplicados} duplicado(s)</span>
+                  <span className="text-emerald-700">{ativosLote.criados} criado(s)</span>
+                  <span className="text-amber-700">{ativosLote.duplicados} já cadastrado / repetido</span>
                   {ativosLote.invalidos > 0 && <span className="text-rose-600">{ativosLote.invalidos} inválido(s)</span>}
                 </div>
               </div>
@@ -1351,7 +1351,7 @@ export default function DistribuidosBBPage() {
               </Button>
               <Button size="sm" onClick={importarAtivosLista} disabled={!ativosFile || ativosImportando}>
                 {ativosImportando ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
-                Importar e enriquecer
+                Importar planilha
               </Button>
             </div>
           </div>
