@@ -33,13 +33,23 @@ _CHAVE_PONTEIRO_AJUIZAMENTO = "ajuizamento_ultimo_indice"
 
 
 def _escolher_escritorio(db: Session, processo: BbProcesso) -> Optional[BbEscritorio]:
-    """Escolhe o escritório/fila pelo critério de natureza (1º) ou polo (2º)."""
-    escritorios = (
-        db.query(BbEscritorio)
-        .filter(BbEscritorio.ativo.is_(True))
-        .order_by(BbEscritorio.ordem, BbEscritorio.id)
-        .all()
-    )
+    """Escolhe o escritório/fila pelo cliente + natureza (1º) ou polo (2º).
+
+    O CLIENTE filtra antes de tudo: "Banco do Brasil - Réu" e "Ativos - Réu" têm o
+    mesmo polo (Passivo), então sem esse filtro o processo do Ativos cairia na fila
+    do BB (o do BB tem `ordem` menor e venceria).
+    """
+    cliente = (processo.cliente or "").strip().lower()
+    escritorios = [
+        e
+        for e in (
+            db.query(BbEscritorio)
+            .filter(BbEscritorio.ativo.is_(True))
+            .order_by(BbEscritorio.ordem, BbEscritorio.id)
+            .all()
+        )
+        if not e.criterio_cliente or e.criterio_cliente.strip().lower() == cliente
+    ]
 
     natureza = (processo.natureza or "").strip().lower()
     polo = (processo.polo or "").strip().lower()

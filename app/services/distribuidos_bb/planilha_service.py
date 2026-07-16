@@ -167,16 +167,19 @@ def gerar_planilha(
     return buf, len(processos)
 
 
-def contar_pool_novos(db: Session) -> int:
-    """Quantos processos estão no pool aguardando planilha (NOVO + distribuídos)."""
-    return (
-        db.query(BbProcesso)
-        .filter(
-            BbProcesso.planilha_status == POOL_NOVO,
-            BbProcesso.status == PROC_DISTRIBUIDO,
-        )
-        .count()
+def contar_pool_novos(db: Session, *, cliente: Optional[str] = None) -> int:
+    """Quantos processos estão no pool aguardando planilha (NOVO + distribuídos).
+
+    `cliente` restringe a contagem (o pool é por cliente: o operador do BB não
+    deve ver os Ativos pendentes somados no total dele).
+    """
+    q = db.query(BbProcesso).filter(
+        BbProcesso.planilha_status == POOL_NOVO,
+        BbProcesso.status == PROC_DISTRIBUIDO,
     )
+    if cliente:
+        q = q.filter(BbProcesso.cliente == cliente)
+    return q.count()
 
 
 def gerar_e_persistir(
@@ -184,6 +187,7 @@ def gerar_e_persistir(
     *,
     processo_ids: Optional[list[int]] = None,
     origem: str = PLANILHA_MANUAL,
+    cliente: Optional[str] = None,
 ) -> Optional[BbPlanilha]:
     """Gera a planilha do POOL e a arquiva em `bbd_planilhas`. Devolve a linha.
 
@@ -196,15 +200,16 @@ def gerar_e_persistir(
     - NÃO faz commit — quem chama controla a transação.
     """
     if processo_ids is None:
-        processos = (
-            db.query(BbProcesso)
-            .filter(
-                BbProcesso.planilha_status == POOL_NOVO,
-                BbProcesso.status == PROC_DISTRIBUIDO,
-            )
-            .order_by(BbProcesso.id)
-            .all()
+        q = db.query(BbProcesso).filter(
+            BbProcesso.planilha_status == POOL_NOVO,
+            BbProcesso.status == PROC_DISTRIBUIDO,
         )
+        # Sem isto o pool é comum: o auto-cadastro da coleta do BB varreria junto
+        # os processos do Ativos que estivessem pendentes (misturando clientes na
+        # mesma planilha e no relatório do run).
+        if cliente:
+            q = q.filter(BbProcesso.cliente == cliente)
+        processos = q.order_by(BbProcesso.id).all()
     else:
         processos = (
             db.query(BbProcesso).filter(BbProcesso.id.in_(processo_ids or [0])).all()
@@ -219,7 +224,14 @@ def gerar_e_persistir(
 
     dados = buf.getvalue()
     carimbo = datetime.now(_TZ_BR).strftime("%Y%m%d_%H%M")
-    nome = f"PLANILHA_MIGRACAO_DISTRIBUIDOS_BB_{carimbo}.xlsx"
+    # O nome carrega o cliente (a planilha do Ativos não é "DISTRIBUIDOS_BB").
+    # Quando os ids vêm soltos, deduz pelo conteúdo; homogêneo é o caso normal.
+    cli = cliente or (processos[0].cliente if processos else None)
+    if cli and any(p.cliente != cli for p in processos):
+        rotulo = "MISTA"
+    else:
+        rotulo = "ATIVOS" if cli == "ATIVOS" else "DISTRIBUIDOS_BB"
+    nome = f"PLANILHA_MIGRACAO_{rotulo}_{carimbo}.xlsx"
 
     planilha = BbPlanilha(
         nome_arquivo=nome,

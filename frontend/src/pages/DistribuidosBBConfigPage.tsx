@@ -88,6 +88,14 @@ function UserCombo({
 }
 
 const POLOS = ["Passivo", "Ativo", "Neutro"];
+// O cliente vem da porta de entrada do processo (coleta RPA = BB; "Importar lista
+// (Ativos)" = ATIVOS). Sem ele o roteamento mandaria o Ativos pra fila do BB —
+// os dois têm escritório "Réu" com polo Passivo.
+const CLIENTES_ESC = [
+  { valor: "", rotulo: "Qualquer cliente" },
+  { valor: "BB", rotulo: "Banco do Brasil" },
+  { valor: "ATIVOS", rotulo: "Ativos" },
+];
 
 export default function DistribuidosBBConfigPage() {
   const navigate = useNavigate();
@@ -132,6 +140,7 @@ export default function DistribuidosBBConfigPage() {
     setForm({
       nome: esc.nome,
       escritorio_path: esc.escritorio_path,
+      criterio_cliente: esc.criterio_cliente,
       criterio_polo: esc.criterio_polo,
       criterio_natureza: esc.criterio_natureza,
       responsavel_fixo_user_id: esc.responsavel_fixo_user_id,
@@ -331,6 +340,18 @@ export default function DistribuidosBBConfigPage() {
                   </div>
                 </div>
                 <div className="mt-1 flex flex-wrap gap-1">
+                  {esc.criterio_cliente && (
+                    <Badge
+                      className={
+                        esc.criterio_cliente === "ATIVOS"
+                          ? "bg-violet-100 text-violet-700"
+                          : "bg-yellow-100 text-yellow-800"
+                      }
+                      variant="secondary"
+                    >
+                      {esc.criterio_cliente === "ATIVOS" ? "Ativos" : "Banco do Brasil"}
+                    </Badge>
+                  )}
                   {esc.criterio_polo && <Badge variant="secondary">Polo: {esc.criterio_polo}</Badge>}
                   {esc.criterio_natureza && <Badge variant="secondary">Natureza: {esc.criterio_natureza}</Badge>}
                   {esc.observacao_padrao && <Badge variant="outline">Obs: {esc.observacao_padrao}</Badge>}
@@ -410,6 +431,24 @@ export default function DistribuidosBBConfigPage() {
                 onChange={(e) => setForm((f) => ({ ...f, escritorio_path: e.target.value }))}
                 placeholder="MDR Advocacia / Área operacional / Banco do Brasil / Réu"
               />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Critério — Cliente</Label>
+              <select
+                className="h-9 w-full rounded-md border bg-background px-2 text-sm"
+                value={form.criterio_cliente ?? ""}
+                onChange={(e) => setForm((f) => ({ ...f, criterio_cliente: e.target.value || null }))}
+              >
+                {CLIENTES_ESC.map((c) => (
+                  <option key={c.valor} value={c.valor}>
+                    {c.rotulo}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-muted-foreground">
+                De qual cliente este escritório recebe. Banco do Brasil e Ativos têm escritórios
+                com o mesmo polo — sem este critério os processos se misturariam entre as filas.
+              </p>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">

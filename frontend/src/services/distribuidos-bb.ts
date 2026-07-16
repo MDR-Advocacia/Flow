@@ -169,6 +169,7 @@ export interface Escritorio {
   id: number;
   nome: string;
   escritorio_path: string;
+  criterio_cliente: string | null;
   criterio_polo: string | null;
   criterio_natureza: string | null;
   responsavel_fixo_user_id: number | null;
@@ -475,6 +476,7 @@ export async function listarEscritorios(): Promise<Escritorio[]> {
 export interface EscritorioPayload {
   nome?: string;
   escritorio_path?: string;
+  criterio_cliente?: string | null;
   criterio_polo?: string | null;
   criterio_natureza?: string | null;
   responsavel_fixo_user_id?: number | null;

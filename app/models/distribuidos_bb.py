@@ -120,6 +120,8 @@ class BbEscritorio(Base):
     """
 
     __tablename__ = "bbd_escritorios"
+    # NOTA: `criterio_cliente` (abaixo) é o que impede o processo do Ativos de cair
+    # na fila do Banco do Brasil — os dois têm escritório "Réu" com polo Passivo.
 
     id = Column(Integer, primary_key=True, index=True)
     nome = Column(String(120), nullable=False)  # ex.: "Réu", "Autor", "Trabalhista"
@@ -127,6 +129,7 @@ class BbEscritorio(Base):
     escritorio_path = Column(Text, nullable=False)
 
     # Critérios de roteamento (o motor escolhe este escritório quando batem)
+    criterio_cliente = Column(String(20), nullable=True)   # BB | ATIVOS | None(qualquer)
     criterio_polo = Column(String(20), nullable=True)      # Passivo | Ativo | Neutro
     criterio_natureza = Column(String(80), nullable=True)  # ex.: "Trabalhista"
 

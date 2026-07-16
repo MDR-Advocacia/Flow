@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.models.distribuidos_bb import (
     CLIENTE_ATIVOS,
+    DATAJUD_OK,
     DATAJUD_PENDENTE,
     LOTE_CONCLUIDO,
     LOTE_ERRO,
@@ -32,8 +33,12 @@ from app.models.distribuidos_bb import (
     BbEscritorio,
     BbProcesso,
 )
-from app.services.distribuidos_bb.datajud_ativos import apenas_digitos, formatar_cnj
-from app.services.distribuidos_bb.distribuicao_service import _avaliar_observacao
+from app.services.distribuidos_bb.datajud_ativos import (
+    apenas_digitos,
+    consultar_capa,
+    formatar_cnj,
+)
+from app.services.distribuidos_bb.distribuicao_service import distribuir_processo
 
 logger = logging.getLogger("distribuidos_bb.ativos")
 
@@ -255,6 +260,31 @@ def _montar_tramitacao(uf: Optional[str], comarca: Optional[str] = None,
     return f"{base} - {orgao}" if orgao else base
 
 
+def _cadastrar_lote(db: Session, lote_id: int, processo_ids: list[int]) -> None:
+    """Gera a planilha de migração DESTE lote e importa no Legal One.
+
+    Fecha o fluxo sequencial pedido: subiu → DataJud → planilha → cadastro. Usa o
+    mesmo import interno do BB (é ele que dispara o workflow no L1; o POST
+    /Lawsuits da API REST não dispara). O monitor confirma cada pasta depois.
+    """
+    from app.services.distribuidos_bb.import_l1_service import cadastrar_planilha
+    from app.services.distribuidos_bb.planilha_service import gerar_e_persistir
+
+    planilha = gerar_e_persistir(db, processo_ids=processo_ids, cliente=CLIENTE_ATIVOS)
+    if planilha is None:
+        return
+    db.commit()
+
+    rel = cadastrar_planilha(bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False)
+    planilha.subido_legalone = True
+    planilha.subido_em = datetime.now(timezone.utc)
+    db.commit()
+    logger.info(
+        "Ativos: lote %s → planilha '%s' importada no L1 (%s pasta[s] nova[s]).",
+        lote_id, planilha.nome_arquivo, rel.get("novos", 0),
+    )
+
+
 def ingerir_lote_background(lote_id: int, linhas: list[dict], ja_cadastrado: set[str]) -> None:
     """Cria os processos a partir da PLANILHA (fonte primária). O DataJud é
     diferido: cada processo entra com `datajud_status=pendente` e o worker de
@@ -263,6 +293,7 @@ def ingerir_lote_background(lote_id: int, linhas: list[dict], ja_cadastrado: set
     from app.db.session import SessionLocal
 
     db = SessionLocal()
+    criados_ids: list[int] = []
     try:
         lote = db.get(BbAtivosLote, lote_id)
         if lote is None:
@@ -303,34 +334,74 @@ def ingerir_lote_background(lote_id: int, linhas: list[dict], ja_cadastrado: set
                     data_ajuizamento=linha.get("data"),
                     adverso_principal=(linha.get("parte") or PARTE_A_CLASSIFICAR),
                     tramitacao=_montar_tramitacao(linha.get("uf")),
-                    datajud_status=DATAJUD_PENDENTE,
                     raw={"ativos_planilha": linha, "datajud": None},
                 )
 
-                # Polo + escritório pela CLASSE da ação (o pré-cadastro Ativos não
-                # tem partes): monitória/execução/precatória → Autor; comuns → Réu.
+                # 2) DataJud ANTES da planilha (fluxo sequencial). A capa é mais
+                # confiável que o TIPO da planilha (que mistura classe com tipo de
+                # comunicação). Se não achar — o recém-distribuído pode não estar
+                # indexado — segue com o dado da planilha e fica `pendente`; o
+                # worker de reconsulta enriquece depois, sem travar o cadastro.
+                capa = None
+                try:
+                    capa = consultar_capa(cnj)
+                except Exception:  # noqa: BLE001
+                    logger.warning("Ativos: DataJud falhou no CNJ %s (segue com a planilha).", cnj)
+                if capa:
+                    classe = capa.get("classe") or classe
+                    proc.natureza = classe
+                    proc.acao = capa.get("assunto") or classe
+                    proc.situacao = capa.get("assunto")
+                    if capa.get("data_ajuizamento"):
+                        proc.data_ajuizamento = capa.get("data_ajuizamento")
+                    proc.tramitacao = _montar_tramitacao(
+                        capa.get("uf") or linha.get("uf"), capa.get("orgao_julgador")
+                    ) or proc.tramitacao
+                    proc.raw = {"ativos_planilha": linha, "datajud": capa}
+                    proc.datajud_status = DATAJUD_OK
+                    proc.datajud_verificado_em = datetime.now(timezone.utc)
+                    lote.encontrados += 1
+                else:
+                    proc.datajud_status = DATAJUD_PENDENTE
+                    lote.nao_encontrados += 1
+
+                # 3) Polo pela CLASSE (o pré-cadastro Ativos não tem as partes):
+                # monitória/execução/precatória/busca → Autor; comuns → Réu.
                 posicao, polo = _classe_para_polo(db, classe)
-                if posicao:
-                    esc = _escritorio_ativos(db, posicao)
-                    proc.posicao = posicao
-                    proc.polo = polo
-                    proc.escritorio_id = esc.id
-                    proc.escritorio_path = esc.escritorio_path
-                    # Observação pelas MESMAS regras editáveis do BB (aba "Regras
-                    # de Observação"), agora separadas por cliente. É o termo que
-                    # dispara o workflow no L1 — sem ele a pasta nasce sem tarefa.
-                    proc.observacao = _avaliar_observacao(db, proc, esc)
+                proc.posicao = posicao
+                proc.polo = polo
 
                 db.add(proc)
+                db.flush()  # precisa do id pros eventos da distribuição
+
+                # 4) Distribuição: MESMO motor do BB — escolhe o escritório (agora
+                # filtrado por cliente), tira o próximo da fila no rodízio e aplica
+                # a regra de observação (termo que dispara o workflow no L1).
+                distribuir_processo(db, proc)
+
                 lote.criados += 1
                 lote.processados += 1
                 db.commit()
+                criados_ids.append(proc.id)
             except Exception:  # noqa: BLE001
                 db.rollback()
                 logger.exception("Ativos: falha ao ingerir CNJ %s (lote %s).", cnj, lote_id)
                 lote = db.get(BbAtivosLote, lote_id)
                 if lote:
                     lote.processados += 1
+                    db.commit()
+
+        # 5) Fecha a sequência: planilha de migração do que ENTROU neste lote e
+        # cadastro no L1 (o import interno é o que dispara o workflow — o POST
+        # /Lawsuits da API REST não dispara). Best-effort: nunca derruba o lote.
+        if criados_ids:
+            try:
+                _cadastrar_lote(db, lote_id, criados_ids)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Ativos: cadastro do lote %s falhou.", lote_id)
+                lote = db.get(BbAtivosLote, lote_id)
+                if lote:
+                    lote.erro = f"Processos criados, mas o cadastro no L1 falhou: {exc}"
                     db.commit()
 
         lote = db.get(BbAtivosLote, lote_id)

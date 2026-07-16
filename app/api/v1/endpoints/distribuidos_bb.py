@@ -67,6 +67,7 @@ def _require_gestao(current_user: LegalOneUser) -> None:
 class EscritorioPayload(BaseModel):
     nome: Optional[str] = None
     escritorio_path: Optional[str] = None
+    criterio_cliente: Optional[str] = None   # BB | ATIVOS | ""(qualquer)
     criterio_polo: Optional[str] = None
     criterio_natureza: Optional[str] = None
     responsavel_fixo_user_id: Optional[int] = None
@@ -753,6 +754,7 @@ def _escritorio_dto(db: Session, esc: BbEscritorio) -> dict[str, Any]:
         "id": esc.id,
         "nome": esc.nome,
         "escritorio_path": esc.escritorio_path,
+        "criterio_cliente": esc.criterio_cliente,
         "criterio_polo": esc.criterio_polo,
         "criterio_natureza": esc.criterio_natureza,
         "responsavel_fixo_user_id": esc.responsavel_fixo_user_id,
@@ -795,6 +797,7 @@ def criar_escritorio(
     esc = BbEscritorio(
         nome=payload.nome.strip(),
         escritorio_path=payload.escritorio_path.strip(),
+        criterio_cliente=(payload.criterio_cliente or None) or None,
         criterio_polo=payload.criterio_polo,
         criterio_natureza=payload.criterio_natureza,
         responsavel_fixo_user_id=payload.responsavel_fixo_user_id,
@@ -821,7 +824,7 @@ def editar_escritorio(
     if esc is None:
         raise HTTPException(status_code=404, detail="Escritório não encontrado.")
     for campo in (
-        "nome", "escritorio_path", "criterio_polo", "criterio_natureza",
+        "nome", "escritorio_path", "criterio_cliente", "criterio_polo", "criterio_natureza",
         "responsavel_fixo_user_id", "observacao_padrao", "ativo", "ordem",
     ):
         valor = getattr(payload, campo)

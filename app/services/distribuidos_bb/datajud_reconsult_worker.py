@@ -34,14 +34,18 @@ def reconsultar_pendentes(db, *, limite: int = 100) -> dict:
         DATAJUD_OK,
         DATAJUD_PENDENTE,
         DATAJUD_SEM_CAPA,
+        NIVEL_AVISO,
+        POOL_NOVO,
+        SECAO_DISTRIBUICAO,
         BbProcesso,
     )
     from app.services.distribuidos_bb.ativos_service import (
         _classe_para_polo,
-        _escritorio_ativos,
         _montar_tramitacao,
     )
     from app.services.distribuidos_bb.datajud_ativos import consultar_capa
+    from app.services.distribuidos_bb.distribuicao_service import distribuir_processo
+    from app.services.distribuidos_bb.log_service import registrar_evento
 
     pendentes = (
         db.query(BbProcesso)
@@ -91,15 +95,32 @@ def reconsultar_pendentes(db, *, limite: int = 100) -> dict:
             capa.get("uf"), capa.get("orgao_julgador"), None
         ) or p.tramitacao
 
-        # Refina o polo/escritório pela classe REAL do DataJud (autoritativa):
-        # corrige o default Réu pra Autor quando a classe indicar cobrança ativa.
+        # Polo pela classe REAL do DataJud. ATENÇÃO: o fluxo é sequencial — a
+        # ingestão já gerou a planilha e cadastrou no L1 —, então NÃO remanejamos
+        # o escritório de quem já foi cadastrado: a pasta existe lá sob o escritório
+        # antigo e o banco divergiria em silêncio. Só reroteia quem ainda está no
+        # pool; para o resto, AVISA o operador decidir.
         posicao, polo = _classe_para_polo(db, classe)
-        esc = _escritorio_ativos(db, posicao)
-        if p.escritorio_id != esc.id:
-            p.posicao = posicao
-            p.polo = polo
-            p.escritorio_id = esc.id
-            p.escritorio_path = esc.escritorio_path
+        if posicao != (p.posicao or ""):
+            if p.planilha_status == POOL_NOVO:
+                p.polo = polo
+                p.posicao = posicao
+                distribuir_processo(db, p)  # ainda não foi pro L1: reroteia de verdade
+            else:
+                registrar_evento(
+                    db,
+                    secao=SECAO_DISTRIBUICAO,
+                    nivel=NIVEL_AVISO,
+                    acao="Polo divergente do DataJud",
+                    mensagem=(
+                        f"O DataJud trouxe a classe '{classe}', que indica {posicao}, "
+                        f"mas o processo já foi cadastrado no Legal One como "
+                        f"{p.posicao or '—'} ({p.escritorio_path or '—'}). Não remanejei "
+                        f"sozinho pra não divergir da pasta — ajuste no L1 se for o caso."
+                    ),
+                    dados={"classe": classe, "posicao_datajud": posicao, "posicao_atual": p.posicao},
+                    processo_id=p.id,
+                )
 
         raw = dict(p.raw or {})
         raw["datajud"] = capa

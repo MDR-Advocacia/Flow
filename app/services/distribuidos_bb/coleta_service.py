@@ -26,6 +26,7 @@ from app.models.distribuidos_bb import (
     BbEnvolvido,
     BbProcesso,
     BbRun,
+    CLIENTE_BB,
     CONTATO_NAO_RESOLVIDO,
     NIVEL_AVISO,
     NIVEL_ERRO,
@@ -256,7 +257,9 @@ def _auto_cadastrar(db: Session, run: BbRun) -> None:
     from app.services.distribuidos_bb.import_l1_service import cadastrar_planilha
     from app.services.distribuidos_bb.planilha_service import gerar_e_persistir
 
-    planilha = gerar_e_persistir(db)  # varre todo o pool NOVO
+    # Só o pool do BB: senão varreria junto os Ativos pendentes (outro cliente,
+    # outro fluxo de entrada) e os misturaria nesta planilha e neste run.
+    planilha = gerar_e_persistir(db, cliente=CLIENTE_BB)
     if planilha is None:
         return
     db.commit()
@@ -395,7 +398,7 @@ def executar_coleta(
         try:
             from app.services.distribuidos_bb.planilha_service import contar_pool_novos
 
-            novos_pool = contar_pool_novos(db)
+            novos_pool = contar_pool_novos(db, cliente=CLIENTE_BB)
             if run.total_distribuidos > 0:
                 registrar_evento(
                     db, secao=SECAO_PLANILHA, nivel=NIVEL_INFO, acao="Pool atualizado",
