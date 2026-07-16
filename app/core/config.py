@@ -379,6 +379,19 @@ class Settings(BaseSettings):
     # Roda sob Xvfb (DISPLAY setado no docker-api-start.sh). Só ligue
     # headless=True em ambiente onde o portal não faça anti-bot.
     distribuidos_bb_headless: bool = False
+
+    # Resiliência do RPA — o PAJ é intermitente (provado em prod 2026-07-16: run
+    # falhou 09:56 e o mesmo, repetido às 09:57, passou).
+    # (a) O SPA às vezes não monta na 1ª carga → recarrega e tenta de novo.
+    #     Acontece ANTES de qualquer ciência, então repetir é inócuo.
+    distribuidos_bb_frame_tentativas: int = 3
+    distribuidos_bb_frame_timeout_ms: int = 30000
+    # (b) Se o run inteiro falhar (ou terminar inconsistente), repete a rodagem.
+    #     Seguro: a ciência tira o item da lista do BB, então a retentativa só
+    #     pega o que sobrou (retomada), e o fingerprint impede duplicata no banco.
+    distribuidos_bb_coleta_tentativas: int = 3
+    distribuidos_bb_coleta_retry_espera_seg: int = 60
+
     # Trava de segurança GLOBAL da ciência: por run o operador pode ligar,
     # mas se isto estiver False a ciência (SIM) NUNCA é dada, aconteça o
     # que acontecer. Default seguro.

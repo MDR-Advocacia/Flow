@@ -275,6 +275,9 @@ def _auto_cadastrar(db: Session, run: BbRun) -> None:
     # O robô subiu a planilha → marca como subida (não fica pendente na tela).
     planilha.subido_legalone = True
     planilha.subido_em = datetime.now(timezone.utc)
+    # Contador do run (a UI mostra "cadastrados"): sem isto ficava 0 pra sempre,
+    # mesmo com as pastas criadas no L1 — parecia que a rodagem não cadastrou nada.
+    run.total_cadastrados += int(novos or 0)
     registrar_evento(
         db, secao=SECAO_CADASTRO, nivel=NIVEL_SUCESSO, acao="Auto-cadastro enviado",
         mensagem=(
@@ -341,6 +344,9 @@ def executar_coleta(
             # que ZEROU (quando deu ciência) ou quanto sobrou (modo seguro).
             try:
                 restantes = portal.consultar(run.data_inicial, run.data_final)
+                # Sinaliza pro wrapper de retentativa (atributo transiente, não
+                # persistido): sobrou pendência mesmo com ciência = inconsistência.
+                run._pos_coleta_restantes = restantes
                 if gate_ciencia:
                     nivel_vf = NIVEL_SUCESSO if restantes == 0 else NIVEL_AVISO
                     msg_vf = (
@@ -446,6 +452,29 @@ def executar_coleta(
     return run
 
 
+def _motivo_para_repetir(run: BbRun, *, erros_antes: int = 0) -> Optional[str]:
+    """Por que esta rodagem merece nova tentativa? None = está tudo certo.
+
+    Dois casos, ambos vistos em prod:
+    - ERRO: falha geral (ex.: o SPA do PAJ não montou) — o run morre com 0 tudo;
+    - INCONSISTÊNCIA: concluiu, mas alguma notificação falhou no meio, ou a
+      verificação pós-coleta achou pendência sobrando mesmo com a ciência ligada.
+
+    `erros_antes` = total_erros no início DESTA tentativa (o contador é cumulativo
+    entre tentativas, então só interessa o que falhou agora).
+    """
+    if run.status == RUN_ERRO:
+        return f"a rodagem falhou ({(run.erro or 'erro não detalhado')[:120]})"
+    novos_erros = run.total_erros - erros_antes
+    if novos_erros > 0:
+        return f"{novos_erros} notificação(ões) falharam no meio da rodagem"
+    gate_ciencia = bool(run.confirmar_ciencia and settings.distribuidos_bb_confirmar_ciencia)
+    restantes = int(getattr(run, "_pos_coleta_restantes", 0) or 0)
+    if gate_ciencia and restantes > 0:
+        return f"sobraram {restantes} pendência(s) no BB após a ciência (esperava 0)"
+    return None
+
+
 def executar_coleta_background(
     run_id: int,
     *,
@@ -453,7 +482,23 @@ def executar_coleta_background(
     data_final: Optional[str],
     coletar_envolvidos: bool = True,
 ) -> None:
-    """Entrada pro background: abre sessão própria e roda a coleta do run."""
+    """Entrada pro background: abre sessão própria e roda a coleta do run.
+
+    **Trava de resiliência**: o portal do BB é intermitente (falha numa rodagem e
+    passa na seguinte, sem mudar nada). Então em vez de deixar o run morrer no
+    erro esperando o operador mandar repetir na mão, repetimos automaticamente.
+
+    Por que repetir é seguro mesmo com a ciência sendo IRREVERSÍVEL:
+    - a ciência REMOVE a notificação da lista de pendências do BB, então a nova
+      tentativa só enxerga o que ainda não foi tratado (retomada, não repetição);
+    - o `fingerprint` faz upsert, então processo já capturado não duplica no banco;
+    - as falhas observadas em prod acontecem no `_localizar_frame`, ANTES de
+      qualquer ciência (run morre com 0 coletados).
+    Os contadores do run são cumulativos entre as tentativas — refletem o total
+    real da rodagem, já que o que foi feito não é refeito.
+    """
+    import time as _t
+
     from app.db.session import SessionLocal
 
     db = SessionLocal()
@@ -462,6 +507,57 @@ def executar_coleta_background(
         if run is None:
             logger.error("Distribuídos BB: run %s não encontrado no background.", run_id)
             return
-        executar_coleta(db, run, coletar_envolvidos=coletar_envolvidos)
+
+        tentativas = max(1, int(settings.distribuidos_bb_coleta_tentativas or 1))
+        espera = max(0, int(settings.distribuidos_bb_coleta_retry_espera_seg or 0))
+
+        for tentativa in range(1, tentativas + 1):
+            erros_antes = run.total_erros
+            executar_coleta(db, run, coletar_envolvidos=coletar_envolvidos)
+
+            motivo = _motivo_para_repetir(run, erros_antes=erros_antes)
+            if motivo is None:
+                if tentativa > 1:
+                    registrar_evento(
+                        db, secao=SECAO_SESSAO, nivel=NIVEL_SUCESSO, acao="Recuperado na retentativa",
+                        mensagem=(
+                            f"A rodagem se recuperou sozinha na tentativa {tentativa} de "
+                            f"{tentativas} — não precisou de repetição manual."
+                        ),
+                        dados={"tentativa": tentativa}, run_id=run.id,
+                    )
+                    db.commit()
+                return
+
+            if tentativa >= tentativas:
+                registrar_evento(
+                    db, secao=SECAO_SESSAO, nivel=NIVEL_ERRO, acao="Esgotou as tentativas",
+                    mensagem=(
+                        f"Desisti após {tentativas} tentativa(s): {motivo}. "
+                        f"Precisa de olhada manual."
+                    ),
+                    dados={"tentativas": tentativas, "motivo": motivo}, run_id=run.id,
+                )
+                db.commit()
+                return
+
+            registrar_evento(
+                db, secao=SECAO_SESSAO, nivel=NIVEL_AVISO, acao="Repetindo a rodagem",
+                mensagem=(
+                    f"Tentativa {tentativa} de {tentativas} não fechou limpa: {motivo}. "
+                    f"Repetindo automaticamente em {espera}s (o que já teve ciência "
+                    f"não é refeito — sai da lista do BB)."
+                ),
+                dados={"tentativa": tentativa, "motivo": motivo}, run_id=run.id,
+            )
+            # Reabre o run pra nova tentativa (o executar_coleta o fecha como ERRO/CONCLUIDO).
+            run.status = RUN_EM_ANDAMENTO
+            run.erro = None
+            run.concluido_em = None
+            run._pos_coleta_restantes = 0
+            db.commit()
+
+            if espera:
+                _t.sleep(espera)
     finally:
         db.close()
