@@ -34,6 +34,7 @@ from app.models.distribuidos_bb import (
     BbResponsavel,
     BbPlanilha,
     BbRun,
+    CLIENTE_BB,
     PLANILHA_MANUAL,
     SECAO_CONFIGURACAO,
 )
@@ -408,6 +409,7 @@ def listar_planilhas(
 @router.post("/planilhas/gerar", summary="Gera a planilha do pool (processos NOVO) e arquiva")
 def gerar_planilha_agora(
     ids: Optional[str] = Query(None, description="IDs específicos; vazio = todo o pool NOVO."),
+    cliente: Optional[str] = Query(None, description="BB | ATIVOS — separa o pool por cliente (vazio = pool do BB)."),
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
@@ -417,15 +419,18 @@ def gerar_planilha_agora(
     processo_ids = None
     if ids:
         processo_ids = [int(x) for x in ids.split(",") if x.strip().isdigit()]
+    # Sem `ids`, o pool é varrido por cliente (default BB) — senão o botão manual
+    # geraria uma planilha mista BB+Ativos.
     planilha = gerar_e_persistir(
         db,
         processo_ids=processo_ids,
         origem=PLANILHA_MANUAL,
+        cliente=(cliente or CLIENTE_BB) if processo_ids is None else None,
     )
     if planilha is None:
         raise HTTPException(
             status_code=404,
-            detail="Nenhum processo novo no pool para gerar planilha.",
+            detail="Nenhum processo novo com responsável no pool para gerar planilha.",
         )
     db.commit()
     return _planilha_dto(planilha)

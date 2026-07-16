@@ -20,10 +20,12 @@ import openpyxl
 from sqlalchemy.orm import Session
 
 from app.models.distribuidos_bb import (
+    NIVEL_AVISO,
     PLANILHA_MANUAL,
     POOL_NOVO,
     POOL_PENDENTE_CADASTRO,
     PROC_DISTRIBUIDO,
+    SECAO_PLANILHA,
     BbConfig,
     BbEnvolvido,
     BbPlanilha,
@@ -33,6 +35,7 @@ from app.models.legal_one import LegalOneUser
 from app.services.distribuidos_bb import normalizacao as norm
 from app.services.distribuidos_bb.cadastro_l1 import parse_tramitacao
 from app.services.distribuidos_bb.envolvidos_equipe import montar_envolvidos_equipe
+from app.services.distribuidos_bb.log_service import registrar_evento
 
 _TEMPLATE = Path(__file__).parent / "templates" / "MODELO_LEGAL_ONE.xlsx"
 _TZ_BR = ZoneInfo("America/Sao_Paulo")
@@ -216,6 +219,40 @@ def gerar_e_persistir(
         )
     if not processos:
         return None
+
+    # TRAVA: não cadastrar processo sem responsável. Este é o ponto por onde os
+    # três caminhos passam (coleta do BB, lote do Ativos e o botão manual), então
+    # a regra vale pra todos. Antes de excluir, TENTA distribuir de novo — a fila
+    # pode ter sido configurada depois da ingestão (caso clássico do Ativos, cujos
+    # escritórios nascem com a fila vazia). Quem continuar sem responsável fica no
+    # pool como NOVO e não entra na planilha.
+    from app.services.distribuidos_bb.distribuicao_service import distribuir_processo
+
+    elegiveis: list[BbProcesso] = []
+    sem_responsavel: list[BbProcesso] = []
+    for p in processos:
+        if p.responsavel_user_id is None:
+            distribuir_processo(db, p)
+        (elegiveis if p.responsavel_user_id is not None else sem_responsavel).append(p)
+
+    if sem_responsavel:
+        filas = sorted({(p.escritorio_path or p.posicao or "—") for p in sem_responsavel})
+        registrar_evento(
+            db,
+            secao=SECAO_PLANILHA,
+            nivel=NIVEL_AVISO,
+            acao="Sem responsável — fora da planilha",
+            mensagem=(
+                f"{len(sem_responsavel)} processo(s) ficaram FORA da planilha por não terem "
+                f"responsável: a fila destes escritórios está vazia — {', '.join(filas)}. "
+                f"Eles seguem no pool; configure a fila e gere a planilha de novo."
+            ),
+            dados={"quantidade": len(sem_responsavel), "escritorios": filas},
+        )
+
+    if not elegiveis:
+        return None
+    processos = elegiveis
 
     ids = [p.id for p in processos]
     buf, total = gerar_planilha(db, processo_ids=ids, status=None)
