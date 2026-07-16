@@ -33,6 +33,7 @@ from app.models.distribuidos_bb import (
     BbProcesso,
 )
 from app.services.distribuidos_bb.datajud_ativos import apenas_digitos, formatar_cnj
+from app.services.distribuidos_bb.distribuicao_service import _avaliar_observacao
 
 logger = logging.getLogger("distribuidos_bb.ativos")
 
@@ -315,6 +316,10 @@ def ingerir_lote_background(lote_id: int, linhas: list[dict], ja_cadastrado: set
                     proc.polo = polo
                     proc.escritorio_id = esc.id
                     proc.escritorio_path = esc.escritorio_path
+                    # Observação pelas MESMAS regras editáveis do BB (aba "Regras
+                    # de Observação"), agora separadas por cliente. É o termo que
+                    # dispara o workflow no L1 — sem ele a pasta nasce sem tarefa.
+                    proc.observacao = _avaliar_observacao(db, proc, esc)
 
                 db.add(proc)
                 lote.criados += 1

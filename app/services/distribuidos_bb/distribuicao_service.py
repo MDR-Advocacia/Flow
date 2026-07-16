@@ -87,10 +87,15 @@ def _proximo_responsavel_rr(db: Session, escritorio: BbEscritorio) -> Optional[i
 def _avaliar_observacao(db: Session, processo: BbProcesso, escritorio: BbEscritorio) -> Optional[str]:
     """Observação decidida pelas REGRAS editáveis (bbd_regras_observacao).
 
-    Avalia as regras ativas por `ordem`; a 1ª que casar (posição, natureza e
-    presença/ausência de CNJ) vence. Sem regra → cai na observação padrão do
+    Avalia as regras ativas por `ordem`; a 1ª que casar (cliente, posição, natureza
+    e presença/ausência de CNJ) vence. Sem regra → cai na observação padrão do
     escritório. Substitui o if/else hardcoded do script legado.
+
+    O `criterio_cliente` é o que separa os clientes: a regra "Réu → Cadastro" é do
+    Banco do Brasil e não pode casar com um processo do Ativos (que tem termo
+    próprio pra disparar o workflow dele no L1).
     """
+    cliente = (processo.cliente or "").strip().lower()
     posicao = (processo.posicao or "").strip().lower()
     natureza = (processo.natureza or "").strip().lower()
     tem_cnj = bool(processo.cnj)
@@ -102,6 +107,8 @@ def _avaliar_observacao(db: Session, processo: BbProcesso, escritorio: BbEscrito
         .all()
     )
     for r in regras:
+        if r.criterio_cliente and r.criterio_cliente.strip().lower() != cliente:
+            continue
         if r.criterio_posicao and r.criterio_posicao.strip().lower() != posicao:
             continue
         if r.criterio_natureza and r.criterio_natureza.strip().lower() != natureza:

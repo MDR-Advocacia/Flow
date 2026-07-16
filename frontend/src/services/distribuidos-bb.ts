@@ -547,6 +547,7 @@ export async function removerMembroEquipe(membroId: number): Promise<{ ok: boole
 // ── Regras de Observação (ativam o workflow no L1) ─────────────────────────
 export interface RegraObservacao {
   id: number;
+  criterio_cliente: string | null;
   nome: string;
   criterio_posicao: string | null;
   criterio_natureza: string | null;
@@ -557,6 +558,7 @@ export interface RegraObservacao {
 }
 export interface RegraObservacaoPayload {
   nome?: string;
+  criterio_cliente?: string | null;
   criterio_posicao?: string | null;
   criterio_natureza?: string | null;
   criterio_cnj?: string | null;

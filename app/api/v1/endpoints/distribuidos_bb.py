@@ -91,6 +91,7 @@ class EquipeMembroPayload(BaseModel):
 
 class RegraObservacaoPayload(BaseModel):
     nome: Optional[str] = None
+    criterio_cliente: Optional[str] = None    # BB | ATIVOS | ""(qualquer)
     criterio_posicao: Optional[str] = None   # Réu | Autor | Interessado | ""(qualquer)
     criterio_natureza: Optional[str] = None
     criterio_cnj: Optional[str] = None        # "com" | "sem" | ""(qualquer)
@@ -1204,6 +1205,7 @@ def _regra_dto(r: BbRegraObservacao) -> dict[str, Any]:
     return {
         "id": r.id,
         "nome": r.nome,
+        "criterio_cliente": r.criterio_cliente,
         "criterio_posicao": r.criterio_posicao,
         "criterio_natureza": r.criterio_natureza,
         "criterio_cnj": r.criterio_cnj,
@@ -1238,6 +1240,7 @@ def criar_regra_observacao(
         ordem = (maior or 0) + 1
     r = BbRegraObservacao(
         nome=payload.nome.strip(),
+        criterio_cliente=(payload.criterio_cliente or None) or None,
         criterio_posicao=(payload.criterio_posicao or None) or None,
         criterio_natureza=(payload.criterio_natureza or None) or None,
         criterio_cnj=(payload.criterio_cnj or None) or None,
@@ -1268,7 +1271,7 @@ def editar_regra_observacao(
         r.nome = payload.nome.strip() or r.nome
     if payload.texto is not None and payload.texto.strip():
         r.texto = payload.texto.strip()
-    for campo in ("criterio_posicao", "criterio_natureza", "criterio_cnj"):
+    for campo in ("criterio_cliente", "criterio_posicao", "criterio_natureza", "criterio_cnj"):
         valor = getattr(payload, campo)
         if valor is not None:
             setattr(r, campo, valor.strip() or None)

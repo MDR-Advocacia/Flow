@@ -25,6 +25,13 @@ import {
 } from "@/services/distribuidos-bb";
 
 const POSICOES = ["", "Réu", "Autor", "Interessado"];
+// O cliente é carimbado pela porta de entrada do processo (coleta RPA = BB;
+// "Importar lista (Ativos)" = ATIVOS) — por isso serve de critério da regra.
+const CLIENTES = [
+  { valor: "", rotulo: "Qualquer" },
+  { valor: "BB", rotulo: "Banco do Brasil" },
+  { valor: "ATIVOS", rotulo: "Ativos" },
+];
 const CNJ_OPCOES: { v: string; label: string }[] = [
   { v: "", label: "Qualquer" },
   { v: "com", label: "Com CNJ" },
@@ -56,13 +63,14 @@ export default function RegrasObservacaoTab() {
 
   const abrirNova = () => {
     setEditando(null);
-    setForm({ criterio_posicao: "", criterio_cnj: "", ativo: true });
+    setForm({ criterio_cliente: "", criterio_posicao: "", criterio_cnj: "", ativo: true });
     setDialogOpen(true);
   };
   const abrirEdicao = (r: RegraObservacao) => {
     setEditando(r);
     setForm({
       nome: r.nome,
+      criterio_cliente: r.criterio_cliente ?? "",
       criterio_posicao: r.criterio_posicao ?? "",
       criterio_natureza: r.criterio_natureza ?? "",
       criterio_cnj: r.criterio_cnj ?? "",
@@ -163,10 +171,22 @@ export default function RegrasObservacaoTab() {
                     <TableCell className="font-medium">{r.nome}</TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-1">
+                        {r.criterio_cliente && (
+                          <Badge
+                            className={
+                              r.criterio_cliente === "ATIVOS"
+                                ? "bg-violet-100 text-violet-700"
+                                : "bg-yellow-100 text-yellow-800"
+                            }
+                            variant="secondary"
+                          >
+                            {r.criterio_cliente === "ATIVOS" ? "Ativos" : "Banco do Brasil"}
+                          </Badge>
+                        )}
                         {r.criterio_posicao && <Badge variant="secondary">Posição: {r.criterio_posicao}</Badge>}
                         {r.criterio_natureza && <Badge variant="secondary">Natureza: {r.criterio_natureza}</Badge>}
                         {r.criterio_cnj && <Badge variant="secondary">{r.criterio_cnj === "com" ? "Com CNJ" : "Sem CNJ"}</Badge>}
-                        {!r.criterio_posicao && !r.criterio_natureza && !r.criterio_cnj && (
+                        {!r.criterio_cliente && !r.criterio_posicao && !r.criterio_natureza && !r.criterio_cnj && (
                           <span className="text-xs text-muted-foreground italic">qualquer</span>
                         )}
                       </div>
@@ -208,6 +228,18 @@ export default function RegrasObservacaoTab() {
             <div className="space-y-1">
               <Label className="text-xs">Nome da regra</Label>
               <Input value={form.nome ?? ""} onChange={(e) => setForm((f) => ({ ...f, nome: e.target.value }))} placeholder="Ex.: Autor sem CNJ → Ajuizamento" />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Cliente</Label>
+              <select className="h-9 w-full rounded-md border bg-background px-2 text-sm"
+                value={form.criterio_cliente ?? ""}
+                onChange={(e) => setForm((f) => ({ ...f, criterio_cliente: e.target.value }))}>
+                {CLIENTES.map((c) => <option key={c.valor} value={c.valor}>{c.rotulo}</option>)}
+              </select>
+              <p className="text-[11px] text-muted-foreground">
+                O cliente vem da origem do processo: a coleta automática traz o Banco do Brasil;
+                &quot;Importar lista&quot; traz o Ativos. Deixe em Qualquer só se a regra valer para os dois.
+              </p>
             </div>
             <div className="grid grid-cols-3 gap-3">
               <div className="space-y-1">

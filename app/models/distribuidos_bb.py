@@ -451,6 +451,10 @@ class BbRegraObservacao(Base):
     id = Column(Integer, primary_key=True, index=True)
     nome = Column(String(120), nullable=False)
     # Critérios (todos opcionais; None = "qualquer")
+    # O cliente vem carimbado pela PORTA DE ENTRADA do processo (coleta RPA = BB;
+    # "Importar lista (Ativos)" = ATIVOS), então é um critério confiável — e é o
+    # que impede a regra do BB ("Réu → Cadastro") de vazar pro Ativos e vice-versa.
+    criterio_cliente = Column(String(20), nullable=True)     # BB | ATIVOS | None
     criterio_posicao = Column(String(20), nullable=True)     # Réu | Autor | Interessado
     criterio_natureza = Column(String(80), nullable=True)    # ex.: "Trabalhista"
     criterio_cnj = Column(String(10), nullable=True)         # "com" | "sem" | None
