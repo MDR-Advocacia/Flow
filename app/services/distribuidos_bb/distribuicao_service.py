@@ -94,6 +94,29 @@ def _proximo_responsavel_rr(db: Session, escritorio: BbEscritorio) -> Optional[i
     return escolhido.user_id
 
 
+def peek_responsavel_rr(db: Session, escritorio: BbEscritorio) -> Optional[int]:
+    """Quem SERIA o próximo do rodízio — sem avançar a fila (só leitura).
+
+    Usado pela sugestão do modal de pasta avulsa: mostra o próximo ao operador;
+    o avanço real acontece só no salvar (via `_proximo_responsavel_rr`), e apenas
+    se o operador mantiver a sugestão.
+    """
+    fila = (
+        db.query(BbResponsavel)
+        .filter(
+            BbResponsavel.escritorio_id == escritorio.id,
+            BbResponsavel.ativo.is_(True),
+        )
+        .order_by(BbResponsavel.ordem, BbResponsavel.id)
+        .all()
+    )
+    if not fila:
+        return None
+    estado = db.get(BbDistribuicaoEstado, escritorio.id)
+    ultimo = estado.ultimo_indice if estado is not None else -1
+    return fila[(ultimo + 1) % len(fila)].user_id
+
+
 def _avaliar_observacao(db: Session, processo: BbProcesso, escritorio: BbEscritorio) -> Optional[str]:
     """Observação decidida pelas REGRAS editáveis (bbd_regras_observacao).
 

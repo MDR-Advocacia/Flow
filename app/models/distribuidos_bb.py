@@ -84,6 +84,9 @@ PLANILHA_MANUAL = "MANUAL"          # gerada pelo botão "Gerar planilha"
 # enriquecida via DataJud. Default BB (os existentes são todos do Banco do Brasil).
 CLIENTE_BB = "BB"
 CLIENTE_ATIVOS = "ATIVOS"
+# Pasta avulsa de outro cliente (modal de criação manual): a tag fica OUTRO e o
+# nome/CNPJ reais vão em cliente_nome/cliente_cpf_cnpj do processo.
+CLIENTE_OUTRO = "OUTRO"
 
 # Marca a parte contrária quando a planilha da Ativos não traz o nome (só 16%
 # das linhas vêm preenchidas). O operador completa depois.
@@ -283,6 +286,11 @@ class BbProcesso(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     cliente = Column(String(20), nullable=False, server_default=CLIENTE_BB, index=True)
+    # Cliente POR PROCESSO (pasta avulsa): quando preenchido, a planilha de
+    # migração usa estes valores em vez da config global do cliente (BB/Ativos).
+    cliente_nome = Column(String(200), nullable=True)
+    cliente_cpf_cnpj = Column(String(30), nullable=True)
+    cliente_tipo = Column(String(5), nullable=True)  # PF | PJ
     run_id = Column(Integer, ForeignKey("bbd_runs.id", ondelete="SET NULL"), nullable=True, index=True)
 
     # Identidade / dedup (fingerprint = cnj or npj)

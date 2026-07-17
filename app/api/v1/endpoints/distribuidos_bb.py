@@ -102,6 +102,28 @@ class RegraObservacaoPayload(BaseModel):
     ordem: Optional[int] = None
 
 
+class PastaAvulsaPayload(BaseModel):
+    cnj: Optional[str] = None
+    cliente_nome: Optional[str] = None
+    cliente_cpf_cnpj: Optional[str] = None
+    cliente_tipo: Optional[str] = None       # PF | PJ
+    posicao: Optional[str] = None            # Réu | Autor | Interessado
+    natureza: Optional[str] = None
+    acao: Optional[str] = None
+    data_ajuizamento: Optional[str] = None
+    uf: Optional[str] = None
+    comarca: Optional[str] = None
+    orgao: Optional[str] = None
+    valor_causa: Optional[float] = None
+    adverso_nome: Optional[str] = None
+    adverso_cpf_cnpj: Optional[str] = None
+    adverso_tipo: Optional[str] = None       # PF | PJ
+    escritorio_path: Optional[str] = None
+    responsavel_user_id: Optional[int] = None
+    consumir_rodizio: bool = False           # true = manteve a sugestão da fila
+    observacao: Optional[str] = None
+
+
 class ClassificacaoPayload(BaseModel):
     nome: Optional[str] = None
     situacao: Optional[str] = None
@@ -513,6 +535,70 @@ def verificar_cadastro_agora(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Distribuidos BB: verificacao manual de cadastro falhou.")
         raise HTTPException(status_code=502, detail=f"Falha ao verificar no Legal One: {exc}")
+
+
+# ── Pasta avulsa (modal de criação manual — cadastro imediato no L1) ─────────
+
+@router.get("/avulso/capa", summary="Busca a capa do CNJ no DataJud pro modal de pasta avulsa")
+def buscar_capa_avulso(
+    cnj: str = Query(..., description="Número CNJ (20 dígitos, com ou sem máscara)."),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb.datajud_ativos import consultar_capa
+
+    try:
+        capa = consultar_capa(cnj)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Pasta avulsa: consulta DataJud falhou (%s).", cnj)
+        raise HTTPException(status_code=502, detail=f"DataJud indisponível: {exc}")
+    if not capa:
+        return {"encontrado": False}
+    return {"encontrado": True, **capa}
+
+
+@router.get("/avulso/sugestao", summary="Sugere responsável (rodízio) e observação pro modal")
+def sugestao_avulso(
+    escritorio_path: str = Query(...),
+    cliente_cpf_cnpj: Optional[str] = Query(None),
+    posicao: Optional[str] = Query(None),
+    natureza: Optional[str] = Query(None),
+    cnj: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb.avulso_service import sugerir
+
+    return sugerir(
+        db, escritorio_path=escritorio_path, cliente_cpf_cnpj=cliente_cpf_cnpj,
+        posicao=posicao, natureza=natureza, cnj=cnj,
+    )
+
+
+@router.post("/processos/avulso", status_code=201, summary="Cria pasta avulsa e cadastra no L1 na hora")
+def criar_pasta_avulsa_endpoint(
+    payload: PastaAvulsaPayload,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb.avulso_service import cadastrar_imediato, criar_pasta_avulsa
+
+    try:
+        proc = criar_pasta_avulsa(db, payload.model_dump(), user_id=current_user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    resultado = cadastrar_imediato(db, proc)
+    return {
+        "processo_id": proc.id,
+        "cnj": proc.cnj,
+        "cliente": proc.cliente,
+        "responsavel_user_id": proc.responsavel_user_id,
+        **resultado,
+    }
 
 
 @router.post("/ativos/datajud/reconsultar", summary="Reconsulta o DataJud dos processos Ativos pendentes (manual)")

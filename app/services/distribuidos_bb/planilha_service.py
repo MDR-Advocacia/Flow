@@ -114,6 +114,10 @@ def gerar_planilha(
     for p in processos:
         tram = parse_tramitacao(p.tramitacao)
         cliente_nome, cliente_cpf, cliente_tipo = _cliente_cfg(p.cliente)
+        if p.cliente_nome:  # pasta avulsa: cliente informado no modal vence a config
+            cliente_nome = p.cliente_nome
+            cliente_cpf = p.cliente_cpf_cnpj or ""
+            cliente_tipo = p.cliente_tipo or "PJ"
         doc_cliente = norm.apenas_digitos(cliente_cpf)
         # Contrário principal (1º envolvido com doc que NÃO seja o cliente)
         adverso_cpf = adverso_tipo = None
@@ -267,7 +271,7 @@ def gerar_e_persistir(
     if cli and any(p.cliente != cli for p in processos):
         rotulo = "MISTA"
     else:
-        rotulo = "ATIVOS" if cli == "ATIVOS" else "DISTRIBUIDOS_BB"
+        rotulo = {"ATIVOS": "ATIVOS", "OUTRO": "AVULSA"}.get(cli or "", "DISTRIBUIDOS_BB")
     nome = f"PLANILHA_MIGRACAO_{rotulo}_{carimbo}.xlsx"
 
     planilha = BbPlanilha(

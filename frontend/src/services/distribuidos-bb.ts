@@ -665,3 +665,82 @@ export async function importarAtivos(file: File): Promise<{ lote_id: number; tot
 export async function getLoteAtivos(id: number): Promise<AtivosLote> {
   return json(await apiFetch(`${BASE}/ativos/lotes/${id}`));
 }
+
+// ── Pasta avulsa (modal de criação manual — cadastro imediato no L1) ───────
+export interface OfficeL1 {
+  id: number;
+  name: string;
+  path: string;
+  external_id: number;
+}
+export async function listarOfficesL1(): Promise<OfficeL1[]> {
+  // Lista completa de escritórios responsáveis do L1 (a mesma de Publicações).
+  return json(await apiFetch(`/api/v1/offices`));
+}
+
+export interface CapaAvulso {
+  encontrado: boolean;
+  classe?: string | null;
+  assunto?: string | null;
+  orgao_julgador?: string | null;
+  uf?: string | null;
+  data_ajuizamento?: string | null;
+}
+export async function buscarCapaAvulso(cnj: string): Promise<CapaAvulso> {
+  return json(await apiFetch(`${BASE}/avulso/capa?cnj=${encodeURIComponent(cnj)}`));
+}
+
+export interface SugestaoAvulso {
+  tem_fila: boolean;
+  responsavel_sugerido_id: number | null;
+  responsavel_sugerido_nome: string | null;
+  observacao_sugerida: string | null;
+}
+export async function sugestaoAvulso(params: {
+  escritorio_path: string;
+  cliente_cpf_cnpj?: string;
+  posicao?: string;
+  natureza?: string;
+  cnj?: string;
+}): Promise<SugestaoAvulso> {
+  const qs = new URLSearchParams();
+  qs.set("escritorio_path", params.escritorio_path);
+  if (params.cliente_cpf_cnpj) qs.set("cliente_cpf_cnpj", params.cliente_cpf_cnpj);
+  if (params.posicao) qs.set("posicao", params.posicao);
+  if (params.natureza) qs.set("natureza", params.natureza);
+  if (params.cnj) qs.set("cnj", params.cnj);
+  return json(await apiFetch(`${BASE}/avulso/sugestao?${qs.toString()}`));
+}
+
+export interface PastaAvulsaPayload {
+  cnj?: string | null;
+  cliente_nome: string;
+  cliente_cpf_cnpj?: string | null;
+  cliente_tipo?: string | null;
+  posicao: string;
+  natureza?: string | null;
+  acao?: string | null;
+  data_ajuizamento?: string | null;
+  uf?: string | null;
+  comarca?: string | null;
+  orgao?: string | null;
+  valor_causa?: number | null;
+  adverso_nome?: string | null;
+  adverso_cpf_cnpj?: string | null;
+  adverso_tipo?: string | null;
+  escritorio_path: string;
+  responsavel_user_id?: number | null;
+  consumir_rodizio?: boolean;
+  observacao?: string | null;
+}
+export interface PastaAvulsaResultado {
+  processo_id: number;
+  cnj: string | null;
+  cliente: string;
+  cadastrado: boolean;
+  planilha_id?: number;
+  erro?: string;
+}
+export async function criarPastaAvulsa(payload: PastaAvulsaPayload): Promise<PastaAvulsaResultado> {
+  return json(await apiFetch(`${BASE}/processos/avulso`, { method: "POST", body: JSON.stringify(payload) }));
+}

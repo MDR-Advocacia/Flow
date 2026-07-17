@@ -7,6 +7,7 @@ import {
   ExternalLink,
   FileSpreadsheet,
   FileText,
+  FolderPlus,
   History,
   Loader2,
   RefreshCw,
@@ -14,6 +15,7 @@ import {
   Search,
   Upload,
 } from "lucide-react";
+import PastaAvulsaDialog from "@/components/distribuidos-bb/PastaAvulsaDialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -72,12 +74,14 @@ const ORIGEM_META: Record<string, { label: string; cls: string }> = {
 const CLIENTE_META: Record<string, { label: string; cls: string }> = {
   BB: { label: "Banco do Brasil", cls: "bg-yellow-100 text-yellow-800" },
   ATIVOS: { label: "Ativos", cls: "bg-violet-100 text-violet-700" },
+  OUTRO: { label: "Avulso", cls: "bg-slate-200 text-slate-700" },
 };
 
 const CLIENTE_FILTROS = [
   { value: "", label: "Todos os clientes" },
   { value: "BB", label: "Banco do Brasil" },
   { value: "ATIVOS", label: "Ativos" },
+  { value: "OUTRO", label: "Avulsos (outros clientes)" },
 ];
 
 const POOL_META: Record<string, { label: string; cls: string }> = {
@@ -176,6 +180,7 @@ export default function DistribuidosBBPage() {
 
   // Upload de lista Ativos
   const [ativosOpen, setAtivosOpen] = useState(false);
+  const [avulsaOpen, setAvulsaOpen] = useState(false);
   const [ativosFile, setAtivosFile] = useState<File | null>(null);
   const [ativosLote, setAtivosLote] = useState<AtivosLote | null>(null);
   const [ativosImportando, setAtivosImportando] = useState(false);
@@ -453,6 +458,10 @@ export default function DistribuidosBBPage() {
           <p className="text-sm text-muted-foreground">Processos capturados no portal do Banco do Brasil e sua auditoria.</p>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => setAvulsaOpen(true)}>
+            <FolderPlus className="mr-2 h-4 w-4" />
+            Pasta avulsa
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -1357,6 +1366,9 @@ export default function DistribuidosBBPage() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Pasta avulsa (criação manual → cadastro imediato no L1) */}
+      <PastaAvulsaDialog open={avulsaOpen} onOpenChange={setAvulsaOpen} onCreated={loadProcessos} />
     </div>
   );
 }
