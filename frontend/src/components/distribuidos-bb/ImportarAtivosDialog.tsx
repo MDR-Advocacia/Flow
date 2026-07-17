@@ -63,9 +63,9 @@ export default function ImportarAtivosDialog({
           </DialogTitle>
           <DialogDescription>
             Suba a planilha da Ativos. Lemos a aba <strong>PARA CADASTRO</strong> (a aba JÁ CADASTRADO
-            é ignorada) e criamos os processos direto com os dados dela — CNJ, UF, data e a parte
-            quando vier. A classe/assunto/órgão vêm do <strong>DataJud em segundo plano</strong>
-            (reconsulta os recém-distribuídos que ainda não indexaram). Valor da causa é manual.
+            é ignorada), consultamos o <strong>DataJud na hora</strong> (classe/assunto/órgão) e criamos
+            os processos — quem o DataJud ainda não indexou segue com os dados da própria planilha.
+            Valor da causa é manual.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">

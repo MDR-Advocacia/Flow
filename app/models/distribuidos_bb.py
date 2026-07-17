@@ -92,9 +92,10 @@ CLIENTE_OUTRO = "OUTRO"
 # das linhas vêm preenchidas). O operador completa depois.
 PARTE_A_CLASSIFICAR = "À CLASSIFICAR"
 
-# Status do enriquecimento DataJud (Ativos):
-#   PENDENTE = ainda não consultado / consultado e não achou (reconsulta depois);
-#   OK = capa encontrada e aplicada; SEM_CAPA = desistiu após N tentativas.
+# Status da consulta DataJud (Ativos) — feita UMA vez, na ingestão (sem worker
+# recorrente depois, por decisão do operador):
+#   OK = capa encontrada e aplicada; SEM_CAPA = não achou (segue com a planilha).
+#   PENDENTE ficou legado (processos de antes da mudança).
 DATAJUD_PENDENTE = "pendente"
 DATAJUD_OK = "ok"
 DATAJUD_SEM_CAPA = "sem_capa"

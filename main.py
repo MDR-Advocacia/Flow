@@ -398,17 +398,9 @@ async def lifespan(_: FastAPI):
             "Falha ao registrar o monitor de cadastro L1 Distribuídos BB no startup."
         )
 
-    # Ativos: reconsulta assíncrona do DataJud (enriquece a capa dos pendentes).
-    try:
-        from app.services.distribuidos_bb.datajud_reconsult_worker import (
-            register_distribuidos_bb_datajud_reconsult_job,
-        )
-
-        register_distribuidos_bb_datajud_reconsult_job(scheduler)
-    except Exception:
-        logger.exception(
-            "Falha ao registrar a reconsulta DataJud (Ativos) no startup."
-        )
+    # Ativos: a consulta ao DataJud acontece SÓ na ingestão (decisão do operador
+    # 2026-07-17: sem worker recorrente depois do cadastro — o que o DataJud não
+    # tiver na hora, fica com o dado da planilha e pronto).
 
     try:
         yield

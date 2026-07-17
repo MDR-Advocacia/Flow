@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app.models.distribuidos_bb import (
     CLIENTE_ATIVOS,
     DATAJUD_OK,
-    DATAJUD_PENDENTE,
+    DATAJUD_SEM_CAPA,
     LOTE_CONCLUIDO,
     LOTE_ERRO,
     PARTE_A_CLASSIFICAR,
@@ -286,10 +286,11 @@ def _cadastrar_lote(db: Session, lote_id: int, processo_ids: list[int]) -> None:
 
 
 def ingerir_lote_background(lote_id: int, linhas: list[dict], ja_cadastrado: set[str]) -> None:
-    """Cria os processos a partir da PLANILHA (fonte primária). O DataJud é
-    diferido: cada processo entra com `datajud_status=pendente` e o worker de
-    reconsulta completa classe/assunto/órgão/comarca depois (o recém-distribuído
-    pode ainda não estar indexado). Roda em thread própria."""
+    """Cria os processos a partir da PLANILHA (fonte primária), consultando o
+    DataJud UMA vez por CNJ, na hora (fluxo sequencial: subiu → DataJud →
+    planilha → cadastro). Sem worker recorrente depois — decisão do operador:
+    o que o DataJud não tiver no momento, fica com o dado da planilha e pronto
+    (`datajud_status=sem_capa`). Roda em thread própria."""
     from app.db.session import SessionLocal
 
     db = SessionLocal()
@@ -340,8 +341,8 @@ def ingerir_lote_background(lote_id: int, linhas: list[dict], ja_cadastrado: set
                 # 2) DataJud ANTES da planilha (fluxo sequencial). A capa é mais
                 # confiável que o TIPO da planilha (que mistura classe com tipo de
                 # comunicação). Se não achar — o recém-distribuído pode não estar
-                # indexado — segue com o dado da planilha e fica `pendente`; o
-                # worker de reconsulta enriquece depois, sem travar o cadastro.
+                # indexado — segue com o dado da planilha e FIM (sem_capa): não há
+                # reconsulta posterior, por decisão do operador.
                 capa = None
                 try:
                     capa = consultar_capa(cnj)
@@ -362,7 +363,7 @@ def ingerir_lote_background(lote_id: int, linhas: list[dict], ja_cadastrado: set
                     proc.datajud_verificado_em = datetime.now(timezone.utc)
                     lote.encontrados += 1
                 else:
-                    proc.datajud_status = DATAJUD_PENDENTE
+                    proc.datajud_status = DATAJUD_SEM_CAPA
                     lote.nao_encontrados += 1
 
                 # 3) Polo pela CLASSE (o pré-cadastro Ativos não tem as partes):

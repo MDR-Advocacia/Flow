@@ -601,21 +601,6 @@ def criar_pasta_avulsa_endpoint(
     }
 
 
-@router.post("/ativos/datajud/reconsultar", summary="Reconsulta o DataJud dos processos Ativos pendentes (manual)")
-def reconsultar_datajud_agora(
-    db: Session = Depends(get_db),
-    current_user: LegalOneUser = Depends(auth.get_current_user),
-):
-    _require_gestao(current_user)
-    from app.services.distribuidos_bb.datajud_reconsult_worker import reconsultar_pendentes
-
-    try:
-        return reconsultar_pendentes(db)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Ativos: reconsulta manual do DataJud falhou.")
-        raise HTTPException(status_code=502, detail=f"Falha ao reconsultar no DataJud: {exc}")
-
-
 @router.post(
     "/planilhas/{planilha_id}/cadastrar-l1",
     summary="Sobe e importa a planilha pela API interna do L1 (dry_run controla o save real)",

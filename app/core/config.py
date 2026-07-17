@@ -410,11 +410,6 @@ class Settings(BaseSettings):
     distribuidos_bb_monitor_cadastro_ativo: bool = True
     distribuidos_bb_monitor_intervalo_min: int = 2
 
-    # Reconsulta assíncrona do DataJud (Ativos): a planilha é a fonte primária do
-    # cadastro; este worker enriquece a capa (classe/assunto/órgão) dos processos
-    # cujo DataJud ainda estava pendente (recém-distribuído não indexado / timeout).
-    distribuidos_bb_datajud_reconsult_ativo: bool = True
-    distribuidos_bb_datajud_reconsult_intervalo_min: int = 30
 
     # Cadastro 100% automático: ao fim de uma coleta com processos distribuídos,
     # gera a planilha e importa no L1 (cria as pastas + dispara o workflow) sem
