@@ -34,7 +34,7 @@ from app.models.distribuidos_bb import (
     BbProcesso,
 )
 from app.services.distribuidos_bb import normalizacao as norm
-from app.services.distribuidos_bb.ativos_service import _montar_tramitacao
+from app.services.distribuidos_bb.ativos_service import _montar_tramitacao, _natureza_do_cnj
 from app.services.distribuidos_bb.distribuicao_service import (
     _avaliar_observacao,
     _proximo_responsavel_rr,
@@ -137,7 +137,9 @@ def criar_pasta_avulsa(db: Session, dados: dict[str, Any], *, user_id: Optional[
         planilha_status=POOL_NOVO,
         posicao=posicao,
         polo=_POSICAO_POLO[posicao],
-        natureza=(dados.get("natureza") or "").strip() or None,
+        # Natureza = catálogo do L1; vazio → deduz do CNJ (5=Trabalhista, resto Civel).
+        # Valor fora do catálogo reprova a validação do import (visto no 1º lote).
+        natureza=(dados.get("natureza") or "").strip() or _natureza_do_cnj(digs),
         acao=(dados.get("acao") or "").strip() or None,
         data_ajuizamento=(dados.get("data_ajuizamento") or "").strip() or None,
         valor_causa=dados.get("valor_causa"),

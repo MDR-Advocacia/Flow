@@ -121,7 +121,7 @@ export default function PastaAvulsaDialog({
   const [clienteCnpj, setClienteCnpj] = useState("");
   const [clienteTipo, setClienteTipo] = useState("PJ");
   const [posicao, setPosicao] = useState("Réu");
-  const [natureza, setNatureza] = useState("");
+  const [natureza, setNatureza] = useState("Civel");
   const [acao, setAcao] = useState("");
   const [dataAjuiz, setDataAjuiz] = useState("");
   const [uf, setUf] = useState("");
@@ -172,8 +172,9 @@ export default function PastaAvulsaDialog({
         toast({ title: "Capa não encontrada", description: "O DataJud ainda não indexou este processo (comum em recém-distribuídos). Preencha manualmente.", variant: "destructive" });
         return;
       }
-      if (capa.classe) setNatureza(capa.classe);
-      if (capa.assunto) setAcao(capa.assunto);
+      // Natureza fica no catálogo do L1 (Civel/Trabalhista) — a classe vai na Ação.
+      if (capa.classe) setAcao(capa.classe);
+      else if (capa.assunto) setAcao(capa.assunto);
       if (capa.orgao_julgador) setOrgao(capa.orgao_julgador);
       if (capa.uf) setUf(capa.uf);
       if (capa.data_ajuizamento) setDataAjuiz(capa.data_ajuizamento);
@@ -187,7 +188,7 @@ export default function PastaAvulsaDialog({
 
   const limpar = () => {
     setCnj(""); setClienteNome(""); setClienteCnpj(""); setClienteTipo("PJ");
-    setPosicao("Réu"); setNatureza(""); setAcao(""); setDataAjuiz("");
+    setPosicao("Réu"); setNatureza("Civel"); setAcao(""); setDataAjuiz("");
     setUf(""); setComarca(""); setOrgao(""); setValorCausa("");
     setAdversoNome(""); setAdversoDoc(""); setAdversoTipo("PF");
     setEscritorioPath(null); setResponsavelId(null); setSugestaoId(null);
@@ -309,12 +310,12 @@ export default function PastaAvulsaDialog({
               </select>
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">Natureza / classe</Label>
-              <Input value={natureza} onChange={(e) => setNatureza(e.target.value)} placeholder="Ex.: Procedimento Comum Cível" />
+              <Label className="text-xs">Natureza (catálogo do L1)</Label>
+              <Input value={natureza} onChange={(e) => setNatureza(e.target.value)} placeholder="Civel ou Trabalhista" />
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">Ação / assunto</Label>
-              <Input value={acao} onChange={(e) => setAcao(e.target.value)} placeholder="Ex.: Inclusão Indevida em Cadastro" />
+              <Label className="text-xs">Ação (classe processual)</Label>
+              <Input value={acao} onChange={(e) => setAcao(e.target.value)} placeholder="Ex.: Procedimento Comum Cível" />
             </div>
             <div className="space-y-1">
               <Label className="text-xs">Data de ajuizamento</Label>

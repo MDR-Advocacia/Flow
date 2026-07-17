@@ -248,6 +248,14 @@ def _limpar_tipo(tipo: Optional[str]) -> Optional[str]:
     return t
 
 
+def _natureza_do_cnj(digs: str) -> str:
+    """Natureza do CATÁLOGO do L1 pelo segmento J do CNJ (posição 14):
+    5 = Justiça do Trabalho → Trabalhista; resto → Civel. ASCII de propósito —
+    o parser do import do L1 mutila acentos do nosso xlsx (visto no staging) e o
+    catálogo aceita a forma sem acento (padrão que o fluxo BB sempre usou)."""
+    return "Trabalhista" if len(digs) == 20 and digs[13] == "5" else "Civel"
+
+
 def _montar_tramitacao(uf: Optional[str], comarca: Optional[str] = None,
                        orgao: Optional[str] = None) -> Optional[str]:
     """Formata no padrão que `parse_tramitacao` espera: 'Comarca/UF - Orgao'."""
@@ -330,7 +338,11 @@ def ingerir_lote_background(lote_id: int, linhas: list[dict], ja_cadastrado: set
                     fingerprint=fp,
                     status=PROC_DISTRIBUIDO,
                     planilha_status=POOL_NOVO,
-                    natureza=classe,
+                    # Natureza = CATÁLOGO do L1 (Civel/Trabalhista, ASCII), NUNCA a
+                    # classe: valor fora do catálogo reprova a validação do import
+                    # ("Campo obrigatório" em nature — 35/35 no 1º lote real). A
+                    # classe processual vai na Ação (actionType, texto livre).
+                    natureza=_natureza_do_cnj(digs),
                     acao=classe,
                     data_ajuizamento=linha.get("data"),
                     adverso_principal=(linha.get("parte") or PARTE_A_CLASSIFICAR),
@@ -350,8 +362,7 @@ def ingerir_lote_background(lote_id: int, linhas: list[dict], ja_cadastrado: set
                     logger.warning("Ativos: DataJud falhou no CNJ %s (segue com a planilha).", cnj)
                 if capa:
                     classe = capa.get("classe") or classe
-                    proc.natureza = classe
-                    proc.acao = capa.get("assunto") or classe
+                    proc.acao = classe  # classe real do DataJud (natureza fica no catálogo)
                     proc.situacao = capa.get("assunto")
                     if capa.get("data_ajuizamento"):
                         proc.data_ajuizamento = capa.get("data_ajuizamento")
