@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   List,
   CloudDownload,
+  Upload,
   Download,
   FileSpreadsheet,
   Inbox,
@@ -34,6 +35,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import ImportarAtivosDialog from "@/components/distribuidos-bb/ImportarAtivosDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -132,6 +134,7 @@ export default function DistribuidosBBDashboardPage() {
 
   // Coleta
   const [coletaOpen, setColetaOpen] = useState(false);
+  const [ativosOpen, setAtivosOpen] = useState(false);
   const [dataIni, setDataIni] = useState("");
   const [dataFim, setDataFim] = useState("");
   const [confirmarCiencia, setConfirmarCiencia] = useState(false);
@@ -285,6 +288,10 @@ export default function DistribuidosBBDashboardPage() {
           <Button size="sm" onClick={() => setColetaOpen(true)}>
             <CloudDownload className="mr-2 h-4 w-4" />
             Nova coleta
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setAtivosOpen(true)}>
+            <Upload className="mr-2 h-4 w-4" />
+            Importar lista (Ativos)
           </Button>
           <Button variant="outline" size="sm" onClick={() => navigate("/distribuidos-bb")}>
             <ListChecks className="mr-2 h-4 w-4" />
@@ -772,6 +779,9 @@ export default function DistribuidosBBDashboardPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Importar lista (Ativos) — mesmo dialog da tela de Processos */}
+      <ImportarAtivosDialog open={ativosOpen} onOpenChange={setAtivosOpen} onDone={load} />
     </div>
   );
 }

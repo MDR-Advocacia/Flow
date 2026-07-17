@@ -15,6 +15,7 @@ import {
   Search,
   Upload,
 } from "lucide-react";
+import ImportarAtivosDialog from "@/components/distribuidos-bb/ImportarAtivosDialog";
 import PastaAvulsaDialog from "@/components/distribuidos-bb/PastaAvulsaDialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -33,7 +34,6 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import {
-  AtivosLote,
   Auditoria,
   Escritorio,
   Evento,
@@ -45,9 +45,7 @@ import {
   exportarProcessos,
   gerarPlanilhaNoHistorico,
   getAuditoria,
-  getLoteAtivos,
   getPlanilhaDetalhe,
-  importarAtivos,
   listarEscritorios,
   listarEventos,
   listarPlanilhas,
@@ -178,12 +176,9 @@ export default function DistribuidosBBPage() {
   const [clienteFiltro, setClienteFiltro] = useState<string>("");
   const [escritorios, setEscritorios] = useState<Escritorio[]>([]);
 
-  // Upload de lista Ativos
+  // Upload de lista Ativos (dialog reusável) + pasta avulsa
   const [ativosOpen, setAtivosOpen] = useState(false);
   const [avulsaOpen, setAvulsaOpen] = useState(false);
-  const [ativosFile, setAtivosFile] = useState<File | null>(null);
-  const [ativosLote, setAtivosLote] = useState<AtivosLote | null>(null);
-  const [ativosImportando, setAtivosImportando] = useState(false);
   const [cadastroDe, setCadastroDe] = useState<string>("");
   const [cadastroAte, setCadastroAte] = useState<string>("");
   const [buscaInput, setBuscaInput] = useState("");
@@ -303,29 +298,6 @@ export default function DistribuidosBBPage() {
       setLoading(false);
     }
   }, [statusFiltro, poolFiltro, escritorioFiltro, posicaoFiltro, clienteFiltro, cadastroDe, cadastroAte, busca, page, pageSize, toast]);
-
-  const importarAtivosLista = async () => {
-    if (!ativosFile) return;
-    setAtivosImportando(true);
-    setAtivosLote(null);
-    try {
-      const { lote_id } = await importarAtivos(ativosFile);
-      // Poll do progresso até concluir.
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const lote = await getLoteAtivos(lote_id);
-        setAtivosLote(lote);
-        if (lote.status !== "EM_ANDAMENTO") break;
-        await new Promise((r) => setTimeout(r, 1500));
-      }
-      toast({ title: "Importação Ativos concluída", description: "Processos criados a partir da planilha. O DataJud enriquece a capa em segundo plano." });
-      if (aba === "processos") loadProcessos();
-    } catch (e) {
-      toast({ title: "Erro na importação", description: String((e as Error).message), variant: "destructive" });
-    } finally {
-      setAtivosImportando(false);
-    }
-  };
 
   const exportarExcel = async () => {
     setExportando(true);
@@ -462,15 +434,7 @@ export default function DistribuidosBBPage() {
             <FolderPlus className="mr-2 h-4 w-4" />
             Pasta avulsa
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              setAtivosFile(null);
-              setAtivosLote(null);
-              setAtivosOpen(true);
-            }}
-          >
+          <Button variant="outline" size="sm" onClick={() => setAtivosOpen(true)}>
             <Upload className="mr-2 h-4 w-4" />
             Importar lista (Ativos)
           </Button>
@@ -1307,65 +1271,12 @@ export default function DistribuidosBBPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Importar lista seca (Ativos) → DataJud */}
-      <Dialog open={ativosOpen} onOpenChange={(o) => !ativosImportando && setAtivosOpen(o)}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Upload className="h-5 w-5 text-violet-600" />
-              Importar lista de processos — Ativos
-            </DialogTitle>
-            <DialogDescription>
-              Suba a planilha da Ativos. Lemos a aba <strong>PARA CADASTRO</strong> (a aba JÁ CADASTRADO
-              é ignorada) e criamos os processos direto com os dados dela — CNJ, UF, data e a parte
-              quando vier. A classe/assunto/órgão vêm do <strong>DataJud em segundo plano</strong>
-              (reconsulta os recém-distribuídos que ainda não indexaram). Valor da causa é manual.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3">
-            <Input
-              type="file"
-              accept=".xlsx,.xls,.csv,.txt"
-              onChange={(e) => setAtivosFile(e.target.files?.[0] ?? null)}
-              disabled={ativosImportando}
-            />
-            {ativosLote && (
-              <div className="rounded-md border p-3 text-sm">
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="font-medium">
-                    {ativosLote.processados} de {ativosLote.total} processados
-                  </span>
-                  <span className="text-xs text-muted-foreground">
-                    {ativosLote.status === "EM_ANDAMENTO" ? "em andamento…" : ativosLote.status.toLowerCase()}
-                  </span>
-                </div>
-                <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-                  <div
-                    className="h-full bg-violet-500 transition-all"
-                    style={{
-                      width: `${ativosLote.total ? (ativosLote.processados / ativosLote.total) * 100 : 0}%`,
-                    }}
-                  />
-                </div>
-                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                  <span className="text-emerald-700">{ativosLote.criados} criado(s)</span>
-                  <span className="text-amber-700">{ativosLote.duplicados} já cadastrado / repetido</span>
-                  {ativosLote.invalidos > 0 && <span className="text-rose-600">{ativosLote.invalidos} inválido(s)</span>}
-                </div>
-              </div>
-            )}
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" size="sm" onClick={() => setAtivosOpen(false)} disabled={ativosImportando}>
-                Fechar
-              </Button>
-              <Button size="sm" onClick={importarAtivosLista} disabled={!ativosFile || ativosImportando}>
-                {ativosImportando ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
-                Importar planilha
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
+      {/* Importar lista (Ativos) — dialog reusável (mesmo do Acompanhamento) */}
+      <ImportarAtivosDialog
+        open={ativosOpen}
+        onOpenChange={setAtivosOpen}
+        onDone={() => { if (aba === "processos") loadProcessos(); }}
+      />
 
       {/* Pasta avulsa (criação manual → cadastro imediato no L1) */}
       <PastaAvulsaDialog open={avulsaOpen} onOpenChange={setAvulsaOpen} onCreated={loadProcessos} />
