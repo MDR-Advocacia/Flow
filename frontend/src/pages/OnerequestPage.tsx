@@ -112,6 +112,7 @@ import {
   OnerequestSolicitacao,
   StatusL1,
   Sugestao,
+  syncFonte,
   updateTratamento,
   verificarProcessoL1,
   verificarStatusL1,
@@ -518,6 +519,20 @@ export default function OnerequestPage() {
 
   useEffect(() => {
     load();
+  }, [load]);
+
+  // Ao abrir a página, espelha o Postgres da fonte (RPA) em 2º plano — o
+  // backend tem throttle de 3 min, então N operadores abrindo em sequência não
+  // martelam a fonte. Se o sync realmente rodou, recarrega a lista já fresca.
+  const syncFonteDisparado = useRef(false);
+  useEffect(() => {
+    if (syncFonteDisparado.current) return;
+    syncFonteDisparado.current = true;
+    syncFonte()
+      .then((r) => {
+        if (r.executado) load();
+      })
+      .catch(() => {});
   }, [load]);
 
   // Auto-verificação no L1: sempre que a listagem carrega, checa em 2º plano
