@@ -522,6 +522,146 @@ def detalhe_planilha(
     return res
 
 
+# ── Acompanhamento Réu/Autor (vínculos da parte com o MDR) ───────────────────
+
+@router.get("/vinculos/painel", summary="Painel Acompanhamento Réu/Autor: processos com vínculos ativos do MDR")
+def painel_vinculos(
+    cenario: Optional[str] = Query(None, description="CENARIO_1 | CENARIO_2"),
+    transicao: Optional[str] = Query(None, description="'pendente' filtra quem ainda tem transição em aberto"),
+    busca: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.models.distribuidos_bb import BbProcesso, BbVinculo
+
+    base = db.query(BbProcesso).filter(BbProcesso.vinculo_cenario.isnot(None))
+    if cenario:
+        base = base.filter(BbProcesso.vinculo_cenario == cenario)
+    if transicao == "pendente":
+        base = base.filter(
+            db.query(BbVinculo.id)
+            .filter(BbVinculo.processo_id == BbProcesso.id, BbVinculo.transicao_pendente.is_(True))
+            .exists()
+        )
+    if busca:
+        like = f"%{busca.strip()}%"
+        base = base.filter(
+            BbProcesso.cnj.ilike(like)
+            | BbProcesso.npj.ilike(like)
+            | BbProcesso.adverso_principal.ilike(like)
+        )
+
+    total = base.count()
+    rows = base.order_by(BbProcesso.id.desc()).limit(limit).offset(offset).all()
+
+    ids = [p.id for p in rows]
+    vincs: dict[int, list] = {}
+    if ids:
+        for v in (
+            db.query(BbVinculo)
+            .filter(BbVinculo.processo_id.in_(ids))
+            .order_by(BbVinculo.id)
+            .all()
+        ):
+            vincs.setdefault(v.processo_id, []).append(v)
+
+    resp_ids = {p.responsavel_user_id for p in rows if p.responsavel_user_id}
+    nomes = dict(
+        db.query(LegalOneUser.id, LegalOneUser.name)
+        .filter(LegalOneUser.id.in_(resp_ids or {0}))
+        .all()
+    )
+
+    def _v_dto(v) -> dict[str, Any]:
+        return {
+            "id": v.id,
+            "npj": v.npj,
+            "cnj": v.cnj,
+            "contrario_nome": v.contrario_nome,
+            "advogado_bb": v.advogado_bb,
+            "situacao": v.situacao,
+            "natureza": v.natureza,
+            "polo": v.polo,
+            "posicao_banco": v.posicao_banco,
+            "l1_lawsuit_id": v.l1_lawsuit_id,
+            "l1_folder": v.l1_folder,
+            "responsavel_atual_nome": v.responsavel_atual_nome,
+            "na_equipe_mista": v.na_equipe_mista,
+            "transicao_pendente": v.transicao_pendente,
+            "transicao_concluida_em": v.transicao_concluida_em.isoformat() if v.transicao_concluida_em else None,
+            "nome_parte": v.nome_parte,
+            "doc_parte": v.doc_parte,
+        }
+
+    itens = []
+    for p in rows:
+        itens.append({
+            "processo_id": p.id,
+            "cliente": p.cliente,
+            "cnj": p.cnj,
+            "npj": p.npj,
+            "posicao": p.posicao,
+            "natureza": p.natureza,
+            "adverso_principal": p.adverso_principal,
+            "responsavel_nome": nomes.get(p.responsavel_user_id),
+            "l1_lawsuit_id": p.l1_lawsuit_id,
+            "l1_folder": p.l1_folder,
+            "escritorio_path": p.escritorio_path,
+            "valor_causa": float(p.valor_causa) if p.valor_causa is not None else None,
+            "cenario": p.vinculo_cenario,
+            "vinculos_qtd": p.vinculos_qtd,
+            "verificado_em": p.vinculos_verificado_em.isoformat() if p.vinculos_verificado_em else None,
+            "criado_em": p.created_at.isoformat() if p.created_at else None,
+            "vinculos": [_v_dto(v) for v in vincs.get(p.id, [])],
+        })
+
+    todos = db.query(BbProcesso).filter(BbProcesso.vinculo_cenario.isnot(None))
+    kpis = {
+        "total": todos.count(),
+        "cenario_1": todos.filter(BbProcesso.vinculo_cenario == "CENARIO_1").count(),
+        "cenario_2": todos.filter(BbProcesso.vinculo_cenario == "CENARIO_2").count(),
+        "transicoes_pendentes": db.query(BbVinculo).filter(BbVinculo.transicao_pendente.is_(True)).count(),
+    }
+    return {"total": total, "items": itens, "kpis": kpis}
+
+
+@router.post("/vinculos/{vinculo_id}/transicao", summary="Marca/desmarca a transição do processo antigo como concluída")
+def marcar_transicao_vinculo(
+    vinculo_id: int,
+    concluida: bool = Query(True),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from datetime import datetime, timezone
+
+    from app.models.distribuidos_bb import BbVinculo
+
+    v = db.get(BbVinculo, vinculo_id)
+    if v is None:
+        raise HTTPException(status_code=404, detail="Vínculo não encontrado.")
+    if concluida:
+        v.transicao_pendente = False
+        v.transicao_concluida_em = datetime.now(timezone.utc)
+    else:
+        v.transicao_pendente = True
+        v.transicao_concluida_em = None
+    registrar_evento(
+        db, secao=SECAO_CONFIGURACAO, acao="Transição de vínculo",
+        mensagem=(
+            f"Transição do processo {v.npj} marcada como "
+            + ("CONCLUÍDA" if concluida else "pendente novamente")
+            + f" por {current_user.name}."
+        ),
+        processo_id=v.processo_id,
+    )
+    db.commit()
+    return {"ok": True, "vinculo_id": v.id, "transicao_pendente": v.transicao_pendente}
+
+
 @router.post("/monitor-cadastro/verificar", summary="Roda o monitor de cadastro no L1 agora (manual)")
 def verificar_cadastro_agora(
     db: Session = Depends(get_db),

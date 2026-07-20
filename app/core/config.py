@@ -410,6 +410,13 @@ class Settings(BaseSettings):
     distribuidos_bb_monitor_cadastro_ativo: bool = True
     distribuidos_bb_monitor_intervalo_min: int = 2
 
+    # Vínculos: pesquisa no portal BB, por parte do processo capturado, as OUTRAS
+    # ações ativas conduzidas pelo MDR — decide a distribuição especializada
+    # (Equipe Mista) e alimenta o painel Acompanhamento Réu/Autor.
+    distribuidos_bb_vinculos_ativo: bool = True
+    # Base dos endpoints JSON do PAJ (mesma origem do portal).
+    distribuidos_bb_paj_base: str = "https://juridico.bb.com.br/paj"
+
 
     # Cadastro 100% automático: ao fim de uma coleta com processos distribuídos,
     # gera a planilha e importa no L1 (cria as pastas + dispara o workflow) sem

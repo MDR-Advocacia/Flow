@@ -40,6 +40,7 @@ from app.models.distribuidos_bb import (
     SECAO_CADASTRO,
     SECAO_CIENCIA,
     SECAO_COLETA,
+    SECAO_DISTRIBUICAO,
     SECAO_ENVOLVIDOS,
     SECAO_EXTRACAO,
     SECAO_PLANILHA,
@@ -241,7 +242,25 @@ def _processar_notificacao(
             processo_id=proc.id, run_id=run.id,
         )
 
-    distribuir_processo(db, proc, run_id=run.id)
+    # Vínculos: a parte tem OUTRAS ações ativas conduzidas pelo MDR? Se sim, o
+    # responsável vem da equipe especializada (o escritório segue o padrão).
+    # Best-effort: falha aqui NUNCA derruba a coleta — segue o rodízio normal.
+    responsavel_override = None
+    if settings.distribuidos_bb_vinculos_ativo:
+        try:
+            from app.services.distribuidos_bb.vinculos_service import pesquisar_e_decidir
+
+            decisao = pesquisar_e_decidir(db, run, proc, portal)
+            responsavel_override = decisao.get("responsavel_override_id")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Vínculos: pesquisa falhou (proc %s).", proc.id)
+            registrar_evento(
+                db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_AVISO, acao="Vínculos indisponíveis",
+                mensagem=f"Pesquisa de vínculos falhou ({exc}); processo seguiu o rodízio padrão.",
+                processo_id=proc.id, run_id=run.id,
+            )
+
+    distribuir_processo(db, proc, run_id=run.id, responsavel_override_id=responsavel_override)
     if proc.responsavel_user_id:
         run.total_distribuidos += 1
     db.commit()

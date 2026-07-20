@@ -21,6 +21,7 @@ import {
   Database,
   FileText,
   Gauge,
+  Layers,
   type LucideIcon,
   RefreshCw,
   Search,
@@ -60,6 +61,8 @@ import RelatoriosSection from "@/components/performance/RelatoriosSection";
 import RosterEditor from "@/components/performance/RosterEditor";
 import BalanceadorSection from "@/components/performance/BalanceadorSection";
 import RedistribuicoesLog from "@/components/balanceador/RedistribuicoesLog";
+import AcompanhamentoVinculosTab from "@/components/distribuidos-bb/AcompanhamentoVinculosTab";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/hooks/useAuth";
 import {
   CommandDialog,
@@ -192,6 +195,9 @@ export default function MinhaEquipePage() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [rosterOpen, setRosterOpen] = useState(false);
+  // Equipe Mista tem uma aba extra com a base de processos vinculados.
+  const ehMista = team === "equipe-mista";
+  const [abaMista, setAbaMista] = useState<"desempenho" | "base">("desempenho");
 
   useEffect(() => {
     getCargos(team).then(setCargos).catch(() => undefined);
@@ -350,6 +356,34 @@ export default function MinhaEquipePage() {
         </div>
       </div>
 
+      {/* Equipe Mista: além do desempenho padrão, uma aba com a BASE identificada
+          (processos vinculados que a equipe conduz). Nos demais times, render direto. */}
+      {ehMista ? (
+        <Tabs value={abaMista} onValueChange={(v) => setAbaMista(v as "desempenho" | "base")}>
+          <TabsList>
+            <TabsTrigger value="desempenho">
+              <Gauge className="mr-1.5 h-4 w-4" /> Desempenho
+            </TabsTrigger>
+            <TabsTrigger value="base">
+              <Layers className="mr-1.5 h-4 w-4" /> Base identificada
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
+      ) : null}
+
+      {ehMista && abaMista === "base" && (
+        <div className="space-y-3">
+          <p className="text-sm text-muted-foreground">
+            Processos que a Equipe Mista conduz por <strong>vínculo da parte</strong> — a mesma
+            pessoa/empresa tem mais de uma ação ativa com o escritório. A base cresce com a
+            captura diária e com o estoque distribuído por dentro do Legal One.
+          </p>
+          <AcompanhamentoVinculosTab />
+        </div>
+      )}
+
+      {(!ehMista || abaMista === "desempenho") && (
+      <>
       <CollapsibleSection title="Desempenho da equipe" subtitle={`Últimos ${days} dias`}>
       {/* KPIs */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
@@ -479,6 +513,8 @@ export default function MinhaEquipePage() {
         <RelatoriosSection reloadKey={relReloadKey} />
         <RedistribuicoesLog team={team} reloadKey={relReloadKey} />
       </CollapsibleSection>
+      </>
+      )}
 
       <CommandDialog open={buscaOpen} onOpenChange={setBuscaOpen}>
         <CommandInput placeholder="Buscar pessoa pelo nome…" />

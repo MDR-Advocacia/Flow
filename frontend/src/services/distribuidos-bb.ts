@@ -744,3 +744,66 @@ export interface PastaAvulsaResultado {
 export async function criarPastaAvulsa(payload: PastaAvulsaPayload): Promise<PastaAvulsaResultado> {
   return json(await apiFetch(`${BASE}/processos/avulso`, { method: "POST", body: JSON.stringify(payload) }));
 }
+
+// ── Acompanhamento Réu/Autor (vínculos da parte com o MDR) ─────────────────
+export interface VinculoItem {
+  id: number;
+  npj: string;
+  cnj: string | null;
+  contrario_nome: string | null;
+  advogado_bb: string | null;
+  situacao: string | null;
+  natureza: string | null;
+  polo: string | null;
+  posicao_banco: string | null;
+  l1_lawsuit_id: number | null;
+  l1_folder: string | null;
+  responsavel_atual_nome: string | null;
+  na_equipe_mista: boolean;
+  transicao_pendente: boolean;
+  transicao_concluida_em: string | null;
+  nome_parte: string | null;
+  doc_parte: string | null;
+}
+export interface PainelVinculoItem {
+  processo_id: number;
+  cliente: string;
+  cnj: string | null;
+  npj: string | null;
+  posicao: string | null;
+  natureza: string | null;
+  adverso_principal: string | null;
+  responsavel_nome: string | null;
+  l1_lawsuit_id: number | null;
+  l1_folder: string | null;
+  escritorio_path: string | null;
+  valor_causa: number | null;
+  cenario: string;
+  vinculos_qtd: number;
+  verificado_em: string | null;
+  criado_em: string | null;
+  vinculos: VinculoItem[];
+}
+export interface PainelVinculos {
+  total: number;
+  items: PainelVinculoItem[];
+  kpis: { total: number; cenario_1: number; cenario_2: number; transicoes_pendentes: number };
+}
+export async function listarPainelVinculos(params: {
+  cenario?: string;
+  transicao?: string;
+  busca?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<PainelVinculos> {
+  const qs = new URLSearchParams();
+  if (params.cenario) qs.set("cenario", params.cenario);
+  if (params.transicao) qs.set("transicao", params.transicao);
+  if (params.busca) qs.set("busca", params.busca);
+  qs.set("limit", String(params.limit ?? 50));
+  qs.set("offset", String(params.offset ?? 0));
+  return json(await apiFetch(`${BASE}/vinculos/painel?${qs.toString()}`));
+}
+export async function marcarTransicaoVinculo(vinculoId: number, concluida: boolean): Promise<{ ok: boolean }> {
+  return json(await apiFetch(`${BASE}/vinculos/${vinculoId}/transicao?concluida=${concluida}`, { method: "POST" }));
+}

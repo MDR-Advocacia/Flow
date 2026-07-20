@@ -14,7 +14,9 @@ import {
   ScrollText,
   Search,
   Upload,
+  Users,
 } from "lucide-react";
+import AcompanhamentoVinculosTab from "@/components/distribuidos-bb/AcompanhamentoVinculosTab";
 import ImportarAtivosDialog from "@/components/distribuidos-bb/ImportarAtivosDialog";
 import PastaAvulsaDialog from "@/components/distribuidos-bb/PastaAvulsaDialog";
 import { Card, CardContent } from "@/components/ui/card";
@@ -142,7 +144,7 @@ export default function DistribuidosBBPage() {
   const { toast } = useToast();
   const [searchParams] = useSearchParams();
 
-  const [aba, setAba] = useState<"processos" | "log" | "planilhas">("processos");
+  const [aba, setAba] = useState<"processos" | "log" | "planilhas" | "vinculos">("processos");
   const [baixando, setBaixando] = useState(false);
 
   const gerarPlanilha = async () => {
@@ -448,10 +450,13 @@ export default function DistribuidosBBPage() {
         </div>
       </div>
 
-      <Tabs value={aba} onValueChange={(v) => setAba(v as "processos" | "log" | "planilhas")}>
+      <Tabs value={aba} onValueChange={(v) => setAba(v as "processos" | "log" | "planilhas" | "vinculos")}>
         <TabsList>
           <TabsTrigger value="processos">
             <FileText className="mr-1.5 h-4 w-4" /> Processos
+          </TabsTrigger>
+          <TabsTrigger value="vinculos">
+            <Users className="mr-1.5 h-4 w-4" /> Acompanhamento Réu/Autor
           </TabsTrigger>
           <TabsTrigger value="planilhas">
             <History className="mr-1.5 h-4 w-4" /> Planilhas
@@ -466,6 +471,8 @@ export default function DistribuidosBBPage() {
           </TabsTrigger>
         </TabsList>
       </Tabs>
+
+      {aba === "vinculos" && <AcompanhamentoVinculosTab />}
 
       {aba === "processos" && (
         <>

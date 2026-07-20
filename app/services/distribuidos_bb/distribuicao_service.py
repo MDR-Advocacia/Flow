@@ -177,8 +177,16 @@ def _proximo_grupo_ajuizamento(db: Session) -> Optional[int]:
     return grupos[proximo].id
 
 
-def distribuir_processo(db: Session, processo: BbProcesso, *, run_id: Optional[int] = None) -> BbProcesso:
+def distribuir_processo(
+    db: Session, processo: BbProcesso, *,
+    run_id: Optional[int] = None,
+    responsavel_override_id: Optional[int] = None,
+) -> BbProcesso:
     """Define escritório, responsável (fixo ou round-robin) e observação.
+
+    `responsavel_override_id` (vínculos → equipe especializada) força o
+    responsável SEM consumir o rodízio do escritório padrão — o escritório e a
+    observação seguem a distribuição normal.
 
     Muta o `processo` e registra eventos de auditoria. Não commita.
     """
@@ -199,8 +207,11 @@ def distribuir_processo(db: Session, processo: BbProcesso, *, run_id: Optional[i
         )
         return processo
 
-    # Responsável: fixo do escritório, senão round-robin
-    if escritorio.responsavel_fixo_user_id:
+    # Responsável: override da equipe especializada (vínculos) > fixo > round-robin
+    if responsavel_override_id:
+        responsavel_id = responsavel_override_id
+        modo = "equipe especializada (vínculos)"
+    elif escritorio.responsavel_fixo_user_id:
         responsavel_id = escritorio.responsavel_fixo_user_id
         modo = "responsável fixo"
     else:

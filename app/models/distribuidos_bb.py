@@ -92,6 +92,18 @@ CLIENTE_OUTRO = "OUTRO"
 # das linhas vêm preenchidas). O operador completa depois.
 PARTE_A_CLASSIFICAR = "À CLASSIFICAR"
 
+# Vínculos (processos em comum da parte com o BB, conduzidos pelo MDR):
+#   CENARIO_1 = a parte tinha processo(s) conosco FORA da equipe especializada —
+#     o novo vai pra Equipe Mista e os antigos ficam sinalizados no painel pra
+#     transição manual pelo supervisor;
+#   CENARIO_2 = a parte já é tratada pela equipe especializada — o novo vai pro
+#     MESMO responsável que já cuida dos processos dela.
+VINCULO_CENARIO_1 = "CENARIO_1"
+VINCULO_CENARIO_2 = "CENARIO_2"
+# Nome do escritório-fila da equipe especializada (só fila de responsáveis; o
+# escritório responsável do processo segue a distribuição padrão Réu/Autor).
+EQUIPE_MISTA_NOME = "Equipe Mista Especializada"
+
 # Status da consulta DataJud (Ativos) — feita UMA vez, na ingestão (sem worker
 # recorrente depois, por decisão do operador):
 #   OK = capa encontrada e aplicada; SEM_CAPA = não achou (segue com a planilha).
@@ -347,6 +359,11 @@ class BbProcesso(Base):
     l1_verificado_em = Column(DateTime(timezone=True), nullable=True)
     l1_folder = Column(String(40), nullable=True)
 
+    # Vínculos da parte (processos em comum com o MDR no portal BB)
+    vinculo_cenario = Column(String(12), nullable=True, index=True)  # CENARIO_1 | CENARIO_2 | None
+    vinculos_qtd = Column(Integer, nullable=False, server_default="0")
+    vinculos_verificado_em = Column(DateTime(timezone=True), nullable=True)
+
     # Enriquecimento DataJud (Ativos): a planilha é a fonte primária; o DataJud
     # complementa de forma ASSÍNCRONA (reconsulta os pendentes, pois o processo
     # recém-distribuído pode ainda não estar indexado na base pública).
@@ -396,6 +413,68 @@ class BbEnvolvido(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
 
     processo = relationship("BbProcesso", back_populates="envolvidos")
+
+
+class BbVinculo(Base):
+    """Um processo EXISTENTE no portal BB em que a parte do processo capturado
+    também é parte — ativo e conduzido pelo MDR (vínculo confirmado).
+
+    Alimenta o painel "Acompanhamento Réu/Autor" e a distribuição especializada.
+    `transicao_pendente` marca o cenário 1: o processo antigo ainda está com o
+    responsável original e o supervisor precisa conduzir a transição manual.
+    """
+
+    __tablename__ = "bbd_vinculos"
+
+    id = Column(Integer, primary_key=True, index=True)
+    processo_id = Column(
+        Integer, ForeignKey("bbd_processos.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    envolvido_id = Column(
+        Integer, ForeignKey("bbd_envolvidos.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+
+    # Parte pesquisada
+    doc_parte = Column(String(20), nullable=True, index=True)
+    nome_parte = Column(Text, nullable=True)
+    numero_pessoa = Column(Integer, nullable=True)
+
+    # O processo vinculado (como veio do portal)
+    npj = Column(String(30), nullable=False, index=True)   # 2024/0323492-000
+    numero_processo = Column(String(20), nullable=True)    # 20240323492 (cru)
+    cnj = Column(String(30), nullable=True, index=True)    # dígitos, quando houver
+    contrario_nome = Column(Text, nullable=True)
+    advogado_bb = Column(String(120), nullable=True)
+    situacao = Column(String(60), nullable=True)           # Distribuído, Cumprimento…
+    natureza = Column(String(40), nullable=True)
+    uja = Column(Integer, nullable=True)
+    polo = Column(String(10), nullable=True)               # Ativo | Passivo (lado do banco)
+    posicao_banco = Column(String(10), nullable=True)      # Autor | Réu
+
+    # Pasta no Legal One, quando o vinculado também está na nossa base (casado
+    # por CNJ/NPJ) — dá o link direto pro processo no L1 a partir do painel.
+    l1_lawsuit_id = Column(Integer, nullable=True, index=True)
+    l1_folder = Column(String(40), nullable=True)
+
+    # Situação da condução interna (pra decidir cenário 1 × 2)
+    responsavel_atual_user_id = Column(
+        Integer, ForeignKey("legal_one_users.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    responsavel_atual_nome = Column(String(160), nullable=True)
+    na_equipe_mista = Column(Boolean, nullable=False, server_default="false")
+    # Cenário 1: antigo aguardando a transição manual pro especializado
+    transicao_pendente = Column(Boolean, nullable=False, server_default="false", index=True)
+    transicao_concluida_em = Column(DateTime(timezone=True), nullable=True)
+
+    raw = Column(jsonb(), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+    processo = relationship("BbProcesso", foreign_keys=[processo_id])
+    responsavel_atual = relationship("LegalOneUser", foreign_keys=[responsavel_atual_user_id])
 
 
 class BbEvento(Base):

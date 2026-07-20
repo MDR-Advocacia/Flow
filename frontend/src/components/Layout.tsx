@@ -160,7 +160,7 @@ export default function Layout({ children }: PropsWithChildren) {
     },
     {
       title: "Minha Equipe",
-      subgroups: ["Contencioso Passivo", "Recuperação de Crédito"].map((grupo) => ({
+      subgroups: ["Contencioso Passivo", "Recuperação de Crédito", "Especializada"].map((grupo) => ({
         title: grupo,
         items: TEAMS.filter((t) => t.grupo === grupo).map((t) => ({
           to: `/minha-equipe/${t.key}`,

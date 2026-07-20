@@ -65,6 +65,7 @@ const EQUIPES = [
   { key: "autor-recursal", label: "Autor — Recursal" },
   { key: "ajuizamento", label: "Ajuizamento" },
   { key: "estrategico-autor", label: "Estratégico Autor" },
+  { key: "equipe-mista", label: "Equipe Mista" },
 ] as const;
 
 // --- Tipos de Dados ---

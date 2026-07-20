@@ -105,6 +105,9 @@ class PortalBBColetor:
         from playwright.sync_api import sync_playwright
 
         sessao = self.onelog.obter_sessao()
+        # Guardada pra reuso fora do navegador (pesquisa de vínculos via HTTP
+        # direto usa a MESMA sessão autenticada, sem novo login no OneLog).
+        self.sessao_onelog = sessao
         cookies = _formatar_cookies(sessao.get("cookies", []))
         if not cookies:
             raise RuntimeError("OneLog não devolveu cookies válidos para injetar no navegador.")

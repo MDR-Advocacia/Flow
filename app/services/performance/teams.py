@@ -21,6 +21,9 @@ TEAMS = [
     {"key": "autor-recursal", "label": "Autor — Recursal"},
     {"key": "ajuizamento", "label": "Ajuizamento"},
     {"key": "estrategico-autor", "label": "Estratégico Autor"},
+    # Especializada — atende Réu e Autor da MESMA parte (processos vinculados),
+    # por isso não entra em nenhum dos dois grupos. 2026-07-20.
+    {"key": "equipe-mista", "label": "Equipe Mista"},
 ]
 
 TEAM_KEYS = {t["key"] for t in TEAMS}

@@ -3,6 +3,9 @@
 
 export const GRUPO_PASSIVO = "Contencioso Passivo";
 export const GRUPO_CREDITO = "Recuperação de Crédito";
+// A Equipe Mista atende Réu E Autor da mesma parte (processos vinculados),
+// então tem grupo próprio em vez de forçar um dos dois lados.
+export const GRUPO_ESPECIALIZADA = "Especializada";
 
 export const TEAMS = [
   { key: "bb-reu", label: "BB Réu", grupo: GRUPO_PASSIVO },
@@ -18,6 +21,7 @@ export const TEAMS = [
   { key: "autor-recursal", label: "Autor — Recursal", grupo: GRUPO_CREDITO },
   { key: "ajuizamento", label: "Ajuizamento", grupo: GRUPO_CREDITO },
   { key: "estrategico-autor", label: "Estratégico Autor", grupo: GRUPO_CREDITO },
+  { key: "equipe-mista", label: "Equipe Mista", grupo: GRUPO_ESPECIALIZADA },
 ] as const;
 
 export const TEAM_KEYS = TEAMS.map((t) => t.key);
