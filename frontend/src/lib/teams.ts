@@ -12,7 +12,6 @@ export const TEAMS = [
   { key: "bb-execucao", label: "BB Execução & Encerramento", grupo: GRUPO_PASSIVO },
   { key: "bb-acordos", label: "BB Acordos", grupo: GRUPO_PASSIVO },
   { key: "bb-estrategico", label: "BB Estratégico", grupo: GRUPO_PASSIVO },
-  { key: "bb-cadastro", label: "BB Cadastro", grupo: GRUPO_PASSIVO },
   { key: "master-reu", label: "Master Réu", grupo: GRUPO_PASSIVO },
   { key: "ativos-reu", label: "Ativos Réu", grupo: GRUPO_PASSIVO },
   { key: "trabalhista", label: "Trabalhista", grupo: GRUPO_PASSIVO },
@@ -22,6 +21,9 @@ export const TEAMS = [
   { key: "ajuizamento", label: "Ajuizamento", grupo: GRUPO_CREDITO },
   { key: "estrategico-autor", label: "Estratégico Autor", grupo: GRUPO_CREDITO },
   { key: "equipe-mista", label: "Equipe Mista", grupo: GRUPO_ESPECIALIZADA },
+  // Controladoria — sucede o antigo "BB Cadastro" (perfil extinto em 2026-07-20).
+  // Key preservada de propósito: ver comentário em performance/teams.py.
+  { key: "bb-cadastro", label: "Controladoria", grupo: GRUPO_ESPECIALIZADA },
 ] as const;
 
 export const TEAM_KEYS = TEAMS.map((t) => t.key);

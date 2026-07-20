@@ -56,7 +56,6 @@ const EQUIPES = [
   { key: "bb-execucao", label: "BB Execução & Encerramento" },
   { key: "bb-acordos", label: "BB Acordos" },
   { key: "bb-estrategico", label: "BB Estratégico" },
-  { key: "bb-cadastro", label: "BB Cadastro" },
   { key: "master-reu", label: "Master Réu" },
   { key: "ativos-reu", label: "Ativos Réu" },
   { key: "trabalhista", label: "Trabalhista" },
@@ -66,6 +65,7 @@ const EQUIPES = [
   { key: "ajuizamento", label: "Ajuizamento" },
   { key: "estrategico-autor", label: "Estratégico Autor" },
   { key: "equipe-mista", label: "Equipe Mista" },
+  { key: "bb-cadastro", label: "Controladoria" },
 ] as const;
 
 // --- Tipos de Dados ---

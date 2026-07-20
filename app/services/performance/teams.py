@@ -11,7 +11,6 @@ TEAMS = [
     {"key": "bb-execucao", "label": "BB Execução & Encerramento"},
     {"key": "bb-acordos", "label": "BB Acordos"},
     {"key": "bb-estrategico", "label": "BB Estratégico"},
-    {"key": "bb-cadastro", "label": "BB Cadastro"},
     {"key": "master-reu", "label": "Master Réu"},
     {"key": "ativos-reu", "label": "Ativos Réu"},
     {"key": "trabalhista", "label": "Trabalhista"},
@@ -24,6 +23,11 @@ TEAMS = [
     # Especializada — atende Réu e Autor da MESMA parte (processos vinculados),
     # por isso não entra em nenhum dos dois grupos. 2026-07-20.
     {"key": "equipe-mista", "label": "Equipe Mista"},
+    # Controladoria — sucede o antigo "BB Cadastro" (perfil extinto em 2026-07-20).
+    # Mantém a MESMA key `bb-cadastro`: as permissões já concedidas (CSV em
+    # legal_one_users.minha_equipe_equipes) e as tarefas históricas apontam pra
+    # ela; trocar o slug revogaria acesso silenciosamente e órfãos os dados.
+    {"key": "bb-cadastro", "label": "Controladoria"},
 ]
 
 TEAM_KEYS = {t["key"] for t in TEAMS}
