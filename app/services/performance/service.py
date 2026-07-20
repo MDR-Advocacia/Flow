@@ -979,3 +979,53 @@ class PerformanceService:
         self.db.delete(p)
         self.db.commit()
         return {"id": pessoa_id, "excluido": True}
+
+    def atrasadas_por_tipo(self, pessoa_id: int, escopo: str = "atrasado") -> dict | None:
+        """Quebra por subtipo do pool de uma pessoa — alimenta a pizza do painel.
+
+        `escopo`: "atrasado" (Pendente com prazo vencido) ou "pendente" (todo o
+        pool aberto). A definição de atrasado é a MESMA do gráfico de barras
+        (`dashboard`): status='Pendente' AND prazo_previsto < now() — se
+        divergir, a pizza não fecha com a barra que o operador clicou.
+        """
+        p = self.db.execute(
+            text("SELECT id, nome, cargo FROM perf_pessoa WHERE id = :id"),
+            {"id": pessoa_id},
+        ).fetchone()
+        if not p:
+            return None
+
+        filtro = "AND t.prazo_previsto < now()" if escopo == "atrasado" else ""
+        linhas = self.db.execute(
+            text(
+                f"""
+                SELECT COALESCE(NULLIF(t.subtipo, ''), '(sem subtipo)') AS subtipo,
+                       COALESCE(c.categoria, 'profundo') AS categoria,
+                       COUNT(*) AS total,
+                       MIN(t.prazo_previsto) AS mais_antigo
+                FROM perf_l1_tarefa t
+                LEFT JOIN perf_subtipo_categoria c ON c.subtipo = t.subtipo
+                WHERE t.pessoa_id = :id AND t.status = 'Pendente' {filtro}
+                GROUP BY 1, 2
+                ORDER BY total DESC
+                """
+            ),
+            {"id": pessoa_id},
+        ).fetchall()
+
+        itens = [
+            {
+                "subtipo": r.subtipo,
+                "categoria": r.categoria,
+                "total": int(r.total),
+                "mais_antigo": r.mais_antigo.isoformat() if r.mais_antigo else None,
+            }
+            for r in linhas
+        ]
+        return {
+            "pessoa": {"id": p.id, "nome": p.nome, "cargo": p.cargo},
+            "escopo": escopo,
+            "total": sum(i["total"] for i in itens),
+            "itens": itens,
+        }
+

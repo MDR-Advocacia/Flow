@@ -206,6 +206,31 @@ export async function getSubtipoDetalhe(team: string, subtipo: string, days = 30
   return json(await apiFetch(`${BASE}/subtipo-detalhe?${qs.toString()}`));
 }
 
+// Quebra por subtipo do pool de uma pessoa — alimenta a pizza do "Pool pendente".
+// O total bate com a barra clicada (mesma definição de atrasado no backend).
+export interface PoolPorTipoItem {
+  subtipo: string;
+  categoria: string;
+  total: number;
+  mais_antigo: string | null;
+}
+
+export interface PoolPorTipo {
+  pessoa: { id: number; nome: string; cargo: string | null };
+  escopo: "atrasado" | "pendente";
+  total: number;
+  itens: PoolPorTipoItem[];
+}
+
+export async function getPoolPorTipo(
+  team: string,
+  pessoaId: number,
+  escopo: "atrasado" | "pendente" = "atrasado",
+): Promise<PoolPorTipo> {
+  const qs = new URLSearchParams({ team, escopo });
+  return json(await apiFetch(`${BASE}/pessoa/${pessoaId}/atrasadas-por-tipo?${qs.toString()}`));
+}
+
 // Preview de duplicadas (mesma pasta + mesmo subtipo): mantém a mais antiga.
 export interface DupTarefa {
   task_id: number;

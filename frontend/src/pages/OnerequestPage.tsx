@@ -1641,14 +1641,18 @@ export default function OnerequestPage() {
 
       {/* Modal de tratamento */}
       <Dialog open={!!selected} onOpenChange={(o) => !o && closeModal()}>
-        <DialogContent className="max-h-[92vh] max-w-5xl overflow-y-auto overflow-x-hidden">
+        {/* flex-col + overflow-hidden: só o MIOLO rola. Header e footer ficam
+            fixos — senão o texto longo da DMI empurra os botões de agendamento
+            pra fora da tela. */}
+        <DialogContent className="flex max-h-[92vh] max-w-5xl flex-col overflow-hidden">
           {selected && (
             <>
-              <DialogHeader>
+              <DialogHeader className="shrink-0">
                 <DialogTitle className="font-mono text-base">DMI {selected.numero_solicitacao}</DialogTitle>
                 <DialogDescription>{selected.titulo ?? "Sem título"}</DialogDescription>
               </DialogHeader>
 
+              <div className="-mr-2 min-h-0 flex-1 space-y-4 overflow-y-auto overflow-x-hidden pr-2">
               <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
                 <div><span className="text-muted-foreground">NPJ:</span> {selected.npj_direcionador ?? "—"}</div>
                 <div><span className="text-muted-foreground">Polo:</span> {selected.polo ?? "—"}</div>
@@ -1660,7 +1664,7 @@ export default function OnerequestPage() {
               {selected.texto_dmi && (
                 <div>
                   <Label className="text-xs text-muted-foreground">Conteúdo da DMI</Label>
-                  <div className="mt-1 max-h-[55vh] min-h-[8rem] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted p-3 text-sm leading-relaxed">
+                  <div className="mt-1 max-h-[28vh] min-h-[6rem] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted p-3 text-sm leading-relaxed">
                     {selected.texto_dmi}
                   </div>
                 </div>
@@ -1837,8 +1841,9 @@ export default function OnerequestPage() {
                   <span>{selected.last_error}</span>
                 </div>
               )}
+              </div>
 
-              <DialogFooter className="gap-2 sm:justify-between">
+              <DialogFooter className="shrink-0 gap-2 border-t pt-3 sm:justify-between">
                 <Button variant="ghost" onClick={handleIgnorar} disabled={saving || scheduling}>
                   Sem providência
                 </Button>

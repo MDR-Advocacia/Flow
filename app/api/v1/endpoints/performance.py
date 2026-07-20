@@ -98,6 +98,23 @@ def pessoa(
     return out
 
 
+@router.get(
+    "/pessoa/{pessoa_id}/atrasadas-por-tipo",
+    summary="Quebra por subtipo do pool de uma pessoa (pizza do painel)",
+    dependencies=[_team],
+)
+def pessoa_atrasadas_por_tipo(
+    pessoa_id: int,
+    team: str = Query(...),
+    escopo: str = Query("atrasado", pattern="^(atrasado|pendente)$"),
+    db: Session = Depends(get_db),
+):
+    out = PerformanceService(db).atrasadas_por_tipo(pessoa_id, escopo=escopo)
+    if out is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pessoa não encontrada.")
+    return out
+
+
 @router.get("/tipos", summary="Mapa de impacto por subtipo (do time)", dependencies=[_team])
 def tipos(team: str = Query(...), days: int = Query(30, ge=1, le=365), db: Session = Depends(get_db)):
     return {"tipos": PerformanceService(db).tipos(days=days, team=team)}

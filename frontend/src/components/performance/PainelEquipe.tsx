@@ -14,6 +14,9 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  Legend,
+  Pie,
+  PieChart,
   ResponsiveContainer,
   Tooltip as RTooltip,
   XAxis,
@@ -38,10 +41,12 @@ import { InfoHint } from "@/components/performance/InfoHint";
 import {
   type DashboardData,
   type DuplicadasResp,
+  type PoolPorTipo,
   type SubtipoDetalhe,
   downloadExport,
   getDashboard,
   getDuplicadas,
+  getPoolPorTipo,
   getSubtipoDetalhe,
 } from "@/services/performance";
 import { useToast } from "@/hooks/use-toast";
@@ -55,6 +60,26 @@ const cargoColor = (cargo: string | null): string => {
   if (c.includes("assist")) return "#f59e0b";
   return "#94a3b8";
 };
+
+// Paleta da pizza do pool. Pessoas chegam a ter ~30 subtipos distintos no pool;
+// pizza com 30 fatias é ilegível, então mostramos as MAIORES e somamos a cauda
+// em "Outros" (a tabela abaixo do gráfico continua listando tudo, item a item).
+const PIE_COLORS = [
+  "#e11d48", "#f59e0b", "#8b5cf6", "#0ea5e9", "#10b981",
+  "#f43f5e", "#6366f1", "#14b8a6", "#eab308", "#94a3b8",
+];
+const PIE_MAX_FATIAS = 9;
+
+function piePool(d: { itens: { subtipo: string; total: number }[] }) {
+  const itens = [...d.itens].sort((a, b) => b.total - a.total);
+  if (itens.length <= PIE_MAX_FATIAS) return itens;
+  const cabeca = itens.slice(0, PIE_MAX_FATIAS);
+  const cauda = itens.slice(PIE_MAX_FATIAS);
+  return [
+    ...cabeca,
+    { subtipo: `Outros (${cauda.length} tipos)`, total: cauda.reduce((s, i) => s + i.total, 0) },
+  ];
+}
 
 const CAT_COLOR: Record<string, string> = {
   operacional: "#378ADD",
@@ -207,6 +232,24 @@ export default function PainelEquipe({ days, team }: { days: number; team: strin
     dups: DuplicadasResp | null;
   } | null>(null);
 
+  // Pizza do pool de uma pessoa (substitui o export-ao-clicar na barra).
+  const [pool, setPool] = useState<{
+    nome: string;
+    escopo: "atrasado" | "pendente";
+    loading: boolean;
+    data: PoolPorTipo | null;
+  } | null>(null);
+
+  const abrirPool = (pessoaId: number, nome: string, escopo: "atrasado" | "pendente") => {
+    setPool({ nome, escopo, loading: true, data: null });
+    getPoolPorTipo(team, pessoaId, escopo)
+      .then((d) => setPool({ nome, escopo, loading: false, data: d }))
+      .catch((e) => {
+        setPool(null);
+        toast({ title: "Erro ao abrir a quebra por tipo", description: String((e as Error).message), variant: "destructive" });
+      });
+  };
+
   const abrirDetalhe = (subtipo: string) => {
     setDetalhe({ subtipo, loading: true, data: null, dups: null });
     Promise.all([getSubtipoDetalhe(team, subtipo, days), getDuplicadas(team, subtipo).catch(() => null)])
@@ -322,7 +365,7 @@ export default function PainelEquipe({ days, team }: { days: number; team: strin
             </div>
           }
         >
-          <p className="mb-1 text-[10px] text-muted-foreground">Clique na barra de uma pessoa para exportar as tarefas dela em Excel (vermelho = atrasadas, âmbar = pendentes).</p>
+          <p className="mb-1 text-[10px] text-muted-foreground">Clique na barra de uma pessoa para ver <span className="font-semibold">quais tipos de tarefa</span> estão nesse pool (vermelho = atrasadas, âmbar = no prazo). O Excel continua disponível dentro do detalhe.</p>
           <ResponsiveContainer width="100%" height={Math.max(280, backlog.length * 26)}>
             <BarChart data={backlog} layout="vertical" margin={{ left: 8, right: 28, top: 4 }}>
               <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="hsl(var(--border))" />
@@ -330,9 +373,9 @@ export default function PainelEquipe({ days, team }: { days: number; team: strin
               <YAxis type="category" dataKey="nome" width={118} fontSize={11} tickFormatter={firstName} tickLine={false} axisLine={false} />
               <RTooltip cursor={{ fill: "hsl(var(--muted))", opacity: 0.4 }} />
               <Bar dataKey="atrasado" name="Atrasadas" stackId="b" fill="#e11d48" cursor="pointer"
-                onClick={(d: any) => barPid(d) && requestExport("atrasado", { pessoa_id: barPid(d) }, barName(d))} />
+                onClick={(d: any) => barPid(d) && abrirPool(barPid(d)!, barName(d), "atrasado")} />
               <Bar dataKey="emdia" name="No prazo" stackId="b" fill="#f59e0b" radius={[0, 4, 4, 0]} cursor="pointer"
-                onClick={(d: any) => barPid(d) && requestExport("pendente", { pessoa_id: barPid(d) }, barName(d))} />
+                onClick={(d: any) => barPid(d) && abrirPool(barPid(d)!, barName(d), "pendente")} />
             </BarChart>
           </ResponsiveContainer>
         </ChartCard>
@@ -413,6 +456,78 @@ export default function PainelEquipe({ days, team }: { days: number; team: strin
           </BarChart>
         </ResponsiveContainer>
       </ChartCard>
+
+      {/* Pizza: quais TIPOS de tarefa formam o pool da pessoa clicada. */}
+      <Dialog open={pool != null} onOpenChange={(o) => !o && setPool(null)}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-base">
+              {pool?.escopo === "atrasado" ? "Tipos de tarefa atrasados" : "Tipos de tarefa no prazo"}
+              {pool ? ` — ${pool.nome}` : ""}
+            </DialogTitle>
+          </DialogHeader>
+          {pool?.loading && <p className="py-8 text-center text-sm text-muted-foreground">Carregando…</p>}
+          {pool && !pool.loading && pool.data && (
+            pool.data.total === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">Nada nesse recorte.</p>
+            ) : (
+              <>
+                <p className="text-xs text-muted-foreground">
+                  <span className="font-semibold text-foreground">{pool.data.total}</span>{" "}
+                  {pool.escopo === "atrasado" ? "tarefa(s) vencida(s)" : "tarefa(s) em aberto no prazo"} em{" "}
+                  {pool.data.itens.length} tipo(s).
+                </p>
+                <ResponsiveContainer width="100%" height={260}>
+                  <PieChart>
+                    <Pie
+                      data={piePool(pool.data)}
+                      dataKey="total"
+                      nameKey="subtipo"
+                      cx="50%"
+                      cy="50%"
+                      outerRadius={88}
+                      label={(e: any) => (e.percent >= 0.06 ? `${Math.round(e.percent * 100)}%` : "")}
+                      labelLine={false}
+                    >
+                      {piePool(pool.data).map((s, i) => (
+                        <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <RTooltip formatter={(v: any, n: any) => [`${v} tarefa(s)`, n]} />
+                    <Legend verticalAlign="bottom" height={72} iconSize={9}
+                      wrapperStyle={{ fontSize: 10, lineHeight: "14px", overflowY: "auto", maxHeight: 72 }} />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="max-h-40 overflow-y-auto rounded border">
+                  <table className="w-full text-xs">
+                    <tbody>
+                      {pool.data.itens.map((it) => (
+                        <tr key={it.subtipo} className="border-b last:border-0">
+                          <td className="px-2 py-1">{it.subtipo}</td>
+                          <td className="px-2 py-1 text-right font-semibold tabular-nums">{it.total}</td>
+                          <td className="px-2 py-1 text-right text-muted-foreground">
+                            {Math.round((100 * it.total) / pool.data!.total)}%
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1 self-start text-xs"
+                  onClick={() =>
+                    handleExport(pool.escopo, { pessoa_id: pool.data!.pessoa.id })
+                  }
+                >
+                  <Download className="h-3.5 w-3.5" /> Baixar estas tarefas em Excel
+                </Button>
+              </>
+            )
+          )}
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog open={pendingExport != null} onOpenChange={(o) => !o && setPendingExport(null)}>
         <AlertDialogContent>

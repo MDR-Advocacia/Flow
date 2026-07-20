@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import {
   AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, ExternalLink, Loader2,
   RefreshCw, Search, Undo2, Users,
@@ -72,6 +72,38 @@ function LinkL1({
   );
 }
 
+function KpiCard({
+  icone, valor, rotulo, ativo, alerta, onClick,
+}: {
+  icone: ReactNode;
+  valor: number | undefined;
+  rotulo: string;
+  ativo: boolean;
+  alerta?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Card
+      role="button"
+      tabIndex={0}
+      aria-pressed={ativo}
+      onClick={onClick}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } }}
+      className={`cursor-pointer transition hover:bg-muted/40 hover:shadow-sm ${
+        ativo ? "ring-2 ring-primary" : alerta ? "border-amber-300" : ""
+      }`}
+    >
+      <CardContent className="flex items-center gap-3 p-4">
+        {icone}
+        <div>
+          <div className="text-2xl font-bold">{valor ?? "—"}</div>
+          <div className="text-xs text-muted-foreground">{rotulo}</div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function AcompanhamentoVinculosTab() {
   const { toast } = useToast();
   const [data, setData] = useState<PainelVinculos | null>(null);
@@ -132,38 +164,47 @@ export default function AcompanhamentoVinculosTab() {
 
   return (
     <div className="space-y-4">
-      {/* KPIs */}
+      {/* KPIs — cada card é um atalho pro recorte que ele conta. Clicar aplica o
+          filtro na lista abaixo; clicar no card já ativo limpa (funciona como toggle). */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Card><CardContent className="flex items-center gap-3 p-4">
-          <Users className="h-8 w-8 text-indigo-500" />
-          <div>
-            <div className="text-2xl font-bold">{kpis?.total ?? "—"}</div>
-            <div className="text-xs text-muted-foreground">Processos com vínculo</div>
-          </div>
-        </CardContent></Card>
-        <Card><CardContent className="flex items-center gap-3 p-4">
-          <AlertTriangle className="h-8 w-8 text-amber-500" />
-          <div>
-            <div className="text-2xl font-bold">{kpis?.cenario_1 ?? "—"}</div>
-            <div className="text-xs text-muted-foreground">Cenário 1 — novos na equipe</div>
-          </div>
-        </CardContent></Card>
-        <Card><CardContent className="flex items-center gap-3 p-4">
-          <CheckCircle2 className="h-8 w-8 text-emerald-500" />
-          <div>
-            <div className="text-2xl font-bold">{kpis?.cenario_2 ?? "—"}</div>
-            <div className="text-xs text-muted-foreground">Cenário 2 — já especializados</div>
-          </div>
-        </CardContent></Card>
-        <Card className={kpis && kpis.transicoes_pendentes > 0 ? "border-amber-300" : ""}>
-          <CardContent className="flex items-center gap-3 p-4">
-            <Undo2 className="h-8 w-8 text-rose-500" />
-            <div>
-              <div className="text-2xl font-bold">{kpis?.transicoes_pendentes ?? "—"}</div>
-              <div className="text-xs text-muted-foreground">Transições pendentes (supervisor)</div>
-            </div>
-          </CardContent>
-        </Card>
+        <KpiCard
+          icone={<Users className="h-8 w-8 text-indigo-500" />}
+          valor={kpis?.total}
+          rotulo="Processos com vínculo"
+          ativo={!cenarioFiltro && !transicaoFiltro}
+          onClick={() => { setCenarioFiltro(""); setTransicaoFiltro(""); }}
+        />
+        <KpiCard
+          icone={<AlertTriangle className="h-8 w-8 text-amber-500" />}
+          valor={kpis?.cenario_1}
+          rotulo="Cenário 1 — novos na equipe"
+          ativo={cenarioFiltro === "CENARIO_1" && !transicaoFiltro}
+          onClick={() => {
+            setTransicaoFiltro("");
+            setCenarioFiltro((v) => (v === "CENARIO_1" ? "" : "CENARIO_1"));
+          }}
+        />
+        <KpiCard
+          icone={<CheckCircle2 className="h-8 w-8 text-emerald-500" />}
+          valor={kpis?.cenario_2}
+          rotulo="Cenário 2 — já especializados"
+          ativo={cenarioFiltro === "CENARIO_2" && !transicaoFiltro}
+          onClick={() => {
+            setTransicaoFiltro("");
+            setCenarioFiltro((v) => (v === "CENARIO_2" ? "" : "CENARIO_2"));
+          }}
+        />
+        <KpiCard
+          icone={<Undo2 className="h-8 w-8 text-rose-500" />}
+          valor={kpis?.transicoes_pendentes}
+          rotulo="Transições pendentes (supervisor)"
+          ativo={transicaoFiltro === "pendente"}
+          alerta={!!kpis && kpis.transicoes_pendentes > 0}
+          onClick={() => {
+            setCenarioFiltro("");
+            setTransicaoFiltro((v) => (v === "pendente" ? "" : "pendente"));
+          }}
+        />
       </div>
 
       {/* Filtros */}
