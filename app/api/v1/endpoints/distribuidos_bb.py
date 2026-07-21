@@ -330,6 +330,123 @@ def listar_lotes_ativos(
     return {"total": total, "items": [_lote_dto(x) for x in rows]}
 
 
+@router.get("/ativos/duplicados", summary="Lista os CNJs Ativos pulados (duplicados), paginado")
+def listar_duplicados_ativos(
+    lote_id: Optional[int] = Query(None, description="Filtra por lote de origem."),
+    motivo: Optional[str] = Query(None, description="JA_CADASTRADO | REPETIDO_LOTE"),
+    com_pasta: Optional[bool] = Query(None, description="Só com/sem pasta L1 resolvida."),
+    busca: Optional[str] = Query(None, description="CNJ ou parte."),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb import ativos_duplicados_service as dup
+
+    return dup.listar(
+        db, lote_id=lote_id, motivo=motivo, com_pasta=com_pasta,
+        busca=busca, limit=limit, offset=offset,
+    )
+
+
+@router.post("/ativos/duplicados/resolver-pastas", summary="Resolve as pastas L1 dos duplicados (por CNJ)")
+def resolver_pastas_duplicados(
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb import ativos_duplicados_service as dup
+
+    ids = payload.get("ids") or None
+    lote_id = payload.get("lote_id")
+    return dup.resolver_pastas_l1(db, ids=ids, lote_id=lote_id)
+
+
+class AgendarPreviewReq(BaseModel):
+    duplicado_ids: list[int] = Field(default_factory=list)
+    responsavel_ids: list[int] = Field(default_factory=list)
+    dividir_igual: bool = True
+
+
+@router.post("/ativos/duplicados/agendar/preview", summary="Dry-run leve: o que seria agendado (sem escrever no L1)")
+def agendar_preview(
+    payload: AgendarPreviewReq,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb import ativos_agendamento_service as ag
+
+    return ag.preview(
+        db, duplicado_ids=payload.duplicado_ids,
+        responsavel_ids=payload.responsavel_ids, dividir_igual=payload.dividir_igual,
+    )
+
+
+class AgendarReq(BaseModel):
+    duplicado_ids: list[int] = Field(default_factory=list)
+    responsavel_ids: list[int] = Field(default_factory=list)
+    dividir_igual: bool = True
+    dry_run: bool = True
+    # Campos da tarefa (do modal):
+    subtype_id: int
+    type_id: int
+    subtipo_nome: Optional[str] = None
+    data_iso: str                        # ISO com data+hora (prazo/início)
+    publish_date_iso: Optional[str] = None
+    office_external_id: Optional[int] = None
+    prioridade: str = "Normal"
+    descricao: Optional[str] = None
+    observacoes: Optional[str] = None
+
+
+@router.post("/ativos/duplicados/agendar", summary="Agenda tarefa em lote nos duplicados (server-backed + progresso)")
+def agendar_tarefa_duplicados(
+    payload: AgendarReq,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb import ativos_agendamento_service as ag
+
+    config = {
+        "subtype_id": payload.subtype_id,
+        "type_id": payload.type_id,
+        "subtipo_nome": payload.subtipo_nome,
+        "data_iso": payload.data_iso,
+        "publish_date_iso": payload.publish_date_iso,
+        "office_external_id": payload.office_external_id,
+        "prioridade": payload.prioridade,
+        "descricao": payload.descricao,
+        "observacoes": payload.observacoes,
+    }
+    try:
+        return ag.disparar(
+            db, duplicado_ids=payload.duplicado_ids, responsavel_ids=payload.responsavel_ids,
+            dividir_igual=payload.dividir_igual, config=config,
+            dry_run=payload.dry_run, user_id=current_user.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/ativos/duplicados/agendar/status/{job_id}", summary="Progresso de um agendamento em lote")
+def agendar_status(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb import ativos_agendamento_service as ag
+
+    st = ag.status(db, job_id)
+    if st is None:
+        raise HTTPException(status_code=404, detail="Job não encontrado.")
+    return st
+
+
 @router.get("/processos/{processo_id}/auditoria", summary="Auditoria completa de um processo")
 def auditoria_processo(
     processo_id: int,

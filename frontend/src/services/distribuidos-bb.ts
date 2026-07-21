@@ -382,6 +382,133 @@ export async function getPlanilhaDetalhe(id: number): Promise<PlanilhaDetalhe> {
   return json(await apiFetch(`${BASE}/planilhas/${id}`));
 }
 
+// ── Duplicados da ingestão Ativos (CNJs que já existem no L1, pulados) ──
+export interface DuplicadoAtivos {
+  id: number;
+  lote_id: number;
+  cnj: string;
+  cnj_digitos: string;
+  motivo: "JA_CADASTRADO" | "REPETIDO_LOTE";
+  motivo_label: string;
+  parte: string | null;
+  l1_lawsuit_id: number | null;
+  l1_folder: string | null;
+  l1_url: string | null;
+  criado_em: string | null;
+}
+
+export interface DuplicadosResp {
+  total: number;
+  items: DuplicadoAtivos[];
+  kpis: { total: number; com_pasta: number; ja_cadastrado: number; repetido_lote: number };
+}
+
+export async function listarDuplicadosAtivos(params: {
+  loteId?: number;
+  motivo?: string;
+  comPasta?: boolean;
+  busca?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<DuplicadosResp> {
+  const qs = new URLSearchParams();
+  if (params.loteId != null) qs.set("lote_id", String(params.loteId));
+  if (params.motivo) qs.set("motivo", params.motivo);
+  if (params.comPasta != null) qs.set("com_pasta", String(params.comPasta));
+  if (params.busca) qs.set("busca", params.busca);
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  return json(await apiFetch(`${BASE}/ativos/duplicados?${qs.toString()}`));
+}
+
+export async function resolverPastasDuplicados(params: {
+  ids?: number[];
+  loteId?: number;
+}): Promise<{ resolvidos: number; nao_encontrados: number; pendentes: number }> {
+  return json(
+    await apiFetch(`${BASE}/ativos/duplicados/resolver-pastas`, {
+      method: "POST",
+      body: JSON.stringify({ ids: params.ids, lote_id: params.loteId }),
+    }),
+  );
+}
+
+// ── Agendamento de tarefa em lote sobre os duplicados ──
+export interface AgendTaskType {
+  external_id: number;
+  name: string;
+  subtypes: { external_id: number; name: string }[];
+}
+export interface AgendUser {
+  id: number;
+  external_id: number;
+  name: string;
+  email?: string;
+  squads?: { id: number; name: string }[];
+}
+
+export async function getTaskTypesMeta(): Promise<AgendTaskType[]> {
+  return json(await apiFetch(`/api/v1/task-templates/meta/task-types`));
+}
+export async function getUsersMeta(): Promise<AgendUser[]> {
+  return json(await apiFetch(`/api/v1/task-templates/meta/users`));
+}
+
+export interface AgendPreview {
+  total_pastas: number;
+  sem_pasta: number;
+  por_responsavel: { responsavel_id: number; responsavel_nome: string; total: number }[];
+}
+export async function previewAgendamento(body: {
+  duplicado_ids: number[];
+  responsavel_ids: number[];
+  dividir_igual: boolean;
+}): Promise<AgendPreview> {
+  return json(await apiFetch(`${BASE}/ativos/duplicados/agendar/preview`, {
+    method: "POST", body: JSON.stringify(body),
+  }));
+}
+
+export interface AgendConfig {
+  duplicado_ids: number[];
+  responsavel_ids: number[];
+  dividir_igual: boolean;
+  dry_run: boolean;
+  subtype_id: number;
+  type_id: number;
+  subtipo_nome?: string;
+  data_iso: string;
+  publish_date_iso?: string;
+  office_external_id?: number;
+  prioridade: string;
+  descricao?: string;
+  observacoes?: string;
+}
+export async function dispararAgendamento(body: AgendConfig): Promise<{ job_id: number; total: number; dry_run: boolean }> {
+  return json(await apiFetch(`${BASE}/ativos/duplicados/agendar`, {
+    method: "POST", body: JSON.stringify(body),
+  }));
+}
+
+export interface AgendJobStatus {
+  id: number;
+  status: "EM_ANDAMENTO" | "CONCLUIDO" | "ERRO";
+  dry_run: boolean;
+  total: number;
+  processados: number;
+  criados: number;
+  pulados: number;
+  falhas: number;
+  erro: string | null;
+  itens: {
+    cnj: string; folder: string | null; lawsuit_id: number;
+    responsavel_nome: string; status: string; task_id: number | null; erro: string | null;
+  }[];
+}
+export async function statusAgendamento(jobId: number): Promise<AgendJobStatus> {
+  return json(await apiFetch(`${BASE}/ativos/duplicados/agendar/status/${jobId}`));
+}
+
 export async function verificarCadastroAgora(): Promise<{
   verificados: number;
   confirmados: number;

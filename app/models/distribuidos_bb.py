@@ -666,6 +666,15 @@ LOTE_EM_ANDAMENTO = "EM_ANDAMENTO"
 LOTE_CONCLUIDO = "CONCLUIDO"
 LOTE_ERRO = "ERRO"
 
+# Por que um CNJ da planilha Ativos foi pulado (não recadastrado). Os dois casos
+# hoje caem no mesmo contador `duplicados`; a lista de detalhe os distingue.
+DUP_JA_CADASTRADO = "JA_CADASTRADO"   # veio na aba "JÁ CADASTRADO" da própria planilha
+DUP_REPETIDO_LOTE = "REPETIDO_LOTE"   # já existia como BbProcesso (lote anterior)
+DUP_MOTIVO_LABEL = {
+    DUP_JA_CADASTRADO: 'Já marcado como cadastrado na planilha',
+    DUP_REPETIDO_LOTE: 'Repetido de importação anterior',
+}
+
 
 class BbAtivosLote(Base):
     """Um upload de lista seca da Ativos (números de processo).
@@ -689,6 +698,79 @@ class BbAtivosLote(Base):
 
     status = Column(String(20), nullable=False, server_default=LOTE_EM_ANDAMENTO, index=True)
     erro = Column(Text, nullable=True)
+    disparado_por_user_id = Column(
+        Integer, ForeignKey("legal_one_users.id", ondelete="SET NULL"), nullable=True,
+    )
+    iniciado_em = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    concluido_em = Column(DateTime(timezone=True), nullable=True)
+
+
+class BbAtivosDuplicado(Base):
+    """CNJ da planilha Ativos que foi PULADO na ingestão (não recadastrado).
+
+    Antes o duplicado só incrementava um contador volátil no lote; aqui ele fica
+    persistido e rastreável — pro operador ver QUAIS voltaram, de qual lote, por
+    qual motivo, e (resolvido sob demanda) em qual pasta do L1 ele já vive. É
+    dessa lista que sai o agendamento de tarefa em lote.
+    """
+
+    __tablename__ = "bbd_ativos_duplicados"
+    __table_args__ = (
+        # O mesmo CNJ pode reaparecer em lotes diferentes; único por (lote, cnj).
+        UniqueConstraint("lote_id", "cnj_digitos", name="uq_bbd_ativos_dup_lote_cnj"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    lote_id = Column(
+        Integer, ForeignKey("bbd_ativos_lotes.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    cnj = Column(String(30), nullable=False)            # formatado (com máscara)
+    cnj_digitos = Column(String(20), nullable=False, index=True)  # só dígitos (join/dedupe)
+    motivo = Column(String(20), nullable=False)         # DUP_JA_CADASTRADO | DUP_REPETIDO_LOTE
+    parte = Column(String(200), nullable=True)          # adverso da planilha, se veio
+
+    # Resolvidos sob demanda contra o L1 (pra dar o link e permitir a tarefa):
+    l1_lawsuit_id = Column(Integer, nullable=True, index=True)
+    l1_folder = Column(String(60), nullable=True)
+    l1_resolvido_em = Column(DateTime(timezone=True), nullable=True)
+
+    criado_em = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    lote = relationship("BbAtivosLote")
+
+
+# Status de um job de agendamento de tarefa em lote (sobre os duplicados)
+AGEND_EM_ANDAMENTO = "EM_ANDAMENTO"
+AGEND_CONCLUIDO = "CONCLUIDO"
+AGEND_ERRO = "ERRO"
+
+
+class BbAtivosAgendamentoJob(Base):
+    """Um disparo de 'agendar tarefa em lote' sobre duplicados Ativos selecionados.
+
+    Server-backed com progresso (padrão da casa): a UI dispara, um worker cria as
+    tarefas no L1 uma a uma (create_task + vínculo à pasta) e a barra acompanha
+    por polling. `dry_run=True` NÃO escreve no L1 — só simula o plano (quantas
+    tarefas, pra quem). `itens` guarda o resultado por pasta (task_id/erro).
+    """
+
+    __tablename__ = "bbd_ativos_agend_jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    status = Column(String(20), nullable=False, server_default=AGEND_EM_ANDAMENTO, index=True)
+    dry_run = Column(Boolean, nullable=False, server_default="false")
+
+    total = Column(Integer, nullable=False, server_default="0")
+    processados = Column(Integer, nullable=False, server_default="0")
+    criados = Column(Integer, nullable=False, server_default="0")
+    falhas = Column(Integer, nullable=False, server_default="0")
+    pulados = Column(Integer, nullable=False, server_default="0")  # já tinham a tarefa
+
+    config = Column(jsonb(), nullable=True)   # campos da tarefa (subtipo, prazo, etc.)
+    itens = Column(jsonb(), nullable=True)     # [{duplicado_id, cnj, lawsuit_id, responsavel_id, status, task_id, erro}]
+    erro = Column(Text, nullable=True)
+
     disparado_por_user_id = Column(
         Integer, ForeignKey("legal_one_users.id", ondelete="SET NULL"), nullable=True,
     )

@@ -23,11 +23,14 @@ from app.models.distribuidos_bb import (
     CLIENTE_ATIVOS,
     DATAJUD_OK,
     DATAJUD_SEM_CAPA,
+    DUP_JA_CADASTRADO,
+    DUP_REPETIDO_LOTE,
     LOTE_CONCLUIDO,
     LOTE_ERRO,
     PARTE_A_CLASSIFICAR,
     POOL_NOVO,
     PROC_DISTRIBUIDO,
+    BbAtivosDuplicado,
     BbAtivosLote,
     BbConfig,
     BbEscritorio,
@@ -293,6 +296,27 @@ def _cadastrar_lote(db: Session, lote_id: int, processo_ids: list[int]) -> None:
     )
 
 
+def _registrar_duplicado(
+    db: Session, *, lote_id: int, cnj: str, digs: str, motivo: str, parte: Optional[str],
+) -> None:
+    """Persiste um CNJ pulado (idempotente: único por lote+cnj). Best-effort —
+    nunca derruba a ingestão só porque não conseguiu gravar o detalhe."""
+    try:
+        ja = (
+            db.query(BbAtivosDuplicado)
+            .filter(BbAtivosDuplicado.lote_id == lote_id, BbAtivosDuplicado.cnj_digitos == digs)
+            .first()
+        )
+        if ja:
+            return
+        db.add(BbAtivosDuplicado(
+            lote_id=lote_id, cnj=cnj, cnj_digitos=digs, motivo=motivo,
+            parte=(parte or None),
+        ))
+    except Exception:  # noqa: BLE001
+        logger.warning("Ativos: falha ao registrar duplicado %s (lote %s).", cnj, lote_id)
+
+
 def ingerir_lote_background(lote_id: int, linhas: list[dict], ja_cadastrado: set[str]) -> None:
     """Cria os processos a partir da PLANILHA (fonte primária), consultando o
     DataJud UMA vez por CNJ, na hora (fluxo sequencial: subiu → DataJud →
@@ -321,6 +345,10 @@ def ingerir_lote_background(lote_id: int, linhas: list[dict], ja_cadastrado: set
                 if digs in ja_cadastrado:
                     lote.duplicados += 1
                     lote.processados += 1
+                    _registrar_duplicado(
+                        db, lote_id=lote_id, cnj=cnj, digs=digs,
+                        motivo=DUP_JA_CADASTRADO, parte=linha.get("parte"),
+                    )
                     db.commit()
                     continue
 
@@ -328,6 +356,10 @@ def ingerir_lote_background(lote_id: int, linhas: list[dict], ja_cadastrado: set
                 if db.query(BbProcesso).filter(BbProcesso.fingerprint == fp).first():
                     lote.duplicados += 1
                     lote.processados += 1
+                    _registrar_duplicado(
+                        db, lote_id=lote_id, cnj=cnj, digs=digs,
+                        motivo=DUP_REPETIDO_LOTE, parte=linha.get("parte"),
+                    )
                     db.commit()
                     continue
 
