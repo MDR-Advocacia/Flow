@@ -22,12 +22,15 @@ from sqlalchemy.orm import Session
 from app.models.distribuidos_bb import (
     NIVEL_AVISO,
     PLANILHA_MANUAL,
+    POOL_CADASTRADO_L1,
     POOL_NOVO,
     POOL_PENDENTE_CADASTRO,
+    PROC_CADASTRADO,
     PROC_DISTRIBUIDO,
     SECAO_PLANILHA,
     BbConfig,
     BbEnvolvido,
+    BbEscritorio,
     BbPlanilha,
     BbProcesso,
 )
@@ -189,6 +192,82 @@ def contar_pool_novos(db: Session, *, cliente: Optional[str] = None) -> int:
     return q.count()
 
 
+def _marcar_ja_existentes_no_l1(db: Session, processos: list[BbProcesso]) -> set[BbProcesso]:
+    """Consulta o L1 por CNJ e marca como CADASTRADO os que já têm pasta do MESMO cliente.
+
+    O mesmo CNJ pode existir legitimamente pra BB e pra Ativos (pastas
+    diferentes), então a pasta encontrada só conta se o escritório responsável
+    dela pertencer ao conjunto de escritórios do cliente do processo (paths de
+    `bbd_escritorios`, mesma regra de roteamento da distribuição). Best-effort:
+    qualquer falha na consulta devolve set() e o fluxo segue como antes.
+    """
+    com_cnj = [p for p in processos if len(norm.apenas_digitos(p.cnj or "")) == 20]
+    if not com_cnj:
+        return set()
+
+    try:
+        from app.models.legal_one import LegalOneOffice
+        from app.services.legal_one_client import LegalOneApiClient
+
+        client = LegalOneApiClient()
+        matches = client.search_lawsuits_by_cnj_numbers([p.cnj for p in com_cnj])
+        if not matches:
+            return set()
+
+        match_por_digs = {
+            norm.apenas_digitos(k): v for k, v in matches.items()
+        }
+        office_path = {
+            o.external_id: (o.path or o.name) for o in db.query(LegalOneOffice).all()
+        }
+        # Paths de escritório por cliente (regra da distribuição: sem critério = vale pra todos).
+        escritorios = db.query(BbEscritorio).filter(BbEscritorio.ativo.is_(True)).all()
+
+        def paths_do_cliente(cli: str) -> set[str]:
+            cli = (cli or "").strip().lower()
+            return {
+                (e.escritorio_path or "").strip().lower()
+                for e in escritorios
+                if not e.criterio_cliente or e.criterio_cliente.strip().lower() == cli
+            }
+
+        marcados: set[BbProcesso] = set()
+        agora = datetime.now(timezone.utc)
+        for p in com_cnj:
+            m = match_por_digs.get(norm.apenas_digitos(p.cnj))
+            if not m or not m.get("id"):
+                continue
+            pasta_path = (office_path.get(m.get("responsibleOfficeId")) or "").strip().lower()
+            if pasta_path and pasta_path not in paths_do_cliente(p.cliente):
+                continue  # pasta é de OUTRO cliente/área — não é duplicata nossa
+            p.l1_lawsuit_id = int(m["id"])
+            p.l1_folder = m.get("folder")
+            p.status = PROC_CADASTRADO
+            p.planilha_status = POOL_CADASTRADO_L1
+            p.cadastro_confirmado_em = agora
+            p.l1_verificado_em = agora
+            marcados.add(p)
+            registrar_evento(
+                db, secao=SECAO_PLANILHA, nivel=NIVEL_AVISO,
+                acao="Já existia no L1 — não recadastrado",
+                mensagem=(
+                    f"O CNJ {p.cnj} já tem pasta no Legal One "
+                    f"({m.get('folder') or m['id']}) — o processo foi vinculado à "
+                    f"pasta existente e ficou FORA da planilha (evita duplicar)."
+                ),
+                processo_id=p.id,
+                dados={"l1_lawsuit_id": int(m["id"]), "folder": m.get("folder")},
+            )
+        return marcados
+    except Exception:  # noqa: BLE001
+        import logging
+
+        logging.getLogger("distribuidos_bb.planilha").exception(
+            "Checagem de pastas existentes no L1 falhou; seguindo sem ela."
+        )
+        return set()
+
+
 def gerar_e_persistir(
     db: Session,
     *,
@@ -257,6 +336,18 @@ def gerar_e_persistir(
     if not elegiveis:
         return None
     processos = elegiveis
+
+    # TRAVA 2: não recadastrar CNJ que JÁ TEM pasta no L1 (do mesmo cliente).
+    # As duas camadas anteriores (aba JÁ CADASTRADO / fingerprint local) só
+    # enxergam o que passou por NÓS — pasta criada por fora (manual, outro
+    # fluxo) escapava e o import criava uma segunda (caso real: CNJ
+    # 0000896-49.2025.8.17.2740, lote de 21/07, pasta antiga de 20/07; a flag
+    # `duplicated` do próprio import do L1 também não acusou). Best-effort:
+    # se a consulta ao L1 falhar, segue o fluxo normal (não trava o cadastro).
+    ja_no_l1 = _marcar_ja_existentes_no_l1(db, processos)
+    processos = [p for p in processos if p not in ja_no_l1]
+    if not processos:
+        return None
 
     ids = [p.id for p in processos]
     buf, total = gerar_planilha(db, processo_ids=ids, status=None)
