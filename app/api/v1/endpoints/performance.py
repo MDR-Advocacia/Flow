@@ -61,13 +61,34 @@ _team = Depends(require_team_access)
 
 
 def _require_admin_only(current_user: LegalOneUser = Depends(get_current_user)) -> LegalOneUser:
-    """Manutenção do roster é só pra admin (muda atribuição de todos os times)."""
+    """Restrito a admin (sobrou só pra rotinas globais, ex.: cancel-whitelist)."""
     if getattr(current_user, "role", "user") != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Restrito a administradores.")
     return current_user
 
 
 _adminonly = Depends(_require_admin_only)
+
+
+def _exigir_acesso_ao_time(current_user: LegalOneUser, team: str) -> None:
+    """Mesma regra do require_team_access, mas pra quando o time não vem na query
+    (vem do corpo ou da própria pessoa). Admin passa; demais precisam do menu do
+    módulo + o time liberado na árvore."""
+    if getattr(current_user, "role", "user") == "admin":
+        return  # admin passa mesmo com equipe legada fora do catálogo
+    if team not in TEAM_KEYS:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
+    if not getattr(current_user, "can_use_minha_equipe", False):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sem permissão para o Minha Equipe.")
+    if team not in _user_teams(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sem acesso a este time.")
+
+
+def _equipe_da_pessoa(db: Session, pessoa_id: int) -> Optional[str]:
+    from sqlalchemy import text
+
+    row = db.execute(text("SELECT equipe FROM perf_pessoa WHERE id = :id"), {"id": pessoa_id}).fetchone()
+    return row[0] if row else None
 
 
 @router.get("/equipe", summary="Lista o time com métricas + KPIs", dependencies=[_team])
@@ -376,11 +397,13 @@ def sync_now(background: BackgroundTasks):
     return {"ok": True, "mensagem": "Ingestão disparada — baixando o relatório do L1 e atualizando os dados."}
 
 
-# ── Manutenção do roster (editor de equipe, admin-only) ───────────────────
-@router.get("/roster", summary="Roster editável do time (manutenção)", dependencies=[_adminonly])
+# ── Manutenção do roster (editor de equipe) ────────────────────────────────
+# Antes era admin-only; agora qualquer colaborador com o TIME liberado na
+# árvore do Minha Equipe pode ajustar a própria equipe (decisão do operador,
+# 2026-07-21). O escopo continua POR TIME: mexer em pessoa de outro time (ou
+# mover pessoa PARA outro time) exige acesso àquele time também.
+@router.get("/roster", summary="Roster editável do time (manutenção)", dependencies=[_team])
 def roster(team: str = Query(...), db: Session = Depends(get_db)):
-    if team not in TEAM_KEYS:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
     return {"pessoas": PerformanceService(db).roster(team)}
 
 
@@ -391,10 +414,22 @@ class RosterUpdateReq(BaseModel):
     ativo: Optional[bool] = None
 
 
-@router.patch("/roster/{pessoa_id}", summary="Atualiza uma pessoa do roster", dependencies=[_adminonly])
-def update_roster(pessoa_id: int, req: RosterUpdateReq, db: Session = Depends(get_db)):
+@router.patch("/roster/{pessoa_id}", summary="Atualiza uma pessoa do roster")
+def update_roster(
+    pessoa_id: int,
+    req: RosterUpdateReq,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(get_current_user),
+):
     if req.equipe is not None and req.equipe not in TEAM_KEYS:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
+    equipe_atual = _equipe_da_pessoa(db, pessoa_id)
+    if equipe_atual is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pessoa não encontrada.")
+    _exigir_acesso_ao_time(current_user, equipe_atual)
+    if req.equipe is not None and req.equipe != equipe_atual:
+        # Mover pra OUTRO time exige acesso ao destino também.
+        _exigir_acesso_ao_time(current_user, req.equipe)
     out = PerformanceService(db).update_pessoa(
         pessoa_id, cargo=req.cargo, equipe=req.equipe,
         is_supervisor=req.is_supervisor, ativo=req.ativo,
@@ -404,10 +439,8 @@ def update_roster(pessoa_id: int, req: RosterUpdateReq, db: Session = Depends(ge
     return out
 
 
-@router.get("/roster/candidatos", summary="Candidatos a adicionar ao time (usuários do L1)", dependencies=[_adminonly])
+@router.get("/roster/candidatos", summary="Candidatos a adicionar ao time (usuários do L1)", dependencies=[_team])
 def roster_candidatos(team: str = Query(...), busca: Optional[str] = Query(None), db: Session = Depends(get_db)):
-    if team not in TEAM_KEYS:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
     return {"candidatos": PerformanceService(db).candidatos(team, busca=busca)}
 
 
@@ -416,18 +449,31 @@ class AddPessoaReq(BaseModel):
     team: str
 
 
-@router.post("/roster/adicionar", summary="Adiciona uma pessoa ao time", dependencies=[_adminonly])
-def roster_adicionar(req: AddPessoaReq, db: Session = Depends(get_db)):
+@router.post("/roster/adicionar", summary="Adiciona uma pessoa ao time")
+def roster_adicionar(
+    req: AddPessoaReq,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(get_current_user),
+):
     if req.team not in TEAM_KEYS:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
+    _exigir_acesso_ao_time(current_user, req.team)
     out = PerformanceService(db).adicionar_pessoa(req.nome, req.team)
     if out is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nome inválido.")
     return out
 
 
-@router.delete("/roster/{pessoa_id}", summary="Exclui a pessoa do sistema (saiu do escritório)", dependencies=[_adminonly])
-def roster_excluir(pessoa_id: int, db: Session = Depends(get_db)):
+@router.delete("/roster/{pessoa_id}", summary="Exclui a pessoa do sistema (saiu do escritório)")
+def roster_excluir(
+    pessoa_id: int,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(get_current_user),
+):
+    equipe_atual = _equipe_da_pessoa(db, pessoa_id)
+    if equipe_atual is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pessoa não encontrada.")
+    _exigir_acesso_ao_time(current_user, equipe_atual)
     out = PerformanceService(db).excluir_pessoa(pessoa_id)
     if out is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pessoa não encontrada.")

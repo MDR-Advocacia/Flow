@@ -181,7 +181,6 @@ function Kpi({
 
 export default function MinhaEquipePage() {
   const { toast } = useToast();
-  const { isAdmin } = useAuth();
   const { team = "bb-reu" } = useParams<{ team: string }>();
   const [days, setDays] = useState(30);
   const [cargo, setCargo] = useState<string | null>(null);
@@ -327,11 +326,12 @@ export default function MinhaEquipePage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {isAdmin && (
-            <Button variant="outline" className="gap-2" onClick={() => setRosterOpen(true)}>
-              <UserCog className="h-4 w-4" /> Ajustar equipe
-            </Button>
-          )}
+          {/* Quem enxerga a página deste time já passou pelo gate por-time —
+              o ajuste de equipe acompanha (antes era só admin; o backend
+              valida de novo, inclusive ao mover pessoa pra outro time). */}
+          <Button variant="outline" className="gap-2" onClick={() => setRosterOpen(true)}>
+            <UserCog className="h-4 w-4" /> Ajustar equipe
+          </Button>
           <Button variant="outline" className="gap-2" onClick={() => setBuscaOpen(true)}>
             <Search className="h-4 w-4" /> Análise individual
           </Button>
