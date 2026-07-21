@@ -184,6 +184,16 @@ def parse_planilha_ativos(conteudo: bytes, nome_arquivo: str) -> tuple[list[dict
         titulo = (ws.title or "").strip().upper()
         eh_ja = "JÁ CADASTRAD" in titulo or "JA CADASTRAD" in titulo
         eh_para = "PARA CADASTRO" in titulo
+        # Só a PARA CADASTRO entra na fila. Qualquer OUTRA aba que mencione
+        # "cadastr" no título (JÁ CADASTRADO, SEM CADASTRO, etc.) é de controle
+        # da Ativos e NÃO pode ser varrida — a "SEM CADASTRO" (2 linhas) já
+        # vazou pra fila no lote de 21/07 justamente por escapar do teste
+        # antigo, que só barrava "CADASTRAD" (com D). Abas sem rótulo nenhum
+        # continuam entrando (modo lista-seca de planilha de aba única).
+        eh_outra_de_controle = (not eh_para) and (not eh_ja) and ("CADASTR" in titulo)
+        if eh_outra_de_controle:
+            logger.info("Ativos: aba %r ignorada (aba de controle, não é PARA CADASTRO).", ws.title)
+            continue
         rows = list(ws.iter_rows(values_only=True))
         if not rows:
             continue
@@ -209,8 +219,8 @@ def parse_planilha_ativos(conteudo: bytes, nome_arquivo: str) -> tuple[list[dict
             digs = apenas_digitos(d["cnj"])
             if eh_ja:
                 ja.add(digs)
-            elif eh_para or "CADASTRAD" not in titulo:
-                # PARA CADASTRO (ou aba única sem rótulo claro que não seja "já").
+            else:
+                # PARA CADASTRO (ou aba única sem rótulo — modo lista-seca).
                 if digs not in vistos:
                     vistos.add(digs)
                     linhas.append(d)
