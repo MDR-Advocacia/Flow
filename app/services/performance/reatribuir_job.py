@@ -212,6 +212,46 @@ def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
     db.commit()
 
 
+def _espelhar_snapshot(db, detalhe: list) -> None:
+    """Reflete as reatribuições BEM-SUCEDIDAS no snapshot `perf_l1_tarefa`.
+
+    A tabela de diagnóstico do Balanceador (e os painéis do Minha Equipe) leem
+    do snapshot, que só re-ingere às 13h/manhã — sem isto, o operador migrava
+    N tarefas e via os MESMOS números na tabela (relato de 22/07: tirou 8 e
+    continuou 32). Mesmo padrão do cancelamento de duplicadas, que já desconta
+    do snapshot. Destino fora do roster → pessoa_id NULL (sai das contagens do
+    time, que é o correto). Best-effort: falha aqui não derruba o job.
+    """
+    from app.models.performance import PerfPessoa
+    from app.services.performance.seed import norm
+
+    try:
+        pessoas = {p.nome_norm: p for p in db.query(PerfPessoa).all()}
+        n = 0
+        for d in detalhe:
+            if d.get("reason") not in ("reassigned", "reassigned_web"):
+                continue
+            destino = pessoas.get(norm(d.get("to_nome") or ""))
+            db.execute(
+                text(
+                    "UPDATE perf_l1_tarefa SET pessoa_id = :pid, envolvido_nome = :nome "
+                    "WHERE l1_task_id = :tid"
+                ),
+                {
+                    "pid": destino.id if destino else None,
+                    "nome": (d.get("to_nome") or None),
+                    "tid": int(d["task_id"]),
+                },
+            )
+            n += 1
+        db.commit()
+        if n:
+            logger.info("Snapshot espelhado: %s tarefa(s) reatribuída(s) atualizadas em perf_l1_tarefa.", n)
+    except Exception:  # noqa: BLE001
+        logger.exception("Falha ao espelhar reatribuições no snapshot (segue sem — a ingestão corrige).")
+        db.rollback()
+
+
 def iniciar(team, itens, movimentos, dry_run, user) -> str:
     """Cria o job, dispara a thread e devolve o job_id. `itens` = lista de
     {task_id, to_id, to_nome} (task-level, resolvida do modal)."""
@@ -341,6 +381,10 @@ def _run(job_id: str, team: str, itens: list, movimentos: list, dry_run: bool) -
         job.status = "done"
         job.terminado_em = func.now()
         db.commit()
+
+        # Espelha as trocas no snapshot — a tabela de diagnóstico reflete na hora.
+        if not dry_run:
+            _espelhar_snapshot(db, detalhe)
 
         # Auditoria move-level na aba Relatórios (só na escrita real).
         if not dry_run and movimentos:
