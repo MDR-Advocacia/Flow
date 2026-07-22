@@ -101,6 +101,49 @@ def _find_latest(session: requests.Session, base: str):
     return best
 
 
+def _reaplicar_reatribuicoes(db) -> None:
+    """Reaplica sobre o snapshot RECÉM-INGERIDO os espelhos das reatribuições
+    reais recentes do Balanceador.
+
+    O relatório do L1 pode ter sido GERADO horas antes do rebalanceamento —
+    o replace total do seed voltava o painel aos valores antigos (caso real
+    22/07: operador redistribuiu, painel refletiu na hora, 'Atualizar agora'
+    baixou o relatório da manhã e desfez a visão). Reaplicar é idempotente:
+    se o relatório novo já reflete a troca, o UPDATE não muda nada.
+
+    Janela de 48h > idade máxima de um relatório aproveitável; jobs em ordem
+    cronológica (o mais recente vence em movimentos conflitantes). Best-effort.
+    """
+    try:
+        import datetime as _dt2
+
+        from app.models.performance import BalanceadorReatribuirJob
+        from app.services.performance.reatribuir_job import _espelhar_snapshot
+
+        cutoff = _dt2.datetime.now(_dt2.timezone.utc) - _dt2.timedelta(hours=48)
+        jobs = (
+            db.query(BalanceadorReatribuirJob)
+            .filter(
+                BalanceadorReatribuirJob.dry_run.is_(False),
+                BalanceadorReatribuirJob.status == "done",
+                BalanceadorReatribuirJob.terminado_em >= cutoff,
+            )
+            .order_by(BalanceadorReatribuirJob.terminado_em.asc())
+            .all()
+        )
+        n = 0
+        for j in jobs:
+            if j.detalhe:
+                _espelhar_snapshot(db, list(j.detalhe))
+                n += 1
+        if n:
+            logger.info(
+                "Minha Equipe ingest: %s job(s) de reatribuição (48h) reaplicados sobre o snapshot novo.", n,
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Ingest: falha ao reaplicar reatribuições (segue com o snapshot cru).")
+
+
 def baixar_e_ingerir(db, *, force: bool = False) -> dict:
     """Baixa o relatório do dia e ingere. force=True ingere o mais recente mesmo
     que não seja de hoje (ex.: botão "Atualizar agora")."""
@@ -133,6 +176,7 @@ def baixar_e_ingerir(db, *, force: bool = False) -> dict:
     name_to_id = {p.nome_norm: p.id for p in db.query(PerfPessoa).all()}
     n = seed_tarefas(db, name_to_id, agenda_path=_REPORT_PATH)
     classify_subtipos(db)
+    _reaplicar_reatribuicoes(db)
 
     info = {
         "ok": True,
@@ -278,6 +322,7 @@ def gerar_e_ingerir(
     name_to_id = {p.nome_norm: p.id for p in db.query(PerfPessoa).all()}
     n = seed_tarefas(db, name_to_id, agenda_path=_REPORT_PATH)
     classify_subtipos(db)
+    _reaplicar_reatribuicoes(db)
     info = {
         "ok": True,
         "tarefas": n,
