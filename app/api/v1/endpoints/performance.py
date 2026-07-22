@@ -380,15 +380,26 @@ def sync_status(db: Session = Depends(get_db)):
 
 def _run_sync_bg() -> None:
     from app.db.session import SessionLocal
+    from app.services.onerequest._concurrency import single_worker_lock
+    from app.services.performance.ingest_worker import _LOCK_KEY
     from app.services.performance.report_ingest import baixar_e_ingerir
 
-    db = SessionLocal()
-    try:
-        baixar_e_ingerir(db, force=True)
-    except Exception:  # noqa: BLE001
-        logger.exception("Minha Equipe: falha na ingestão manual.")
-    finally:
-        db.close()
+    # MESMO advisory lock do scheduler: sem ele, cliques repetidos no
+    # "Atualizar agora" (ou o botão + o job das 9h juntos) rodavam ingestões
+    # CONCORRENTES — cada uma deleta o que enxerga e insere a própria cópia,
+    # triplicando o snapshot (caso real 22/07: 3 runs às 08:58/09:00/09:00,
+    # 641k linhas pra 213k tarefas; painel contava 111 atrasadas onde eram 37).
+    with single_worker_lock(_LOCK_KEY) as got:
+        if not got:
+            logger.info("Minha Equipe: ingestão manual pulada — já há uma rodando.")
+            return
+        db = SessionLocal()
+        try:
+            baixar_e_ingerir(db, force=True)
+        except Exception:  # noqa: BLE001
+            logger.exception("Minha Equipe: falha na ingestão manual.")
+        finally:
+            db.close()
 
 
 @router.post("/sync", summary="Dispara a ingestão agora (baixa o relatório mais recente do L1)", dependencies=[_admin])

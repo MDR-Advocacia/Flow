@@ -16,7 +16,14 @@ import {
 } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
-import { type Situacao, type TarefaDetalhe, getDescricoes, getTarefas } from "@/services/balanceador";
+import {
+  type Situacao,
+  type TarefaDetalhe,
+  type UsuarioBusca,
+  getDescricoes,
+  getTarefas,
+  getUsuarios,
+} from "@/services/balanceador";
 
 const SIT: Record<Situacao, { label: string; cls: string }> = {
   atrasado: { label: "Atrasada", cls: "bg-rose-100 text-rose-700" },
@@ -60,7 +67,25 @@ export default function DetalheSubtipoModal({
   const [descMap, setDescMap] = useState<Record<number, string | null>>({});
   const [descLoading, setDescLoading] = useState(false);
 
-  const outros = useMemo(() => alvos.filter((a) => a.id !== fromPessoa.id), [alvos, fromPessoa.id]);
+  // Destinos = colaboradores SELECIONADOS na tabela + o ROSTER do setor inteiro
+  // (antes só os selecionados: com 1 colaborador aberto, o "Transferir para…"
+  // ficava VAZIO — relato do operador 22/07). Dedupe por id, origem fora.
+  const [roster, setRoster] = useState<UsuarioBusca[]>([]);
+  useEffect(() => {
+    getUsuarios(team, "")
+      .then((us) => setRoster(us.filter((u) => u.setor)))
+      .catch(() => undefined);
+  }, [team]);
+  const outros = useMemo(() => {
+    const vistos = new Set<number>();
+    const out: { id: number; nome: string }[] = [];
+    for (const a of [...alvos, ...roster]) {
+      if (a.id === fromPessoa.id || vistos.has(a.id)) continue;
+      vistos.add(a.id);
+      out.push({ id: a.id, nome: a.nome });
+    }
+    return out.sort((x, y) => x.nome.localeCompare(y.nome));
+  }, [alvos, roster, fromPessoa.id]);
 
   const load = useCallback(async () => {
     // Live: as tarefas (com descrição) já vieram do /live-pessoa — sem novo fetch.
@@ -128,7 +153,7 @@ export default function DetalheSubtipoModal({
         </DialogHeader>
         <p className="text-xs text-muted-foreground">
           Escolha as tarefas e o destino. Transferência troca <b>responsável + executante</b> (solicitante
-          intocado). <span className="text-amber-700">Mock — não escreve no L1 ainda.</span>
+          intocado). <span className="text-emerald-700">Entra em "Mudanças pendentes" — a escrita real no L1 acontece no Aplicar.</span>
         </p>
 
         {loading ? (

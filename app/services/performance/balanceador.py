@@ -442,7 +442,10 @@ class BalanceadorService:
                         nomes[stid] = row.subtipo
         tarefas = []
         for t in raw:
-            sub = nomes.get(t.get("subTypeId")) or f"subtipo {t.get('subTypeId')}"
+            # subTypeId None = tarefa criada sem subtipo no L1 (avulsa/manual) —
+            # rótulo padrão da casa em vez do cru "subtipo None".
+            stid = t.get("subTypeId")
+            sub = (nomes.get(stid) or (f"subtipo {stid}" if stid else "(sem subtipo)"))
             # Normaliza o datetime pra BRT (o L1 mistura 'Z' e '-03:00'; ver
             # _parse_l1_dt) — a situação, a ordenação e o front dependem disso.
             dt_prazo = _parse_l1_dt(t.get("endDateTime"))
