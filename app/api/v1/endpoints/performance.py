@@ -141,6 +141,28 @@ def tipos(team: str = Query(...), days: int = Query(30, ge=1, le=365), db: Sessi
     return {"tipos": PerformanceService(db).tipos(days=days, team=team)}
 
 
+# ── Reagendamentos (adiamentos de prazo) — board por time ─────────────────
+@router.get("/reagendamentos", summary="Board de reagendamentos (adiamentos) do time", dependencies=[_team])
+def reagendamentos(team: str = Query(...), days: int = Query(30, ge=1, le=180), db: Session = Depends(get_db)):
+    from app.services.performance import reagendamento_service as reag
+
+    return reag.resumo(db, equipe=team, dias=days)
+
+
+@router.get("/reagendamentos/eventos", summary="Lista paginada dos adiamentos (drill)", dependencies=[_team])
+def reagendamentos_eventos(
+    team: str = Query(...),
+    pessoa_id: Optional[int] = Query(None),
+    days: int = Query(30, ge=1, le=180),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    from app.services.performance import reagendamento_service as reag
+
+    return reag.lista_eventos(db, equipe=team, pessoa_id=pessoa_id, dias=days, limit=limit, offset=offset)
+
+
 @router.get("/dashboard", summary="Painel do time: vazão, pool/atrasado, jornada, top tipos", dependencies=[_team])
 def dashboard(team: str = Query(...), days: int = Query(30, ge=1, le=365), db: Session = Depends(get_db)):
     return PerformanceService(db).dashboard(days=days, team=team)
@@ -426,6 +448,15 @@ def sync_now(background: BackgroundTasks):
             "Leva alguns minutos (o L1 monta o relatório do zero); o painel atualiza ao concluir."
         ),
     }
+
+
+@router.post("/reagendamentos/capturar", summary="Dispara o passo do bracket sobre o snapshot atual (teste/admin)", dependencies=[_admin])
+def reagendamentos_capturar(momento: str = Query(..., pattern="^(manha|noite)$"), db: Session = Depends(get_db)):
+    """Roda o passo do bracket SOBRE O SNAPSHOT ATUAL (não gera relatório novo —
+    isso é o cron). 'manha' grava a baseline; 'noite' detecta os adiamentos."""
+    from app.services.performance import reagendamento_service as reag
+
+    return reag.capturar_manha(db) if momento == "manha" else reag.detectar_noite(db)
 
 
 # ── Manutenção do roster (editor de equipe) ────────────────────────────────

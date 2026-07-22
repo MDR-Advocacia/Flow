@@ -263,3 +263,57 @@ class BalanceadorReatribuirJob(Base):
     criado_por_nome = Column(String, nullable=True)
     iniciado_em = Column(DateTime(timezone=True), server_default=func.now())
     terminado_em = Column(DateTime(timezone=True), nullable=True)
+
+
+# ── Reagendamentos (adiamentos de prazo) — bracket 07h/19h ──────────────────
+# Detecta adiamento comparando duas fotos do MESMO dia: a foto da manhã (baseline
+# em perf_prazo_manha) vs. o estado da noite (perf_l1_tarefa recém-ingerida). Onde
+# a conclusão prevista da tarefa foi EMPURRADA pra frente durante o dia = adiamento.
+
+
+class PerfPrazoManha(Base):
+    """Baseline da MANHÃ: prazo de cada tarefa pendente às ~07h. Replace total
+    todo dia (o job da manhã limpa e regrava). A noite compara contra isto."""
+
+    __tablename__ = "perf_prazo_manha"
+
+    l1_task_id = Column(BigInteger, primary_key=True)
+    dia = Column(DateTime(timezone=True), nullable=False, index=True)  # dia do bracket (BRT, 00:00)
+    prazo = Column(DateTime(timezone=True), nullable=True)
+    pessoa_id = Column(Integer, nullable=True, index=True)
+    pessoa_nome = Column(String, nullable=True)
+    equipe = Column(String, nullable=True, index=True)
+    subtipo = Column(String, nullable=True)
+    pasta = Column(String, nullable=True)
+    cnj = Column(String, nullable=True)
+    capturado_em = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PerfReagendamento(Base):
+    """Um evento de ADIAMENTO detectado no bracket do dia (manhã → noite).
+
+    Só adiamentos (prazo_para > prazo_de). Antecipações são ignoradas na
+    detecção. `era_fatal_hoje` = na manhã o prazo vencia HOJE e à noite foi
+    empurrado — o pior caso ("empurrou com a barriga"). Idempotente por dia: o
+    job da noite apaga os eventos do dia antes de regravar."""
+
+    __tablename__ = "perf_reagendamento"
+
+    id = Column(Integer, primary_key=True)
+    dia = Column(DateTime(timezone=True), nullable=False, index=True)  # dia do bracket (BRT, 00:00)
+    l1_task_id = Column(BigInteger, nullable=True, index=True)
+    pessoa_id = Column(Integer, nullable=True, index=True)
+    pessoa_nome = Column(String, nullable=True)
+    equipe = Column(String, nullable=True, index=True)
+    subtipo = Column(String, nullable=True)
+    pasta = Column(String, nullable=True)
+    cnj = Column(String, nullable=True)
+    prazo_de = Column(DateTime(timezone=True), nullable=True)     # prazo da manhã
+    prazo_para = Column(DateTime(timezone=True), nullable=True)   # prazo da noite
+    dias_adiado = Column(Integer, nullable=True)                  # diferença em dias (BRT)
+    era_fatal_hoje = Column(Boolean, nullable=False, server_default="false")
+    detectado_em = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("dia", "l1_task_id", name="uq_perf_reag_dia_task"),
+    )

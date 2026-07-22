@@ -60,6 +60,7 @@ import RaioXPessoa from "@/components/performance/RaioXPessoa";
 import RelatoriosSection from "@/components/performance/RelatoriosSection";
 import RosterEditor from "@/components/performance/RosterEditor";
 import BalanceadorSection from "@/components/performance/BalanceadorSection";
+import ReagendamentosSection from "@/components/performance/ReagendamentosSection";
 import RedistribuicoesLog from "@/components/balanceador/RedistribuicoesLog";
 import AcompanhamentoVinculosTab from "@/components/distribuidos-bb/AcompanhamentoVinculosTab";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -511,6 +512,10 @@ export default function MinhaEquipePage() {
 
       <CollapsibleSection title="Balanceamento de agenda" subtitle="Diagnóstico de carga + redistribuição" defaultOpen={false}>
         <BalanceadorSection team={team} onAplicado={() => setRelReloadKey((k) => k + 1)} />
+      </CollapsibleSection>
+
+      <CollapsibleSection title="Reagendamentos" subtitle="Adiamentos de prazo no dia (bracket 07h/19h)" defaultOpen={false}>
+        <ReagendamentosSection team={team} />
       </CollapsibleSection>
 
       <CollapsibleSection title="Relatórios" subtitle="PDF do servidor + log de redistribuições">

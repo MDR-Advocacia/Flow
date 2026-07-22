@@ -351,6 +351,15 @@ async def lifespan(_: FastAPI):
     except Exception:
         logger.exception("Falha ao registrar job de ingestão do Minha Equipe no startup.")
 
+    # Reagendamentos: bracket diário 07h/19h — foto da manhã vs. noite detecta os
+    # adiamentos de prazo feitos DURANTE o dia (o "calo" que era invisível).
+    try:
+        from app.services.performance.reagendamento_worker import register_reagendamento_jobs
+
+        register_reagendamento_jobs(scheduler)
+    except Exception:
+        logger.exception("Falha ao registrar jobs de reagendamento no startup.")
+
     # Análise Recursal: worker fire-and-forget — auto-submete os PDFs subidos e
     # auto-aplica os vereditos quando o batch termina (sem depender da tela).
     try:

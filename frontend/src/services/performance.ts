@@ -480,3 +480,71 @@ export async function excluirPessoa(id: number): Promise<void> {
   const res = await apiFetch(`${BASE}/roster/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`Erro ${res.status} ao excluir`);
 }
+
+// ── Reagendamentos (adiamentos de prazo) ──
+export interface ReagKpis {
+  total: number;
+  tarefas: number;
+  pessoas: number;
+  fatais_empurrados: number;
+  dias_medio: number;
+  dias_max: number;
+}
+export interface ReagPessoa {
+  pessoa_id: number | null;
+  nome: string;
+  total: number;
+  fatais: number;
+  dias_medio: number;
+  tarefas: number;
+}
+export interface ReagDia {
+  dia: string;
+  total: number;
+  fatais: number;
+}
+export interface ReagReincidente {
+  l1_task_id: number;
+  pessoa: string | null;
+  subtipo: string | null;
+  pasta: string | null;
+  cnj: string | null;
+  vezes: number;
+  primeiro_prazo: string | null;
+  ultimo_prazo: string | null;
+  dias_total: number;
+}
+export interface ReagResumo {
+  kpis: ReagKpis;
+  por_pessoa: ReagPessoa[];
+  por_dia: ReagDia[];
+  por_subtipo: { subtipo: string; total: number }[];
+  reincidentes: ReagReincidente[];
+}
+
+export async function getReagendamentos(team: string, days = 30): Promise<ReagResumo> {
+  const qs = new URLSearchParams({ team, days: String(days) });
+  return json(await apiFetch(`${BASE}/reagendamentos?${qs.toString()}`));
+}
+
+export interface ReagEvento {
+  dia: string;
+  l1_task_id: number;
+  pessoa: string | null;
+  subtipo: string | null;
+  pasta: string | null;
+  cnj: string | null;
+  prazo_de: string | null;
+  prazo_para: string | null;
+  dias_adiado: number | null;
+  era_fatal_hoje: boolean;
+}
+export async function getReagendamentoEventos(
+  team: string, params: { pessoaId?: number; days?: number; limit?: number; offset?: number } = {},
+): Promise<{ total: number; items: ReagEvento[] }> {
+  const qs = new URLSearchParams({ team, days: String(params.days ?? 30) });
+  if (params.pessoaId != null) qs.set("pessoa_id", String(params.pessoaId));
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  return json(await apiFetch(`${BASE}/reagendamentos/eventos?${qs.toString()}`));
+}
