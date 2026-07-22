@@ -32,6 +32,23 @@ def _hoje_brt() -> _dt.date:
     return (_dt.datetime.now(tz=_TZ) if _TZ else _dt.datetime.now()).date()
 
 
+def _parse_l1_dt(valor: str | None) -> _dt.datetime | None:
+    """Datetime do L1 → aware em BRT. O L1 mistura formatos: '-03:00' e 'Z'
+    (UTC) — e o fromisoformat do Py3.10 NÃO aceita 'Z', o que rotulava
+    centenas de tarefas como sem_prazo (caso Myllene: 396 de 423, todas com
+    'Z') e as jogava pro FIM da fila de divisão. Converter pra BRT também
+    corrige a situação: 02:59Z = 23:59 BRT do dia ANTERIOR."""
+    if not valor:
+        return None
+    try:
+        d = _dt.datetime.fromisoformat(valor.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if d.tzinfo is not None and _TZ is not None:
+        d = d.astimezone(_TZ)
+    return d
+
+
 # Cache (vida do processo) do catálogo de usuários do L1. Usuários mudam
 # raramente; evita bater get_all_users (~310, ~6s) a cada chamada.
 _USERS: list = []  # [{id, name, norm}]
@@ -320,11 +337,28 @@ class BalanceadorService:
         return raw, (total_real or 0), capado
 
     # ── LIVE: pendentes não-iniciadas de uma pessoa, direto do L1 ──
-    def live_pessoa(self, team: str, pessoa_id: int, dias: int, incluir_atrasadas: bool = True) -> dict:
+    def live_pessoa(
+        self,
+        team: str,
+        pessoa_id: int,
+        dias: int = 0,
+        incluir_atrasadas: bool = True,
+        inicio: str | None = None,
+        fim: str | None = None,
+    ) -> dict:
         """Pendentes NÃO iniciadas (statusId=0) da pessoa, AO VIVO do L1 (filtro
         por participante). Agrupa por subtipo (nome via catálogo local
         LegalOneTaskSubType) + devolve os detalhes. Base da redistribuição em
-        tempo real — o número que o supervisor vê é o de AGORA, não o snapshot."""
+        tempo real — o número que o supervisor vê é o de AGORA, não o snapshot.
+
+        Recorte de data pela **data de conclusão prevista** (endDateTime):
+        - `inicio`/`fim` (YYYY-MM-DD): faixa EXATA; as VENCIDAS (prazo < hoje)
+          entram SEMPRE, independentemente do início (decisão do operador —
+          o balanceamento existe pra resolver atraso).
+        - fallback legado `dias>0`: janela "próximos N dias" (+ vencidas se
+          incluir_atrasadas). Mantido pra compat de chamadas antigas.
+        A ordenação é por prazo CRESCENTE (mais antigo/vencido primeiro) — a
+        divisão prioriza as de conclusão prevista mais antiga."""
         from collections import defaultdict
 
         from app.models.legal_one import LegalOneTaskSubType
@@ -344,23 +378,38 @@ class BalanceadorService:
         # do snapshot/diagnóstico) atribui. Validado empiricamente 2026-07-07:
         # participants/any sem papel puxava também onde ela é só responsável/
         # solicitante (pool de OUTRO universo), e deadLine é null nessas tarefas
-        # (o prazo real vive em endDateTime). Ordena da mais urgente, com TETO de
-        # páginas — o L1 limita a ~1,2 req/s. Recorte de data feito NO L1.
+        # (o prazo real vive em endDateTime). Ordena da mais urgente. Recorte de
+        # data feito NO L1.
         hoje = _hoje_brt()
         flt = (
             f"participants/any(pp: pp/contact/id eq {cid} and pp/isExecuter eq true)"
             " and statusId eq 0 and endDateTime ne null"
         )
-        if not incluir_atrasadas:
-            flt += f" and endDateTime ge {hoje.isoformat()}T00:00:00-03:00"
-        if dias and dias > 0:
-            teto = hoje + _dt.timedelta(days=dias)
-            flt += f" and endDateTime le {teto.isoformat()}T23:59:59-03:00"
+        if inicio or fim:
+            # Faixa EXATA por data de conclusão prevista. Vencidas sempre entram.
+            if fim:
+                flt += f" and endDateTime le {fim}T23:59:59-03:00"
+            if inicio:
+                flt += (
+                    f" and (endDateTime ge {inicio}T00:00:00-03:00"
+                    f" or endDateTime lt {hoje.isoformat()}T00:00:00-03:00)"
+                )
+        else:
+            # Legado: janela "próximos N dias" (+ vencidas se pedido).
+            if not incluir_atrasadas:
+                flt += f" and endDateTime ge {hoje.isoformat()}T00:00:00-03:00"
+            if dias and dias > 0:
+                teto = hoje + _dt.timedelta(days=dias)
+                flt += f" and endDateTime le {teto.isoformat()}T23:59:59-03:00"
         # No L1 "Compromissos e Tarefas" são entidades SEPARADAS na API (/Tasks e
         # /Appointments), mesmo modelo. A agenda de execução é a UNIÃO das duas —
         # ler só /Tasks perdia os compromissos (audiências, prazos internos,
         # peticionamentos) e subcontava a carga (ver docs/balanceador-compromissos-plano.md).
-        MAX_POR_ENDPOINT = 180  # ~6 páginas por endpoint; capa backlogs gigantes
+        # Teto alto (decisão do operador 2026-07-22): carrega o backlog inteiro
+        # pra nunca deixar tarefa de fora da divisão. Como a ordem é prazo-antigo-
+        # primeiro, se algum dia estourar, o que fica de fora é a de prazo mais
+        # distante — nunca a mais antiga. Backstop contra runaway.
+        MAX_POR_ENDPOINT = 1500  # 50 páginas/endpoint; L1 quebra cedo se vier menos
         raw_t, total_t, cap_t = self._carregar_l1_pool(client, "/Tasks", flt, MAX_POR_ENDPOINT)
         raw_a, total_a, cap_a = self._carregar_l1_pool(client, "/Appointments", flt, MAX_POR_ENDPOINT)
         for it in raw_t:
@@ -394,13 +443,10 @@ class BalanceadorService:
         tarefas = []
         for t in raw:
             sub = nomes.get(t.get("subTypeId")) or f"subtipo {t.get('subTypeId')}"
-            dl = t.get("endDateTime")
-            d = None
-            if dl:
-                try:
-                    d = _dt.datetime.fromisoformat(dl).date()
-                except ValueError:
-                    d = None
+            # Normaliza o datetime pra BRT (o L1 mistura 'Z' e '-03:00'; ver
+            # _parse_l1_dt) — a situação, a ordenação e o front dependem disso.
+            dt_prazo = _parse_l1_dt(t.get("endDateTime"))
+            d = dt_prazo.date() if dt_prazo else None
             if d is None:
                 sit = "sem_prazo"
             elif d < hoje:
@@ -412,12 +458,22 @@ class BalanceadorService:
             tarefas.append(
                 {
                     "l1_task_id": t.get("id"), "subtipo": sub, "descricao": t.get("description"),
-                    "prazo": dl, "situacao": sit,
+                    # prazo NORMALIZADO em BRT: strings comparáveis entre si (a
+                    # ordenação do front usa comparação de string).
+                    "prazo": dt_prazo.isoformat() if dt_prazo else t.get("endDateTime"),
+                    "situacao": sit,
                     # "tarefa" | "compromisso" — o front distingue e a reatribuição
                     # sabe qual endpoint (/Tasks ou /Appointments) bater no PATCH.
                     "origem": t.get("_origem", "tarefa"),
                 }
             )
+
+        # Ordena por PRAZO crescente (mais antigo/vencido primeiro), sem prazo por
+        # último. Cada endpoint (/Tasks, /Appointments) já vem ordenado, mas a
+        # concatenação raw_t+raw_a furava a ordem GLOBAL — e a divisão consome
+        # essa ordem (o front pega as primeiras N). Garante aqui a prioridade das
+        # de conclusão prevista mais antiga, independentemente da origem.
+        tarefas.sort(key=lambda t: (t.get("prazo") is None, t.get("prazo") or ""))
 
         agg = defaultdict(lambda: {"total": 0, "atrasado": 0, "fatal_hoje": 0})
         for t in tarefas:

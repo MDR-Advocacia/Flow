@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 import { teamLabel } from "@/lib/teams";
 import {
+  type FaixaData,
   type MatrizItem,
   type MovePendente,
   type ReatribuirItem,
@@ -39,12 +40,9 @@ type Pessoa = { id: number; nome: string };
 type Dragged = { fromId: number; subtipo: string; total: number } | null;
 type DropCtx = { fromId: number; fromNome: string; toId: number; toNome: string; subtipo: string; max: number } | null;
 
-const PERIODO_LABEL: Record<number, string> = {
-  0: "todas as pendentes",
-  7: "próximos 7 dias",
-  15: "próximos 15 dias",
-  30: "próximos 30 dias",
-  90: "próximos 90 dias",
+const fmtBR = (iso: string) => {
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}/${y}`;
 };
 
 let _moveSeq = 0;
@@ -52,15 +50,13 @@ let _moveSeq = 0;
 export default function RedistribuicaoModal({
   team,
   pessoas,
-  dias,
-  incluirAtrasadas = true,
+  faixa,
   onClose,
   onAplicado,
 }: {
   team: string;
   pessoas: Pessoa[];
-  dias: number;
-  incluirAtrasadas?: boolean;
+  faixa: FaixaData;
   onClose: () => void;
   onAplicado?: () => void;
 }) {
@@ -100,7 +96,7 @@ export default function RedistribuicaoModal({
       const p = pessoas[i];
       setProgresso({ done: i, total: pessoas.length, nome: p.nome });
       try {
-        const lp = await getLivePessoa(team, p.id, dias, incluirAtrasadas);
+        const lp = await getLivePessoa(team, p.id, faixa);
         if (!lp.resolvido) naoRes.push(p.nome);
         for (const s of lp.subtipos) {
           mat.push({ pessoa_id: p.id, subtipo: s.subtipo, total: s.total, atrasado: s.atrasado, fatal_hoje: s.fatal_hoje });
@@ -118,7 +114,7 @@ export default function RedistribuicaoModal({
     setFilaSel(null);
     setProgresso(null);
     setLoading(false);
-  }, [team, pessoas, dias, incluirAtrasadas]);
+  }, [team, pessoas, faixa]);
 
   useEffect(() => {
     load();
@@ -233,9 +229,16 @@ export default function RedistribuicaoModal({
         continue;
       }
       const usados = consumido.get(key) ?? new Set<number>();
-      const pool = (tarefas[m.fromId] || []).filter(
-        (t) => t.subtipo === m.subtipo && t.l1_task_id != null && !usados.has(t.l1_task_id),
-      );
+      const pool = (tarefas[m.fromId] || [])
+        .filter((t) => t.subtipo === m.subtipo && t.l1_task_id != null && !usados.has(t.l1_task_id))
+        // Prioriza as de DATA DE CONCLUSÃO PREVISTA mais antiga (vencidas primeiro,
+        // sem prazo por último). Sem esta ordenação explícita a seleção dependia
+        // da ordem que o L1 devolveu + a concatenação Tarefas+Compromissos.
+        .sort((a, b) => {
+          const pa = a.prazo ?? "9999";
+          const pb = b.prazo ?? "9999";
+          return pa < pb ? -1 : pa > pb ? 1 : 0;
+        });
       for (const t of pool.slice(0, m.qtd)) {
         const tid = t.l1_task_id as number;
         itens.push({ task_id: tid, to_id: m.toId, to_nome: m.toNome, origem: t.origem === "compromisso" ? "compromisso" : "tarefa" });
@@ -346,7 +349,7 @@ export default function RedistribuicaoModal({
               <Users className="h-5 w-5 text-[hsl(var(--dunatech-blue))]" />
               Redistribuição — {teamLabel(team)}
               <span className="text-sm font-normal text-muted-foreground">
-                {pessoas.length} colaborador(es) · {PERIODO_LABEL[dias] ?? `${dias} dias`}
+                {pessoas.length} colaborador(es) · conclusão prevista {fmtBR(faixa.inicio)}–{fmtBR(faixa.fim)} (vencidas incluídas)
               </span>
             </DialogTitle>
           </DialogHeader>
@@ -593,7 +596,7 @@ export default function RedistribuicaoModal({
       {detalhe && (
         <DetalheSubtipoModal
           team={team}
-          dias={dias}
+          dias={0}
           fromPessoa={detalhe.fromPessoa}
           subtipo={detalhe.subtipo}
           alvos={pessoas}

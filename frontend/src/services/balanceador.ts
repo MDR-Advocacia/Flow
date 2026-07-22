@@ -111,18 +111,27 @@ export async function getUsuarios(team: string, busca: string): Promise<UsuarioB
   return r.usuarios;
 }
 
+// Faixa EXATA de datas (data de conclusão prevista). `inicio`/`fim` no formato
+// YYYY-MM-DD. Sem eles, cai no modo legado por `dias`.
+export interface FaixaData {
+  inicio: string;
+  fim: string;
+}
+
 export async function getLivePessoa(
   team: string,
   pessoaId: number,
-  dias: number,
-  incluirAtrasadas = true,
+  faixa: FaixaData | null,
+  dias = 0,
 ): Promise<LivePessoa> {
-  const qs = new URLSearchParams({
-    team,
-    pessoa_id: String(pessoaId),
-    dias: String(dias),
-    incluir_atrasadas: String(incluirAtrasadas),
-  });
+  const qs = new URLSearchParams({ team, pessoa_id: String(pessoaId) });
+  if (faixa) {
+    qs.set("inicio", faixa.inicio);
+    qs.set("fim", faixa.fim);
+  } else {
+    qs.set("dias", String(dias));
+    qs.set("incluir_atrasadas", "true");
+  }
   return json(await apiFetch(`${BASE}/live-pessoa?${qs.toString()}`));
 }
 

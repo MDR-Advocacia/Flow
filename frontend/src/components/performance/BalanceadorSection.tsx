@@ -3,30 +3,28 @@
 // MOCK (2026-06-29): leitura real do pool; escrita simulada.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, AlertTriangle, ArrowLeftRight, CalendarClock, Clock, Loader2, Star, X } from "lucide-react";
+import { Activity, AlertTriangle, ArrowLeftRight, CalendarClock, CalendarRange, Clock, Loader2, Star, X } from "lucide-react";
+import { type DateRange } from "react-day-picker";
 
 import { Button } from "@/components/ui/button";
+import { Calendar } from "@/components/ui/calendar";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
-import { type Colaborador, getDiagnostico, listarExecucoes } from "@/services/balanceador";
+import { type Colaborador, type FaixaData, getDiagnostico, listarExecucoes } from "@/services/balanceador";
 import ExecucoesDialog from "@/components/balanceador/ExecucoesDialog";
 import RedistribuicaoModal from "@/components/balanceador/RedistribuicaoModal";
 
-const PERIODOS = [
-  { v: 0, l: "Todas as pendentes" },
-  { v: 7, l: "Próximos 7 dias" },
-  { v: 15, l: "Próximos 15 dias" },
-  { v: 30, l: "Próximos 30 dias" },
-  { v: 90, l: "Próximos 90 dias" },
-];
+// Data local → YYYY-MM-DD (sem UTC shift — usa o fuso do navegador).
+const toISO = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const fmtBR = (d: Date) => `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+const addDays = (d: Date, n: number) => {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
+};
 
 function cargoBadge(cargo: string | null): string {
   const c = (cargo || "").toLowerCase();
@@ -53,8 +51,12 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
   const [data, setData] = useState<Colaborador[]>([]);
   const [loading, setLoading] = useState(false);
   const [sel, setSel] = useState<Set<number>>(new Set());
-  const [dias, setDias] = useState(0);
-  const [incluirAtrasadas, setIncluirAtrasadas] = useState(true);
+  // Faixa EXATA por data de conclusão prevista. Default: hoje → hoje+30.
+  const [range, setRange] = useState<DateRange | undefined>(() => {
+    const hoje = new Date();
+    return { from: hoje, to: addDays(hoje, 30) };
+  });
+  const [calOpen, setCalOpen] = useState(false);
   const [cargo, setCargo] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [execucoesOpen, setExecucoesOpen] = useState(false);
@@ -118,6 +120,17 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
     [data, sel],
   );
 
+  // Faixa pronta pro modal (só quando início e fim estão escolhidos).
+  const faixa: FaixaData | null = useMemo(() => {
+    if (!range?.from || !range?.to) return null;
+    return { inicio: toISO(range.from), fim: toISO(range.to) };
+  }, [range]);
+  const faixaLabel = range?.from
+    ? range.to
+      ? `${fmtBR(range.from)} – ${fmtBR(range.to)}`
+      : `${fmtBR(range.from)} – …`
+    : "Escolher faixa";
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -168,18 +181,37 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
           )}
         </span>
         <div className="flex items-center gap-2">
-          <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground" title="Inclui as vencidas junto com o período escolhido">
-            <Checkbox checked={incluirAtrasadas} onCheckedChange={(c) => setIncluirAtrasadas(!!c)} /> Incluir atrasadas
-          </label>
-          <Select value={String(dias)} onValueChange={(v) => setDias(Number(v))}>
-            <SelectTrigger className="h-8 w-44 text-xs"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {PERIODOS.map((p) => (
-                <SelectItem key={p.v} value={String(p.v)}>{p.l}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Button size="sm" className="gap-1.5" disabled={sel.size === 0} onClick={() => setModalOpen(true)}>
+          <Popover open={calOpen} onOpenChange={setCalOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 gap-1.5 text-xs font-normal"
+                title="Faixa por DATA DE CONCLUSÃO PREVISTA. As vencidas entram sempre."
+              >
+                <CalendarRange className="h-3.5 w-3.5" /> {faixaLabel}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-auto p-0" align="end">
+              <div className="border-b px-3 py-2 text-[11px] text-muted-foreground">
+                Faixa por <b>data de conclusão prevista</b>. Vencidas incluídas sempre.
+              </div>
+              <Calendar
+                mode="range"
+                numberOfMonths={2}
+                selected={range}
+                onSelect={setRange}
+                defaultMonth={range?.from}
+              />
+            </PopoverContent>
+          </Popover>
+          <Button
+            size="sm"
+            className="gap-1.5"
+            disabled={sel.size === 0 || !faixa}
+            title={!faixa ? "Escolha o início e o fim da faixa" : undefined}
+            onClick={() => setModalOpen(true)}
+          >
             <ArrowLeftRight className="h-4 w-4" /> Redistribuir
           </Button>
         </div>
@@ -262,12 +294,11 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
         </div>
       )}
 
-      {modalOpen && (
+      {modalOpen && faixa && (
         <RedistribuicaoModal
           team={team}
           pessoas={selecionados}
-          dias={dias}
-          incluirAtrasadas={incluirAtrasadas}
+          faixa={faixa}
           onClose={() => setModalOpen(false)}
           onAplicado={onAplicado}
         />

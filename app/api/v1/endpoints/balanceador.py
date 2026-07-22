@@ -61,11 +61,15 @@ def descricoes(team: str = Query(...), ids: str = Query(...), db: Session = Depe
 def live_pessoa(
     team: str = Query(...),
     pessoa_id: int = Query(...),
-    dias: int = Query(0),
+    dias: int = Query(0, description="legado: janela de N dias (usar inicio/fim)"),
     incluir_atrasadas: bool = Query(True),
+    inicio: str | None = Query(None, description="faixa exata: data de conclusão prevista inicial (YYYY-MM-DD)"),
+    fim: str | None = Query(None, description="faixa exata: data de conclusão prevista final (YYYY-MM-DD)"),
     db: Session = Depends(get_db),
 ):
-    return BalanceadorService(db).live_pessoa(team, pessoa_id, dias, incluir_atrasadas)
+    return BalanceadorService(db).live_pessoa(
+        team, pessoa_id, dias, incluir_atrasadas, inicio=inicio, fim=fim,
+    )
 
 
 @router.get("/usuarios", summary="Destinos da fila: setor primeiro + busca externa no L1", dependencies=[_team])
