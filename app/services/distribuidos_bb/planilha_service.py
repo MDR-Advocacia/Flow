@@ -201,11 +201,18 @@ def _marcar_ja_existentes_no_l1(db: Session, processos: list[BbProcesso]) -> set
     `bbd_escritorios`, mesma regra de roteamento da distribuição). Best-effort:
     qualquer falha na consulta devolve set() e o fluxo segue como antes.
     """
-    com_cnj = [p for p in processos if len(norm.apenas_digitos(p.cnj or "")) == 20]
-    if not com_cnj:
-        return set()
-
+    # DENTRO do try: nada aqui pode derrubar o cadastro (o caso real que
+    # derrubou foi este — apenas_digitos devolve None pra processo SEM CNJ,
+    # o padrão dos BB Autor pré-judiciais, e len(None) explodia ANTES do
+    # try, travando o auto-cadastro do run inteiro em 21/07 20:07).
     try:
+        com_cnj = [
+            p for p in processos
+            if len(norm.apenas_digitos(p.cnj or "") or "") == 20
+        ]
+        if not com_cnj:
+            return set()
+
         from app.models.legal_one import LegalOneOffice
         from app.services.legal_one_client import LegalOneApiClient
 
