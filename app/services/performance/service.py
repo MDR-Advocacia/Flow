@@ -21,6 +21,18 @@ from sqlalchemy.orm import Session
 
 from app.models.performance import PerfPessoa, PerfTarefa
 
+# "Atrasada" = prazo em DIA anterior a hoje (BRT) — igual ao L1 e ao Balanceador.
+# Tarefa que vence HOJE (qualquer hora) NAO conta como atrasada; `< now()` cru
+# marcava atrasada às 12h a tarefa das 11h30 do MESMO dia (caso Letícia, 21/07).
+_SQL_ATRASADA = (
+    "(prazo_previsto AT TIME ZONE 'America/Sao_Paulo')::date"
+    " < (now() AT TIME ZONE 'America/Sao_Paulo')::date"
+)
+_SQL_ATRASADA_T = (
+    "(t.prazo_previsto AT TIME ZONE 'America/Sao_Paulo')::date"
+    " < (now() AT TIME ZONE 'America/Sao_Paulo')::date"
+)
+
 try:
     from zoneinfo import ZoneInfo
 
@@ -205,9 +217,9 @@ class PerformanceService:
         # ── FUTURO: carga aberta (pendentes/atrasadas), por tipo e próximos prazos ──
         pend = self.db.execute(
             text(
-                """
+                f"""
                 SELECT COUNT(*) AS total,
-                  COUNT(*) FILTER (WHERE prazo_previsto < now()) AS atrasado,
+                  COUNT(*) FILTER (WHERE {_SQL_ATRASADA}) AS atrasado,
                   COUNT(*) FILTER (WHERE prazo_previsto IS NULL) AS sem_prazo
                 FROM perf_l1_tarefa WHERE pessoa_id = :id AND status = 'Pendente'
                 """
@@ -217,9 +229,9 @@ class PerformanceService:
 
         pend_tipo = self.db.execute(
             text(
-                """
+                f"""
                 SELECT t.subtipo AS subtipo, COALESCE(c.categoria, 'profundo') AS categoria,
-                  COUNT(*) AS total, COUNT(*) FILTER (WHERE t.prazo_previsto < now()) AS atrasado
+                  COUNT(*) AS total, COUNT(*) FILTER (WHERE {_SQL_ATRASADA_T}) AS atrasado
                 FROM perf_l1_tarefa t LEFT JOIN perf_subtipo_categoria c ON c.subtipo = t.subtipo
                 WHERE t.pessoa_id = :id AND t.status = 'Pendente'
                 GROUP BY t.subtipo, c.categoria
@@ -429,7 +441,7 @@ class PerformanceService:
                 text(
                     f"""
                     SELECT pessoa_id, COUNT(*) AS pend,
-                           COUNT(*) FILTER (WHERE prazo_previsto < now()) AS atr
+                           COUNT(*) FILTER (WHERE {_SQL_ATRASADA}) AS atr
                     FROM perf_l1_tarefa
                     WHERE status = 'Pendente' AND pessoa_id IS NOT NULL {team_nb}
                     GROUP BY pessoa_id
@@ -498,7 +510,7 @@ class PerformanceService:
                     WHERE t.status = 'Cumprido' AND t.concluido_em >= :start AND t.concluido_em <= :end
                   ) AS vol,
                   COUNT(*) FILTER (WHERE t.status = 'Pendente') AS pendente,
-                  COUNT(*) FILTER (WHERE t.status = 'Pendente' AND t.prazo_previsto < now()) AS atrasado
+                  COUNT(*) FILTER (WHERE t.status = 'Pendente' AND {_SQL_ATRASADA_T}) AS atrasado
                 FROM perf_l1_tarefa t
                 LEFT JOIN perf_subtipo_categoria c ON c.subtipo = t.subtipo
                 WHERE t.subtipo IS NOT NULL {team_t}
@@ -575,7 +587,7 @@ class PerformanceService:
                 SELECT
                   COUNT(*) FILTER (WHERE t.status='Cumprido' AND t.concluido_em BETWEEN :start AND :end) AS concluido,
                   COUNT(*) FILTER (WHERE t.status='Pendente') AS pendente,
-                  COUNT(*) FILTER (WHERE t.status='Pendente' AND t.prazo_previsto < now()) AS atrasado,
+                  COUNT(*) FILTER (WHERE t.status='Pendente' AND {_SQL_ATRASADA_T}) AS atrasado,
                   COUNT(*) FILTER (WHERE t.status='Cumprido' AND t.prazo_previsto IS NOT NULL
                                    AND t.concluido_em <= t.prazo_previsto
                                    AND t.concluido_em BETWEEN :start AND :end) AS no_prazo,
@@ -821,7 +833,7 @@ class PerformanceService:
         elif escopo == "pendente":
             conds.append("t.status = 'Pendente'")
         else:  # atrasado
-            conds.append("t.status = 'Pendente' AND t.prazo_previsto < now()")
+            conds.append(f"t.status = 'Pendente' AND {_SQL_ATRASADA_T}")
         if pessoa_id:
             conds.append("t.pessoa_id = :pid")
             params["pid"] = pessoa_id
@@ -863,7 +875,9 @@ class PerformanceService:
         for r in rows:
             sit = ""
             if r.prazo_previsto:
-                dd = (r.prazo_previsto - now).days
+                _pz = r.prazo_previsto.astimezone(BRT) if BRT else r.prazo_previsto
+                _hj = now.astimezone(BRT) if BRT else now
+                dd = (_pz.date() - _hj.date()).days
                 sit = f"atrasada há {abs(dd)}d" if dd < 0 else ("vence hoje" if dd == 0 else f"vence em {dd}d")
             ws.append([
                 r.responsavel, r.cargo, r.l1_id, r.pasta, r.cnj, r.uf, r.subtipo, r.status,
@@ -985,7 +999,7 @@ class PerformanceService:
 
         `escopo`: "atrasado" (Pendente com prazo vencido) ou "pendente" (todo o
         pool aberto). A definição de atrasado é a MESMA do gráfico de barras
-        (`dashboard`): status='Pendente' AND prazo_previsto < now() — se
+        (`dashboard`): status='Pendente' AND prazo de DIA anterior (BRT) — se
         divergir, a pizza não fecha com a barra que o operador clicou.
         """
         p = self.db.execute(
@@ -995,7 +1009,7 @@ class PerformanceService:
         if not p:
             return None
 
-        filtro = "AND t.prazo_previsto < now()" if escopo == "atrasado" else ""
+        filtro = f"AND {_SQL_ATRASADA_T}" if escopo == "atrasado" else ""
         linhas = self.db.execute(
             text(
                 f"""
