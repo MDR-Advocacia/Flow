@@ -210,7 +210,7 @@ export default function MinhaEquipePage() {
       await triggerSync();
       toast({
         title: "Atualização disparada",
-        description: "Baixando o relatório do L1 e atualizando os dados — roda no servidor (~1–2 min).",
+        description: "Gerando um relatório NOVO no L1 (reflete o estado atual) e reingerindo — roda no servidor, leva alguns minutos.",
       });
       let tries = 0;
       const poll = setInterval(async () => {
@@ -227,7 +227,11 @@ export default function MinhaEquipePage() {
         } catch {
           /* ignore */
         }
-        if (tries > 24) {
+        // Geração fresca do relatório no L1 leva mais que um download: dá até
+        // ~12 min (48 × 15s) antes de soltar o spinner (o backend segue até
+        // concluir; o próximo reload pega). Antes eram 6 min e o toast de
+        // "atualizado" não chegava a disparar em relatório grande.
+        if (tries > 48) {
           clearInterval(poll);
           setSyncing(false);
         }

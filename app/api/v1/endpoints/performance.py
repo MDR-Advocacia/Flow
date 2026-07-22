@@ -382,7 +382,7 @@ def _run_sync_bg() -> None:
     from app.db.session import SessionLocal
     from app.services.onerequest._concurrency import single_worker_lock
     from app.services.performance.ingest_worker import _LOCK_KEY
-    from app.services.performance.report_ingest import baixar_e_ingerir
+    from app.services.performance.report_ingest import baixar_e_ingerir, gerar_e_ingerir
 
     # MESMO advisory lock do scheduler: sem ele, cliques repetidos no
     # "Atualizar agora" (ou o botão + o job das 9h juntos) rodavam ingestões
@@ -395,17 +395,37 @@ def _run_sync_bg() -> None:
             return
         db = SessionLocal()
         try:
-            baixar_e_ingerir(db, force=True)
+            # FORÇA um relatório FRESCO (gerar_e_ingerir), não o último que o L1
+            # já tinha. `baixar_e_ingerir` pega o relatório existente — que pode
+            # ter sido gerado horas antes, com prazos/status defasados: caso real
+            # 22/07, a Hellen aparecia com 20 "fatais hoje" que no L1 já tinham
+            # sido dilatadas pra 23-27/07 (e 1 já concluída), porque o relatório
+            # baixado era o das 13h. Gerar na hora reflete o estado ATUAL do L1.
+            # Fallback pro download do existente se a geração falhar (ex.: runner
+            # indisponível) — melhor um dado um pouco velho que dado nenhum.
+            res = gerar_e_ingerir(db)
+            if not res.get("ok"):
+                logger.warning(
+                    "Minha Equipe: geração fresca falhou (%s) — baixando o relatório existente.",
+                    res.get("motivo"),
+                )
+                baixar_e_ingerir(db, force=True)
         except Exception:  # noqa: BLE001
             logger.exception("Minha Equipe: falha na ingestão manual.")
         finally:
             db.close()
 
 
-@router.post("/sync", summary="Dispara a ingestão agora (baixa o relatório mais recente do L1)", dependencies=[_admin])
+@router.post("/sync", summary="Gera um relatório FRESCO no L1 e ingere (reflete o estado atual)", dependencies=[_admin])
 def sync_now(background: BackgroundTasks):
     background.add_task(_run_sync_bg)
-    return {"ok": True, "mensagem": "Ingestão disparada — baixando o relatório do L1 e atualizando os dados."}
+    return {
+        "ok": True,
+        "mensagem": (
+            "Atualização disparada — gerando um relatório novo no L1 e reingerindo. "
+            "Leva alguns minutos (o L1 monta o relatório do zero); o painel atualiza ao concluir."
+        ),
+    }
 
 
 # ── Manutenção do roster (editor de equipe) ────────────────────────────────
