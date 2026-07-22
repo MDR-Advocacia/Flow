@@ -300,7 +300,14 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
           pessoas={selecionados}
           faixa={faixa}
           onClose={() => setModalOpen(false)}
-          onAplicado={onAplicado}
+          onAplicado={() => {
+            // Refresh AUTOMÁTICO da tabela de diagnóstico (Atrasadas/Fatais/
+            // Futuras por pessoa): relê o snapshot, que o job já espelhou antes
+            // de marcar 'done'. Sem isto o operador precisava dar F5. Também
+            // borbulha pro pai (KPIs do topo do Minha Equipe).
+            load();
+            onAplicado?.();
+          }}
         />
       )}
 

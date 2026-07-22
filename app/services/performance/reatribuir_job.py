@@ -377,14 +377,20 @@ def _run(job_id: str, team: str, itens: list, movimentos: list, dry_run: bool) -
         if wf_queue and not dry_run and not _abortado(db, job_id):
             _fase_workflow_web(db, job, c, wf_queue, detalhe)
 
+        # Espelha as trocas no snapshot ANTES de marcar 'done': o front faz poll
+        # do status e, ao ver 'done', dá refresh na tabela de diagnóstico. Se o
+        # espelho viesse depois, o refresh pegava o snapshot AINDA sem a troca
+        # (relato do operador: precisava dar F5 pra contagem mudar). Agora, quando
+        # o status vira 'done', o snapshot já reflete — o refresh automático pega
+        # os números novos na hora.
         job.detalhe = list(detalhe)
+        db.commit()
+        if not dry_run:
+            _espelhar_snapshot(db, detalhe)
+
         job.status = "done"
         job.terminado_em = func.now()
         db.commit()
-
-        # Espelha as trocas no snapshot — a tabela de diagnóstico reflete na hora.
-        if not dry_run:
-            _espelhar_snapshot(db, detalhe)
 
         # Auditoria move-level na aba Relatórios (só na escrita real).
         if not dry_run and movimentos:
