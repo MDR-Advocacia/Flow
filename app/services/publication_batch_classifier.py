@@ -66,6 +66,47 @@ from app.services.classifier.response_schema import (
 logger = logging.getLogger(__name__)
 
 
+def _alertar_falha_batch(batch, error_message: str, requested_by_email: Optional[str]) -> None:
+    """Avisa por e-mail que o batch de classificação FALHOU ao ser criado na
+    Anthropic (ex.: HTTP 502). Vale pro envio manual E pro job noturno, porque
+    é chamado no ponto único onde o batch vira FAILED.
+
+    Best-effort: qualquer erro aqui é engolido — não pode derrubar o registro de
+    falha nem o fluxo do caller. Reusa o sender SMTP de mail_service."""
+    try:
+        from app.core.config import settings
+        from app.services.mail_service import send_failure_report
+
+        destinatarios = (
+            settings.classificacao_alert_email
+            or requested_by_email
+            or settings.mail_to
+            or settings.email_to
+        )
+        if not destinatarios:
+            logger.warning(
+                "Batch de classificação #%s falhou, mas não há destinatário de alerta "
+                "(CLASSIFICACAO_ALERT_EMAIL/MAIL_TO). E-mail não enviado.",
+                getattr(batch, "id", "?"),
+            )
+            return
+        total = getattr(batch, "total_records", None) or 0
+        origem = requested_by_email or "automático (job agendado)"
+        send_failure_report(
+            failed_items=[{
+                "cnj": f"Batch de classificação #{getattr(batch, 'id', '?')} · {total} publicações",
+                "motivo": (error_message or "erro desconhecido")[:1500],
+                "execution_id": getattr(batch, "id", None),
+            }],
+            batch_source=f"Classificação de Publicações (Batch API) · origem: {origem}",
+            recipients=destinatarios,
+            system_name="Flow",
+        )
+        logger.info("Alerta de falha do batch de classificação #%s enviado.", getattr(batch, "id", "?"))
+    except Exception:  # noqa: BLE001
+        logger.exception("Falha ao enviar alerta de e-mail do batch de classificação (ignorado).")
+
+
 class PublicationBatchClassifier:
     """
     Orquestra a classificação em lote de publicações via Anthropic Batch API.
@@ -438,6 +479,9 @@ class PublicationBatchClassifier:
             self.db.add(batch)
             self.db.commit()
             self.db.refresh(batch)
+            # Alerta por e-mail — o batch (manual OU job noturno) falhou ao ser
+            # criado na Anthropic. Best-effort: nunca derruba o fluxo.
+            _alertar_falha_batch(batch, str(exc), requested_by_email)
             raise
 
         # Persiste o registro local do batch
