@@ -458,6 +458,17 @@ def executar_coleta(
                 )
                 db.commit()
                 logger.exception("Distribuídos BB: auto-cadastro falhou (run %s).", run.id)
+                # Alerta por e-mail (mesmo mecanismo da classificação de
+                # publicações) — sem ele a falha ficava só no Log de tudo e os
+                # processos paravam em PENDENTE_CADASTRO sem ninguém saber.
+                from app.services.distribuidos_bb.alertas import alertar_falha_cadastro
+
+                alertar_falha_cadastro(
+                    contexto="auto-cadastro da coleta",
+                    erro=str(exc_ac),
+                    total_processos=run.total_distribuidos,
+                    run_id=run.id,
+                )
     except Exception as exc:  # noqa: BLE001
         run.status = RUN_ERRO
         run.erro = str(exc)

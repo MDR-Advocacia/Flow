@@ -297,10 +297,26 @@ def cadastrar_planilha(
         if not _is_unauthorized(exc):
             raise
         logger.warning("Import L1: 401 — recapturando token e tentando de novo.")
-        return _cadastrar_once(
-            conteudo, file_name, firm_id=firm_id, dry_run=dry_run,
-            poll_max_s=poll_max_s, tok=obter_token(forcar=True),
-        )
+        try:
+            return _cadastrar_once(
+                conteudo, file_name, firm_id=firm_id, dry_run=dry_run,
+                poll_max_s=poll_max_s, tok=obter_token(forcar=True),
+            )
+        except ImportL1Error as exc2:
+            # 401 MESMO com token fresco = credencial/gateway inválido nessa
+            # janela (aconteceu 2026-07-23: SSO do L1 instável). O token ruim
+            # ficou cacheado com TTL de ~11h e envenenava as próximas rodadas —
+            # apaga o cache pra próxima tentativa começar do zero.
+            if _is_unauthorized(exc2):
+                try:
+                    _TOKEN_CACHE.unlink(missing_ok=True)
+                    logger.warning(
+                        "Import L1: 401 persistiu após recaptura — cache de token "
+                        "apagado (próxima tentativa recaptura do zero)."
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            raise
 
 
 def _cadastrar_once(conteudo, file_name, *, firm_id, dry_run, poll_max_s, tok) -> dict[str, Any]:
