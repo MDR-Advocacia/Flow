@@ -2742,6 +2742,22 @@ class PublicationSearchService:
             if items:
                 grouped_list.append(self._build_group(items))
 
+        # Etiquetas do L1 (cache local, 1 query pra página) — chip na tela de
+        # tratamento pro operador ver processo estratégico/prioritário ANTES
+        # de tratar. Ausente do cache = None (sem info ainda), [] = sem tag.
+        try:
+            from app.services.publication_etiquetas import etiquetas_por_lawsuit
+
+            et_map = etiquetas_por_lawsuit(
+                self.db,
+                [g["lawsuit_id"] for g in grouped_list if g.get("lawsuit_id")],
+            )
+            for g in grouped_list:
+                lid = g.get("lawsuit_id")
+                g["l1_etiquetas"] = et_map.get(int(lid)) if lid else None
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao anexar etiquetas L1 nos grupos (ignorado).")
+
         return {
             "total_groups": total_groups,
             "total_records": total_records,

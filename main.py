@@ -174,6 +174,18 @@ async def lifespan(_: FastAPI):
             "Falha ao inicializar watchdog de buscas de publicações no startup."
         )
 
+    # Enriquecimento de publicações com as etiquetas (tags) do processo no L1
+    # — caminho web com cache local; chip "Estratégico" e afins na tela de
+    # tratamento (uma publicação estratégica já foi perdida sem isso).
+    try:
+        from app.services.publication_etiquetas import (
+            register_publication_etiquetas_job,
+        )
+
+        register_publication_etiquetas_job(scheduler)
+    except Exception:
+        logger.exception("Falha ao registrar job de etiquetas L1 das publicações.")
+
     # Worker periódico do fluxo "Agendar Prazos Iniciais" — gated pela flag
     # prazos_iniciais_auto_classification_enabled (default off).
     try:

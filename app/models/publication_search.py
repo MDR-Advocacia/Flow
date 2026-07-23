@@ -165,3 +165,19 @@ class PublicationRecord(Base):
         back_populates="record",
         uselist=False,
     )
+
+
+class PublicationL1EtiquetaCache(Base):
+    """Cache das etiquetas (tags) do L1 por processo — a API REST não expõe
+    etiquetas, então a leitura é pelo caminho web (página de edição, ~200KB por
+    processo). O cache evita repetir esse GET: o job de enriquecimento busca só
+    os lawsuits com publicação recente que estão fora do cache ou vencidos.
+
+    `etiquetas`: lista [{"id", "name", "class_name", "color_id"}] — [] = o
+    processo foi consultado e NÃO tem etiqueta (também é informação)."""
+
+    __tablename__ = "pub_l1_etiqueta_cache"
+
+    lawsuit_id = Column(Integer, primary_key=True)
+    etiquetas = Column(JSON, nullable=False, default=list)
+    fetched_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

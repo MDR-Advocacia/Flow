@@ -370,6 +370,14 @@ interface ProposedTask {
   is_custom?: boolean;
 }
 
+// Etiqueta (tag) do processo no L1 — vem do cache do backend (caminho web).
+interface L1Etiqueta {
+  id: number | null;
+  name: string | null;
+  class_name: string | null; // ex.: "tag-color-orange" (classe do próprio L1)
+  color_id: number | null;
+}
+
 interface GroupedRecord {
   lawsuit_id: number | null;
   lawsuit_cnj: string | null;
@@ -378,6 +386,46 @@ interface GroupedRecord {
   proposed_task: ProposedTask | null;
   proposed_tasks: ProposedTask[];
   classifications: Classification[];
+  // null/undefined = ainda não enriquecido; [] = consultado e sem etiqueta.
+  l1_etiquetas?: L1Etiqueta[] | null;
+}
+
+// Mapa das cores de etiqueta do L1 → classes Tailwind (fallback: cinza).
+const L1_TAG_COLORS: Record<string, string> = {
+  "tag-color-red": "bg-red-100 text-red-800 border-red-300",
+  "tag-color-orange": "bg-orange-100 text-orange-800 border-orange-300",
+  "tag-color-yellow": "bg-amber-100 text-amber-800 border-amber-300",
+  "tag-color-green": "bg-emerald-100 text-emerald-800 border-emerald-300",
+  "tag-color-lime": "bg-lime-100 text-lime-800 border-lime-300",
+  "tag-color-teal": "bg-teal-100 text-teal-800 border-teal-300",
+  "tag-color-blue": "bg-blue-100 text-blue-800 border-blue-300",
+  "tag-color-indigo": "bg-indigo-100 text-indigo-800 border-indigo-300",
+  "tag-color-purple": "bg-purple-100 text-purple-800 border-purple-300",
+  "tag-color-pink": "bg-pink-100 text-pink-800 border-pink-300",
+  "tag-color-gray": "bg-slate-100 text-slate-700 border-slate-300",
+};
+
+function L1EtiquetaChips({ etiquetas }: { etiquetas?: L1Etiqueta[] | null }) {
+  if (!etiquetas || etiquetas.length === 0) return null;
+  return (
+    <div className="mt-1 flex max-w-[150px] flex-wrap gap-1">
+      {etiquetas.map((t, i) => {
+        const cores = L1_TAG_COLORS[t.class_name ?? ""] ?? "bg-slate-100 text-slate-700 border-slate-300";
+        const destaque = /ESTRAT|PRIORI|URGEN/i.test(t.name ?? "");
+        return (
+          <span
+            key={`${t.id ?? i}`}
+            title={`Etiqueta do processo no Legal One: ${t.name ?? ""}`}
+            className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-semibold leading-none ${cores} ${
+              destaque ? "ring-1 ring-current" : ""
+            }`}
+          >
+            {destaque ? "★ " : ""}{t.name}
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 interface GroupedResponse {
@@ -3639,9 +3687,13 @@ const PublicationsPage = () => {
                                   })()}
                                 </div>
                                 <div className="text-muted-foreground">ID: {group.lawsuit_id}</div>
+                                <L1EtiquetaChips etiquetas={group.l1_etiquetas} />
                               </div>
                             ) : group.lawsuit_id ? (
-                              <span className="text-muted-foreground">{group.lawsuit_id}</span>
+                              <div>
+                                <span className="text-muted-foreground">{group.lawsuit_id}</span>
+                                <L1EtiquetaChips etiquetas={group.l1_etiquetas} />
+                              </div>
                             ) : (
                               <div>
                                 <span className="italic text-orange-600">sem processo</span>
