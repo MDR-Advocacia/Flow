@@ -259,9 +259,15 @@ def resumo(db: Session, *, equipe: str | None = None, dias: int = 30) -> dict:
 
 def lista_eventos(
     db: Session, *, equipe: str | None = None, pessoa_id: int | None = None,
+    dia: str | None = None, subtipo: str | None = None,
     dias: int = 30, limit: int = 100, offset: int = 0,
 ) -> dict:
-    """Lista paginada dos eventos de adiamento (pro drill / export)."""
+    """Lista paginada dos eventos de adiamento (drill ao clicar num gráfico).
+
+    Filtros combináveis: `pessoa_id` (clicou na barra da pessoa), `dia`
+    (YYYY-MM-DD, clicou na barra do dia) e `subtipo` (clicou na barra do tipo).
+    A descrição livre da tarefa NÃO vive aqui — o front enriquece ao vivo do L1
+    por l1_task_id (mesmo caminho do Balanceador)."""
     desde = _dia_brt_meia_noite() - _dt.timedelta(days=max(1, dias))
     where = "dia >= :desde"
     params: dict = {"desde": desde, "limit": limit, "offset": offset}
@@ -271,6 +277,17 @@ def lista_eventos(
     if pessoa_id:
         where += " AND pessoa_id = :pid"
         params["pid"] = pessoa_id
+    if dia:
+        where += " AND (dia AT TIME ZONE :tzf)::date = :dia"
+        params["tzf"] = _BRT
+        params["dia"] = dia
+    if subtipo:
+        # "(sem subtipo)" no gráfico = subtipo NULL/vazio no banco.
+        if subtipo == "(sem subtipo)":
+            where += " AND (subtipo IS NULL OR subtipo = '')"
+        else:
+            where += " AND subtipo = :sub"
+            params["sub"] = subtipo
 
     total = db.execute(
         text(f"SELECT count(*) FROM perf_reagendamento WHERE {where}"), params

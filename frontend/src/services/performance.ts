@@ -549,10 +549,13 @@ export interface ReagEvento {
   era_fatal_hoje: boolean;
 }
 export async function getReagendamentoEventos(
-  team: string, params: { pessoaId?: number; days?: number; limit?: number; offset?: number } = {},
+  team: string,
+  params: { pessoaId?: number; dia?: string; subtipo?: string; days?: number; limit?: number; offset?: number } = {},
 ): Promise<{ total: number; items: ReagEvento[] }> {
   const qs = new URLSearchParams({ team, days: String(params.days ?? 30) });
   if (params.pessoaId != null) qs.set("pessoa_id", String(params.pessoaId));
+  if (params.dia) qs.set("dia", params.dia);
+  if (params.subtipo) qs.set("subtipo", params.subtipo);
   if (params.limit != null) qs.set("limit", String(params.limit));
   if (params.offset != null) qs.set("offset", String(params.offset));
   return json(await apiFetch(`${BASE}/reagendamentos/eventos?${qs.toString()}`));

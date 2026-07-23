@@ -9,13 +9,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip as RTooltip, XAxis, YAxis,
 } from "recharts";
-import { AlertTriangle, CalendarClock, Clock, Loader2, Repeat, TrendingUp } from "lucide-react";
+import { AlertTriangle, ArrowRight, CalendarClock, Clock, ExternalLink, Loader2, Repeat, TrendingUp, X } from "lucide-react";
 
 import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { InfoHint } from "@/components/performance/InfoHint";
-import { type ReagResumo, getReagendamentos } from "@/services/performance";
+import { type ReagEvento, type ReagResumo, getReagendamentoEventos, getReagendamentos } from "@/services/performance";
+import { getDescricoes } from "@/services/balanceador";
 import { useToast } from "@/hooks/use-toast";
 
 const L1_URL = "https://mdradvocacia.novajus.com.br/processos/Processos/details";
@@ -23,6 +25,19 @@ const fmtDia = (iso: string) => {
   const [y, m, d] = iso.split("-");
   return `${d}/${m}`;
 };
+const fmtData = (iso: string | null) => {
+  if (!iso) return "—";
+  const dt = new Date(iso);
+  if (Number.isNaN(dt.getTime())) return iso.slice(0, 10);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(dt.getDate())}/${p(dt.getMonth() + 1)}/${dt.getFullYear()}`;
+};
+
+// Filtro de drill: qual barra foi clicada (pessoa / dia / subtipo).
+type Drill =
+  | { tipo: "pessoa"; pessoaId: number; label: string }
+  | { tipo: "dia"; dia: string; label: string }
+  | { tipo: "subtipo"; subtipo: string; label: string };
 
 function Kpi({
   icone, valor, rotulo, hint, tone = "",
@@ -45,6 +60,14 @@ export default function ReagendamentosSection({ team }: { team: string }) {
   const [loading, setLoading] = useState(false);
   const [dias, setDias] = useState(30);
 
+  // Drill: clicou numa barra → lista os processos daquele recorte embaixo.
+  const [drill, setDrill] = useState<Drill | null>(null);
+  const [eventos, setEventos] = useState<ReagEvento[]>([]);
+  const [eventosTotal, setEventosTotal] = useState(0);
+  const [eventosLoading, setEventosLoading] = useState(false);
+  const [descMap, setDescMap] = useState<Record<number, string | null>>({});
+  const [descLoading, setDescLoading] = useState(false);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -57,6 +80,37 @@ export default function ReagendamentosSection({ team }: { team: string }) {
   }, [team, dias, toast]);
 
   useEffect(() => { load(); }, [load]);
+  // Troca de time/janela zera o drill (o recorte não faz mais sentido).
+  useEffect(() => { setDrill(null); setEventos([]); setDescMap({}); }, [team, dias]);
+
+  const abrirDrill = useCallback(async (d: Drill) => {
+    setDrill(d);
+    setEventosLoading(true);
+    setDescMap({});
+    try {
+      const r = await getReagendamentoEventos(team, {
+        days: dias, limit: 300,
+        pessoaId: d.tipo === "pessoa" ? d.pessoaId : undefined,
+        dia: d.tipo === "dia" ? d.dia : undefined,
+        subtipo: d.tipo === "subtipo" ? d.subtipo : undefined,
+      });
+      setEventos(r.items);
+      setEventosTotal(r.total);
+      // Enriquece a DESCRIÇÃO ao vivo do L1 (não vive no snapshot) — best-effort.
+      const ids = r.items.map((e) => e.l1_task_id).filter((x): x is number => !!x);
+      if (ids.length) {
+        setDescLoading(true);
+        getDescricoes(team, ids.slice(0, 150))
+          .then(setDescMap)
+          .catch(() => undefined)
+          .finally(() => setDescLoading(false));
+      }
+    } catch (e) {
+      toast({ title: "Erro ao listar os reagendados", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setEventosLoading(false);
+    }
+  }, [team, dias, toast]);
 
   const k = data?.kpis;
 
@@ -106,15 +160,19 @@ export default function ReagendamentosSection({ team }: { team: string }) {
 
           {/* Por dia */}
           <Card><CardContent className="p-4">
-            <div className="mb-2 text-sm font-semibold">Adiamentos por dia</div>
+            <div className="mb-2 text-sm font-semibold">Adiamentos por dia
+              <span className="ml-1 text-[10px] font-normal text-muted-foreground">· clique num dia pra listar</span>
+            </div>
             <ResponsiveContainer width="100%" height={Math.max(160, 200)}>
               <BarChart data={data.por_dia.map((d) => ({ ...d, label: fmtDia(d.dia), emdia: d.total - d.fatais }))}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
                 <XAxis dataKey="label" fontSize={11} tickLine={false} axisLine={false} />
                 <YAxis fontSize={11} allowDecimals={false} tickLine={false} axisLine={false} />
                 <RTooltip cursor={{ fill: "hsl(var(--muted))", opacity: 0.4 }} />
-                <Bar dataKey="fatais" name="Fatais empurrados" stackId="d" fill="#e11d48" />
-                <Bar dataKey="emdia" name="Demais adiamentos" stackId="d" fill="#f59e0b" radius={[3, 3, 0, 0]} />
+                <Bar dataKey="fatais" name="Fatais empurrados" stackId="d" fill="#e11d48" cursor="pointer"
+                  onClick={(d: any) => { const dia = d?.dia ?? d?.payload?.dia; if (dia) abrirDrill({ tipo: "dia", dia, label: `dia ${fmtDia(dia)}` }); }} />
+                <Bar dataKey="emdia" name="Demais adiamentos" stackId="d" fill="#f59e0b" radius={[3, 3, 0, 0]} cursor="pointer"
+                  onClick={(d: any) => { const dia = d?.dia ?? d?.payload?.dia; if (dia) abrirDrill({ tipo: "dia", dia, label: `dia ${fmtDia(dia)}` }); }} />
               </BarChart>
             </ResponsiveContainer>
           </CardContent></Card>
@@ -125,6 +183,7 @@ export default function ReagendamentosSection({ team }: { team: string }) {
               <div className="mb-2 flex items-center gap-1.5 text-sm font-semibold">
                 Quem mais adia
                 <InfoHint text="Ranking por nº de adiamentos. Reagendamento crônico costuma esconder tarefa que não vai sair." />
+                <span className="text-[10px] font-normal text-muted-foreground">· clique numa pessoa pra listar</span>
               </div>
               <ResponsiveContainer width="100%" height={Math.max(200, data.por_pessoa.slice(0, 12).length * 26)}>
                 <BarChart data={data.por_pessoa.slice(0, 12)} layout="vertical" margin={{ left: 8, right: 24 }}>
@@ -133,14 +192,18 @@ export default function ReagendamentosSection({ team }: { team: string }) {
                   <YAxis type="category" dataKey="nome" width={130} fontSize={10}
                     tickFormatter={(n: string) => n.split(" ").slice(0, 2).join(" ")} tickLine={false} axisLine={false} />
                   <RTooltip cursor={{ fill: "hsl(var(--muted))", opacity: 0.4 }} />
-                  <Bar dataKey="total" name="Adiamentos" radius={[0, 4, 4, 0]}>
+                  <Bar dataKey="total" name="Adiamentos" radius={[0, 4, 4, 0]} cursor="pointer"
+                    onClick={(d: any) => {
+                      const p = d?.payload ?? d;
+                      if (p?.pessoa_id) abrirDrill({ tipo: "pessoa", pessoaId: p.pessoa_id, label: p.nome });
+                    }}>
                     {data.por_pessoa.slice(0, 12).map((p, i) => (
                       <Cell key={i} fill={p.fatais > 0 ? "#e11d48" : "#f59e0b"} />
                     ))}
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
-              <p className="mt-1 text-[10px] text-muted-foreground">Vermelho = tem fatal empurrado.</p>
+              <p className="mt-1 text-[10px] text-muted-foreground">Vermelho = tem fatal empurrado. Clique pra ver os processos.</p>
             </CardContent></Card>
 
             {/* Tarefas reincidentes */}
@@ -188,19 +251,89 @@ export default function ReagendamentosSection({ team }: { team: string }) {
           {/* Por subtipo */}
           {data.por_subtipo.length > 0 && (
             <Card><CardContent className="p-4">
-              <div className="mb-2 text-sm font-semibold">Adiamentos por tipo de tarefa</div>
+              <div className="mb-2 text-sm font-semibold">Adiamentos por tipo de tarefa
+                <span className="ml-1 text-[10px] font-normal text-muted-foreground">· clique num tipo pra listar</span>
+              </div>
               <div className="space-y-1">
                 {data.por_subtipo.map((s) => (
-                  <div key={s.subtipo} className="flex items-center gap-2 text-xs">
+                  <button key={s.subtipo} type="button"
+                    onClick={() => abrirDrill({ tipo: "subtipo", subtipo: s.subtipo, label: s.subtipo })}
+                    className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-xs transition-colors hover:bg-muted/60">
                     <div className="w-56 truncate" title={s.subtipo}>{s.subtipo}</div>
                     <div className="h-3 flex-1 overflow-hidden rounded-full bg-muted">
                       <div className="h-full bg-amber-400" style={{ width: `${(s.total / data.por_subtipo[0].total) * 100}%` }} />
                     </div>
                     <div className="w-10 text-right font-semibold tabular-nums">{s.total}</div>
-                  </div>
+                  </button>
                 ))}
               </div>
             </CardContent></Card>
+          )}
+
+          {/* Listagem do DRILL — processos reagendados do recorte clicado */}
+          {drill && (
+            <Card className="border-primary/40">
+              <CardContent className="p-4">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="text-sm font-semibold">
+                    Processos reagendados — {drill.label}
+                    <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                      {eventosLoading ? "carregando…" : `${eventosTotal} evento(s)`}
+                      {descLoading && " · buscando descrições no L1…"}
+                    </span>
+                  </div>
+                  <Button variant="ghost" size="sm" className="h-7 gap-1 text-xs" onClick={() => setDrill(null)}>
+                    <X className="h-3.5 w-3.5" /> Fechar
+                  </Button>
+                </div>
+                {eventosLoading ? (
+                  <p className="py-8 text-center text-sm text-muted-foreground">
+                    <Loader2 className="mr-1 inline h-4 w-4 animate-spin" /> Carregando…
+                  </p>
+                ) : eventos.length === 0 ? (
+                  <p className="py-8 text-center text-sm text-muted-foreground">Nenhum processo neste recorte.</p>
+                ) : (
+                  <div className="max-h-[460px] overflow-auto rounded border">
+                    <Table>
+                      <TableHeader className="sticky top-0 z-10 bg-background">
+                        <TableRow>
+                          <TableHead>Processo / descrição</TableHead>
+                          {drill.tipo !== "pessoa" && <TableHead>Responsável</TableHead>}
+                          {drill.tipo !== "dia" && <TableHead>Dia</TableHead>}
+                          <TableHead>De → Para</TableHead>
+                          <TableHead className="text-right">Adiou</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {eventos.map((e, i) => (
+                          <TableRow key={`${e.l1_task_id}-${i}`} className={e.era_fatal_hoje ? "bg-rose-50/40" : ""}>
+                            <TableCell className="max-w-[440px] text-xs">
+                              <a href={`${L1_URL}/${e.l1_task_id}`} target="_blank" rel="noreferrer"
+                                className="font-medium text-primary hover:underline">
+                                {(e.l1_task_id && descMap[e.l1_task_id]) || e.pasta || e.cnj || `#${e.l1_task_id}`}
+                                <ExternalLink className="ml-1 inline h-3 w-3" />
+                              </a>
+                              <div className="text-[10px] text-muted-foreground">
+                                {[e.subtipo, e.cnj || e.pasta].filter(Boolean).join(" · ")}
+                                {e.era_fatal_hoje && <span className="ml-1 font-medium text-rose-600">· era fatal no dia</span>}
+                              </div>
+                            </TableCell>
+                            {drill.tipo !== "pessoa" && <TableCell className="text-xs">{e.pessoa || "—"}</TableCell>}
+                            {drill.tipo !== "dia" && <TableCell className="whitespace-nowrap text-xs tabular-nums">{fmtDia(e.dia)}</TableCell>}
+                            <TableCell className="whitespace-nowrap text-xs tabular-nums">
+                              <span className="text-muted-foreground">{fmtData(e.prazo_de)}</span>
+                              <ArrowRight className="mx-1 inline h-3 w-3 text-muted-foreground" />
+                              <span className="font-medium">{fmtData(e.prazo_para)}</span>
+                            </TableCell>
+                            <TableCell className="text-right font-semibold tabular-nums text-rose-700">+{e.dias_adiado}d</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           )}
         </>
       )}

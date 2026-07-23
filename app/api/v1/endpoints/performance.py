@@ -153,6 +153,8 @@ def reagendamentos(team: str = Query(...), days: int = Query(30, ge=1, le=180), 
 def reagendamentos_eventos(
     team: str = Query(...),
     pessoa_id: Optional[int] = Query(None),
+    dia: Optional[str] = Query(None, description="YYYY-MM-DD — clicou na barra do dia"),
+    subtipo: Optional[str] = Query(None, description="clicou na barra do tipo"),
     days: int = Query(30, ge=1, le=180),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -160,7 +162,10 @@ def reagendamentos_eventos(
 ):
     from app.services.performance import reagendamento_service as reag
 
-    return reag.lista_eventos(db, equipe=team, pessoa_id=pessoa_id, dias=days, limit=limit, offset=offset)
+    return reag.lista_eventos(
+        db, equipe=team, pessoa_id=pessoa_id, dia=dia, subtipo=subtipo,
+        dias=days, limit=limit, offset=offset,
+    )
 
 
 @router.get("/dashboard", summary="Painel do time: vazão, pool/atrasado, jornada, top tipos", dependencies=[_team])
