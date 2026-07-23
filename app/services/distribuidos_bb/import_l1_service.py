@@ -58,13 +58,52 @@ def _runner_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "runners" / "legalone"
 
 
+def _sync_web_session(web_cookies: dict[str, Any]) -> None:
+    """Regrava os cookies da sessão web no cache compartilhado do legacy_task_http.
+
+    O L1 é single-session por usuário: quando a captura precisou de LOGIN NOVO,
+    a sessão anterior (que o resto do sistema usa) morreu. Gravar os cookies
+    novos aqui faz todo mundo herdar a sessão em vez de tomar 403 e re-logar —
+    o que derrubaria o NOSSO token. Best-effort."""
+    try:
+        from filelock import FileLock
+
+        from app.services.prazos_iniciais.legacy_task_http_cancellation_service import (
+            _SESSION_CACHE_PATH,
+            _SESSION_LOCK_PATH,
+        )
+
+        cookies = {str(k): str(v) for k, v in (web_cookies or {}).items()}
+        if ".ASPXAUTH" not in cookies:
+            return
+        with FileLock(str(_SESSION_LOCK_PATH), timeout=30):
+            _SESSION_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _SESSION_CACHE_PATH.write_text(
+                json.dumps(
+                    {"cookies": cookies, "obtained_at": datetime.now(timezone.utc).isoformat()},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        logger.info("Sessão web compartilhada atualizada com os cookies do login da captura.")
+    except Exception:  # noqa: BLE001
+        logger.warning("Não consegui sincronizar a sessão web compartilhada.", exc_info=True)
+
+
 def _capturar_token() -> dict[str, Any]:
     script = _runner_dir() / "capture-l1-token.js"
     if not script.exists():
         raise ImportL1Error(f"Runner de captura não encontrado: {script}")
+    # Sessão compartilhada do legacy_task_http: o runner tenta SSO silencioso
+    # com esses cookies antes de fazer login com credencial (que derrubaria as
+    # sessões dos outros robôs — L1 é single-session por usuário).
+    from app.services.prazos_iniciais.legacy_task_http_cancellation_service import (
+        _SESSION_CACHE_PATH as _WEB_SESSION_FILE,
+    )
+
     try:
         completed = subprocess.run(
-            ["node", script.name],
+            ["node", script.name, "--session-file", str(_WEB_SESSION_FILE)],
             cwd=str(_runner_dir()),
             capture_output=True,
             text=True,
@@ -87,6 +126,10 @@ def _capturar_token() -> dict[str, Any]:
     data = json.loads(linha)
     if not data.get("ok") or not data.get("token"):
         raise ImportL1Error(f"Captura de token falhou: {data.get('error') or data}")
+    # Login novo aconteceu → sincroniza o cache compartilhado (senão o próximo
+    # _ensure_session dos outros fluxos re-loga e mata o token que acabamos de pegar).
+    if data.get("didFullLogin") and data.get("webCookies"):
+        _sync_web_session(data["webCookies"])
     return data
 
 

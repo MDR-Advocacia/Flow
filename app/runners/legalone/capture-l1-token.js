@@ -3,11 +3,19 @@
 // gateway interno (azure-api.net). Devolve isso pro Python fazer o import da
 // planilha por HTTP puro (mesmo padrão do legacy_task_http, mas app novo).
 //
-// Uso: node capture-l1-token.js [--base-url https://firm.legalone.com.br]
-// Saída (stdout, última linha): JSON { ok, token, subscriptionKey, tenancy, source }
+// SESSÃO COMPARTILHADA (2026-07-23): o L1 é single-session por usuário — cada
+// login novo derruba a sessão dos outros robôs (e o JWT capturado morre quando
+// alguém loga depois). Então: se existir o cache de cookies do legacy_task_http
+// (--session-file), injeta os cookies e tenta SSO SILENCIOSO (sem credencial).
+// Só faz login completo se a sessão compartilhada estiver morta — e nesse caso
+// devolve os cookies novos (webCookies) pro Python regravar no cache, pra o
+// resto do sistema herdar a sessão em vez de ser derrubado por ela.
 //
-// Login/SSO espelhado do generate-report.js (OnePass + key selection).
+// Uso: node capture-l1-token.js [--base-url ...] [--session-file /app/data/legacy_task_http_session.json]
+// Saída (stdout, última linha): JSON { ok, token, subscriptionKey, tenancy,
+//   source, didFullLogin, webCookies }
 
+const fs = require('fs');
 const { chromium } = require('playwright');
 
 function parseArgs(argv) {
@@ -152,6 +160,17 @@ async function main() {
     returnUrl: `${loginBase}/home`,
   };
 
+  // Cookies da sessão web compartilhada (cache do legacy_task_http).
+  const sessionFile = args['session-file'] || process.env.L1_SHARED_SESSION_FILE || '';
+  let sharedCookies = null;
+  if (sessionFile && fs.existsSync(sessionFile)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(sessionFile, 'utf-8'));
+      const jar = raw && raw.cookies ? raw.cookies : null;
+      if (jar && jar['.ASPXAUTH']) sharedCookies = jar;
+    } catch (_) { /* cache ilegível = ignora e loga do zero */ }
+  }
+
   const launchOptions = { headless: true };
   if (process.env.PLAYWRIGHT_CHANNEL) launchOptions.channel = process.env.PLAYWRIGHT_CHANNEL;
   const browser = await chromium.launch(launchOptions);
@@ -161,6 +180,13 @@ async function main() {
     if (rt === 'image' || rt === 'media' || rt === 'font') return route.abort();
     return route.continue();
   });
+  if (sharedCookies) {
+    await context.addCookies(
+      Object.entries(sharedCookies).map(([name, value]) => ({
+        name, value: String(value), url: `${loginBase}/`,
+      })),
+    ).catch(() => { sharedCookies = null; });
+  }
   const page = await context.newPage();
 
   // Sniffer: primeiro request ao gateway interno com Bearer → captura token+key.
@@ -180,12 +206,37 @@ async function main() {
     } catch (_) { /* ignore */ }
   });
 
+  let didFullLogin = false;
   try {
-    await login(page, loginConfig);
-    // Já autenticado no OnePass — pula pro app novo, que deve entrar via SSO
-    // silencioso e disparar as chamadas ao gateway (o Bearer sai nelas).
+    if (sharedCookies) {
+      // Sessão compartilhada: valida no novajus SEM credencial. Se a home abrir
+      // logada, ninguém é derrubado; se cair em tela de auth, login completo.
+      await page.goto(loginConfig.returnUrl, { waitUntil: 'domcontentloaded', timeout: 120000 }).catch(() => {});
+      await waitForPageSettle(page, 3000);
+      const ctxShared = await capturePageContext(page);
+      if (isAuthenticationPage(ctxShared)) {
+        console.error('[cap] sessao compartilhada morta — login completo.');
+        await login(page, loginConfig);
+        didFullLogin = true;
+      } else {
+        console.error('[cap] sessao compartilhada VALIDA — sem novo login.');
+      }
+    } else {
+      await login(page, loginConfig);
+      didFullLogin = true;
+    }
+    // Pula pro app novo, que deve entrar via SSO silencioso e disparar as
+    // chamadas ao gateway (o Bearer sai nelas).
     await page.goto(`${appBase}/`, { waitUntil: 'domcontentloaded', timeout: 120000 }).catch(() => {});
     await waitForPageSettle(page, 3000);
+    // Se o firm devolveu tela de auth (SSO não foi silencioso), completa por lá.
+    const ctxFirm = await capturePageContext(page);
+    if (isAuthenticationPage(ctxFirm) && !captured.token) {
+      console.error('[cap] firm pediu auth — completando login no SSO.');
+      await login(page, { ...loginConfig, returnUrl: `${appBase}/` });
+      didFullLogin = true;
+      await waitForPageSettle(page, 3000);
+    }
     for (let i = 0; i < 45 && !captured.token; i += 1) {
       await page.waitForTimeout(1000);
     }
@@ -208,14 +259,26 @@ async function main() {
       }
     }
 
+    // Cookies atuais do novajus (pro Python regravar no cache compartilhado
+    // quando houve login novo — o resto do sistema herda a sessão).
+    let webCookies = null;
+    try {
+      const jar = await context.cookies(`${loginBase}/`);
+      webCookies = {};
+      for (const c of jar) webCookies[c.name] = c.value;
+      if (!webCookies['.ASPXAUTH']) webCookies = null;
+    } catch (_) { webCookies = null; }
+
     const ctx = await capturePageContext(page);
-    console.error(`[cap] token=${captured.token ? 'SIM(' + captured.token.length + ')' : 'NAO'} key=${captured.subscriptionKey ? 'SIM' : 'NAO'} src=${captured.source} url=${ctx.url.slice(0, 60)}`);
+    console.error(`[cap] token=${captured.token ? 'SIM(' + captured.token.length + ')' : 'NAO'} key=${captured.subscriptionKey ? 'SIM' : 'NAO'} src=${captured.source} fullLogin=${didFullLogin} url=${ctx.url.slice(0, 60)}`);
     console.log(JSON.stringify({
       ok: !!captured.token,
       token: captured.token,
       subscriptionKey: captured.subscriptionKey,
       tenancy: captured.tenancy || 'mdradvocacia',
       source: captured.source,
+      didFullLogin,
+      webCookies,
     }));
     process.exitCode = captured.token ? 0 : 1;
   } catch (err) {
