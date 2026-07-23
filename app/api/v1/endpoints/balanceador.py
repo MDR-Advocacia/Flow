@@ -25,8 +25,13 @@ _team = Depends(require_team_access)
 
 
 @router.get("/diagnostico", summary="Carga pendente por colaborador (atrasado/fatal hoje/futuro)", dependencies=[_team])
-def diagnostico(team: str = Query(...), db: Session = Depends(get_db)):
-    return {"colaboradores": BalanceadorService(db).diagnostico(team)}
+def diagnostico(
+    team: str = Query(...),
+    inicio: str | None = Query(None, description="filtro da tabela: conclusão prevista >= (YYYY-MM-DD)"),
+    fim: str | None = Query(None, description="filtro da tabela: conclusão prevista <= (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+):
+    return {"colaboradores": BalanceadorService(db).diagnostico(team, inicio=inicio, fim=fim)}
 
 
 @router.get("/redistribuir", summary="Matriz subtipo × colaborador dos escolhidos", dependencies=[_team])

@@ -135,8 +135,12 @@ export async function getLivePessoa(
   return json(await apiFetch(`${BASE}/live-pessoa?${qs.toString()}`));
 }
 
-export async function getDiagnostico(team: string): Promise<Colaborador[]> {
-  const r = await json<{ colaboradores: Colaborador[] }>(await apiFetch(`${BASE}/diagnostico?team=${team}`));
+export async function getDiagnostico(
+  team: string, faixa?: { inicio: string; fim: string } | null,
+): Promise<Colaborador[]> {
+  const qs = new URLSearchParams({ team });
+  if (faixa) { qs.set("inicio", faixa.inicio); qs.set("fim", faixa.fim); }
+  const r = await json<{ colaboradores: Colaborador[] }>(await apiFetch(`${BASE}/diagnostico?${qs.toString()}`));
   return r.colaboradores;
 }
 

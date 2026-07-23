@@ -83,8 +83,29 @@ class BalanceadorService:
     def __init__(self, db: Session):
         self.db = db
 
-    def diagnostico(self, team: str) -> list[dict]:
-        """Por colaborador do time: pendentes atrasadas / fatais hoje / futuras."""
+    def diagnostico(self, team: str, inicio: str | None = None, fim: str | None = None) -> list[dict]:
+        """Por colaborador do time: pendentes atrasadas / fatais hoje / futuras.
+
+        Filtro de data OPCIONAL (analise do estoque pendente por dia): quando
+        `inicio`/`fim` (YYYY-MM-DD) vem, o JOIN so conta as tarefas cuja
+        conclusao prevista cai na faixa (por DATA, BRT) — o supervisor ve "o que
+        tem naquele dia / dias anteriores / futuros" pra orientar a
+        redistribuicao. Sem eles = todas as pendentes (comportamento antigo).
+        Este filtro e' SO da tabela; a faixa da redistribuicao e' outra coisa,
+        escolhida no modal do botao Redistribuir."""
+        # Filtro de data SÓ entra quando há faixa; aí restringe às tarefas COM
+        # prazo na janela (as sem prazo saem — não têm data pra filtrar). Sem
+        # faixa, o JOIN é o de sempre (inclui as sem prazo no total/sem_prazo).
+        janela = ""
+        params: dict = {"team": team}
+        if inicio or fim:
+            janela = " AND t.prazo_previsto IS NOT NULL"
+            if inicio:
+                janela += f" AND {_PRAZO} >= :ini"
+                params["ini"] = inicio
+            if fim:
+                janela += f" AND {_PRAZO} <= :fim"
+                params["fim"] = fim
         rows = self.db.execute(
             text(
                 f"""
@@ -96,13 +117,13 @@ class BalanceadorService:
                   count(t.id) AS total
                 FROM perf_pessoa p
                 LEFT JOIN perf_l1_tarefa t
-                  ON t.pessoa_id = p.id AND t.status = 'Pendente'
+                  ON t.pessoa_id = p.id AND t.status = 'Pendente'{janela}
                 WHERE p.equipe = :team AND p.ativo
                 GROUP BY p.id, p.nome, p.cargo, p.is_supervisor
                 ORDER BY p.is_supervisor DESC, atrasado DESC, futuro DESC, p.nome
                 """
             ),
-            {"team": team},
+            params,
         ).fetchall()
         return [
             {

@@ -9,6 +9,9 @@ import { type DateRange } from "react-day-picker";
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
@@ -51,16 +54,28 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
   const [data, setData] = useState<Colaborador[]>([]);
   const [loading, setLoading] = useState(false);
   const [sel, setSel] = useState<Set<number>>(new Set());
-  // Faixa EXATA por data de conclusão prevista. Default: hoje → hoje+30.
-  const [range, setRange] = useState<DateRange | undefined>(() => {
+  // DOIS recortes de data INDEPENDENTES (a confusão anterior era ter um só):
+  //  - tableRange: filtra a TABELA de baixo (análise do estoque por dia). Default
+  //    vazio = todas as pendentes.
+  //  - redistRange: faixa da REDISTRIBUIÇÃO, escolhida no modal do botão. Default
+  //    hoje → hoje+30.
+  const [tableRange, setTableRange] = useState<DateRange | undefined>(undefined);
+  const [tableCalOpen, setTableCalOpen] = useState(false);
+  const [redistRange, setRedistRange] = useState<DateRange | undefined>(() => {
     const hoje = new Date();
     return { from: hoje, to: addDays(hoje, 30) };
   });
-  const [calOpen, setCalOpen] = useState(false);
+  const [faixaModalOpen, setFaixaModalOpen] = useState(false);
   const [cargo, setCargo] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [execucoesOpen, setExecucoesOpen] = useState(false);
   const [temRodando, setTemRodando] = useState(false);
+
+  // Faixa da TABELA (pro getDiagnostico) — só quando início e fim escolhidos.
+  const tableFaixa: FaixaData | null = useMemo(() => {
+    if (!tableRange?.from || !tableRange?.to) return null;
+    return { inicio: toISO(tableRange.from), fim: toISO(tableRange.to) };
+  }, [tableRange]);
 
   // Sinaliza no botão "Execuções" se há redistribuição rodando em 2º plano
   // (poll leve de 20s — o acompanhamento fino é dentro do painel).
@@ -82,13 +97,13 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
     setLoading(true);
     setSel(new Set());
     try {
-      setData(await getDiagnostico(team));
+      setData(await getDiagnostico(team, tableFaixa));
     } catch (e) {
       toast({ title: "Erro ao carregar o diagnóstico", description: String((e as Error).message), variant: "destructive" });
     } finally {
       setLoading(false);
     }
-  }, [team, toast]);
+  }, [team, tableFaixa, toast]);
 
   useEffect(() => {
     load();
@@ -120,22 +135,21 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
     [data, sel],
   );
 
-  // Faixa pronta pro modal (só quando início e fim estão escolhidos).
-  const faixa: FaixaData | null = useMemo(() => {
-    if (!range?.from || !range?.to) return null;
-    return { inicio: toISO(range.from), fim: toISO(range.to) };
-  }, [range]);
-  const faixaLabel = range?.from
-    ? range.to
-      ? `${fmtBR(range.from)} – ${fmtBR(range.to)}`
-      : `${fmtBR(range.from)} – …`
-    : "Escolher faixa";
+  // Faixa da REDISTRIBUIÇÃO (escolhida no modal do botão Redistribuir).
+  const redistFaixa: FaixaData | null = useMemo(() => {
+    if (!redistRange?.from || !redistRange?.to) return null;
+    return { inicio: toISO(redistRange.from), fim: toISO(redistRange.to) };
+  }, [redistRange]);
+  const rangeLabel = (r: DateRange | undefined, vazio: string) =>
+    r?.from ? (r.to ? `${fmtBR(r.from)} – ${fmtBR(r.to)}` : `${fmtBR(r.from)} – …`) : vazio;
 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs text-muted-foreground">
-          Carga pendente de cada colaborador. Selecione quem quer rebalancear + o período e clique em Redistribuir.
+          Carga pendente de cada colaborador. Filtre a tabela por data pra analisar o estoque de um dia
+          (ou dias anteriores/futuros); selecione quem rebalancear e clique em Redistribuir — a faixa da
+          redistribuição é escolhida lá.
           <span className="ml-1 text-emerald-700">Leitura e escrita ao vivo no L1.</span>
         </p>
         <Button size="sm" variant="outline" className="relative h-7 gap-1.5 text-xs" onClick={() => setExecucoesOpen(true)}>
@@ -180,41 +194,43 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
             </button>
           )}
         </span>
-        <div className="flex items-center gap-2">
-          <Popover open={calOpen} onOpenChange={setCalOpen}>
-            <PopoverTrigger asChild>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-8 gap-1.5 text-xs font-normal"
-                title="Faixa por DATA DE CONCLUSÃO PREVISTA. As vencidas entram sempre."
-              >
-                <CalendarRange className="h-3.5 w-3.5" /> {faixaLabel}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-auto p-0" align="end">
-              <div className="border-b px-3 py-2 text-[11px] text-muted-foreground">
-                Faixa por <b>data de conclusão prevista</b>. Vencidas incluídas sempre.
-              </div>
-              <Calendar
-                mode="range"
-                numberOfMonths={2}
-                selected={range}
-                onSelect={setRange}
-                defaultMonth={range?.from}
-              />
-            </PopoverContent>
-          </Popover>
-          <Button
-            size="sm"
-            className="gap-1.5"
-            disabled={sel.size === 0 || !faixa}
-            title={!faixa ? "Escolha o início e o fim da faixa" : undefined}
-            onClick={() => setModalOpen(true)}
-          >
-            <ArrowLeftRight className="h-4 w-4" /> Redistribuir
-          </Button>
-        </div>
+        <Button
+          size="sm"
+          className="gap-1.5"
+          disabled={sel.size === 0}
+          title={sel.size === 0 ? "Selecione colaboradores na tabela" : "Escolher a faixa e redistribuir"}
+          onClick={() => setFaixaModalOpen(true)}
+        >
+          <ArrowLeftRight className="h-4 w-4" /> Redistribuir
+        </Button>
+      </div>
+
+      {/* filtro de DATA da tabela — análise do estoque pendente por conclusão
+          prevista (hoje, dias anteriores, futuros). Independente da faixa da
+          redistribuição. */}
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="font-medium text-muted-foreground">Estoque por data:</span>
+        <Popover open={tableCalOpen} onOpenChange={setTableCalOpen}>
+          <PopoverTrigger asChild>
+            <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs font-normal"
+              title="Filtra a tabela pela DATA DE CONCLUSÃO PREVISTA das pendentes.">
+              <CalendarRange className="h-3.5 w-3.5" /> {rangeLabel(tableRange, "Todas as pendentes")}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="w-auto p-0" align="start">
+            <div className="border-b px-3 py-2 text-[11px] text-muted-foreground">
+              Filtra por <b>data de conclusão prevista</b> — veja o que cai num dia ou numa faixa.
+            </div>
+            <Calendar mode="range" numberOfMonths={2} selected={tableRange}
+              onSelect={setTableRange} defaultMonth={tableRange?.from ?? new Date()} />
+          </PopoverContent>
+        </Popover>
+        {tableFaixa && (
+          <button type="button" onClick={() => setTableRange(undefined)}
+            className="inline-flex items-center gap-0.5 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+            <X className="h-3 w-3" /> Limpar filtro
+          </button>
+        )}
       </div>
 
       {/* filtro por cargo */}
@@ -294,11 +310,40 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
         </div>
       )}
 
-      {modalOpen && faixa && (
+      {/* Modal da FAIXA da redistribuição — abre ao clicar Redistribuir. Deixa
+          claro que este recorte é SÓ da redistribuição (o da tabela é outro). */}
+      <Dialog open={faixaModalOpen} onOpenChange={setFaixaModalOpen}>
+        <DialogContent className="max-w-fit">
+          <DialogHeader>
+            <DialogTitle>Faixa da redistribuição</DialogTitle>
+            <DialogDescription>
+              Quais tarefas entram no rebalanceamento de <b>{selecionados.length}</b> colaborador(es), pela{" "}
+              <b>data de conclusão prevista</b>. As <b>vencidas entram sempre</b>. Não afeta a tabela.
+            </DialogDescription>
+          </DialogHeader>
+          <Calendar mode="range" numberOfMonths={2} selected={redistRange}
+            onSelect={setRedistRange} defaultMonth={redistRange?.from} />
+          <div className="text-xs text-muted-foreground">
+            Faixa: <span className="font-medium text-foreground">{rangeLabel(redistRange, "escolha início e fim")}</span>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setFaixaModalOpen(false)}>Cancelar</Button>
+            <Button
+              className="gap-1.5"
+              disabled={!redistFaixa}
+              onClick={() => { setFaixaModalOpen(false); setModalOpen(true); }}
+            >
+              <ArrowLeftRight className="h-4 w-4" /> Redistribuir
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {modalOpen && redistFaixa && (
         <RedistribuicaoModal
           team={team}
           pessoas={selecionados}
-          faixa={faixa}
+          faixa={redistFaixa}
           onClose={() => setModalOpen(false)}
           onAplicado={() => {
             // Refresh AUTOMÁTICO da tabela de diagnóstico (Atrasadas/Fatais/
