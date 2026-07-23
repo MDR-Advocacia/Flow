@@ -19,15 +19,9 @@ import { type ReagResumo, getReagendamentos } from "@/services/performance";
 import { useToast } from "@/hooks/use-toast";
 
 const L1_URL = "https://mdradvocacia.novajus.com.br/processos/Processos/details";
-const p2 = (n: number) => String(n).padStart(2, "0");
 const fmtDia = (iso: string) => {
   const [y, m, d] = iso.split("-");
   return `${d}/${m}`;
-};
-const fmtData = (iso: string | null) => {
-  if (!iso) return "—";
-  const [y, m, d] = iso.split("-");
-  return `${d}/${m}/${y}`;
 };
 
 function Kpi({
@@ -65,10 +59,6 @@ export default function ReagendamentosSection({ team }: { team: string }) {
   useEffect(() => { load(); }, [load]);
 
   const k = data?.kpis;
-  const maxDia = useMemo(() => Math.max(1, ...(data?.por_dia ?? []).map((d) => d.total)), [data]);
-  const maxPessoa = useMemo(() => Math.max(1, ...(data?.por_pessoa ?? []).map((p) => p.total)), [data]);
-
-  const vazio = !loading && data && data.kpis.total === 0;
 
   return (
     <div className="space-y-4">
@@ -88,11 +78,11 @@ export default function ReagendamentosSection({ team }: { team: string }) {
         </Select>
       </div>
 
-      {loading ? (
+      {loading || !data ? (
         <p className="py-10 text-center text-sm text-muted-foreground">
           <Loader2 className="mr-1 inline h-4 w-4 animate-spin" /> Carregando…
         </p>
-      ) : vazio ? (
+      ) : data.kpis.total === 0 ? (
         <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">
           Nenhum adiamento no período. O bracket 07h/19h começa a acumular a partir da implantação —
           se acabou de subir, os dados aparecem no fim do primeiro dia.
@@ -118,7 +108,7 @@ export default function ReagendamentosSection({ team }: { team: string }) {
           <Card><CardContent className="p-4">
             <div className="mb-2 text-sm font-semibold">Adiamentos por dia</div>
             <ResponsiveContainer width="100%" height={Math.max(160, 200)}>
-              <BarChart data={data!.por_dia.map((d) => ({ ...d, label: fmtDia(d.dia), emdia: d.total - d.fatais }))}>
+              <BarChart data={data.por_dia.map((d) => ({ ...d, label: fmtDia(d.dia), emdia: d.total - d.fatais }))}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
                 <XAxis dataKey="label" fontSize={11} tickLine={false} axisLine={false} />
                 <YAxis fontSize={11} allowDecimals={false} tickLine={false} axisLine={false} />
@@ -136,15 +126,15 @@ export default function ReagendamentosSection({ team }: { team: string }) {
                 Quem mais adia
                 <InfoHint text="Ranking por nº de adiamentos. Reagendamento crônico costuma esconder tarefa que não vai sair." />
               </div>
-              <ResponsiveContainer width="100%" height={Math.max(200, data!.por_pessoa.slice(0, 12).length * 26)}>
-                <BarChart data={data!.por_pessoa.slice(0, 12)} layout="vertical" margin={{ left: 8, right: 24 }}>
+              <ResponsiveContainer width="100%" height={Math.max(200, data.por_pessoa.slice(0, 12).length * 26)}>
+                <BarChart data={data.por_pessoa.slice(0, 12)} layout="vertical" margin={{ left: 8, right: 24 }}>
                   <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="hsl(var(--border))" />
                   <XAxis type="number" fontSize={11} allowDecimals={false} />
                   <YAxis type="category" dataKey="nome" width={130} fontSize={10}
                     tickFormatter={(n: string) => n.split(" ").slice(0, 2).join(" ")} tickLine={false} axisLine={false} />
                   <RTooltip cursor={{ fill: "hsl(var(--muted))", opacity: 0.4 }} />
                   <Bar dataKey="total" name="Adiamentos" radius={[0, 4, 4, 0]}>
-                    {data!.por_pessoa.slice(0, 12).map((p, i) => (
+                    {data.por_pessoa.slice(0, 12).map((p, i) => (
                       <Cell key={i} fill={p.fatais > 0 ? "#e11d48" : "#f59e0b"} />
                     ))}
                   </Bar>
@@ -170,12 +160,12 @@ export default function ReagendamentosSection({ team }: { team: string }) {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {data!.reincidentes.length === 0 && (
+                    {data.reincidentes.length === 0 && (
                       <TableRow><TableCell colSpan={4} className="py-8 text-center text-xs text-muted-foreground">
                         Nenhuma tarefa adiada em mais de um dia (ainda).
                       </TableCell></TableRow>
                     )}
-                    {data!.reincidentes.map((r) => (
+                    {data.reincidentes.map((r) => (
                       <TableRow key={r.l1_task_id}>
                         <TableCell className="text-xs">
                           <a href={`${L1_URL}/${r.l1_task_id}`} target="_blank" rel="noreferrer"
@@ -196,15 +186,15 @@ export default function ReagendamentosSection({ team }: { team: string }) {
           </div>
 
           {/* Por subtipo */}
-          {data!.por_subtipo.length > 0 && (
+          {data.por_subtipo.length > 0 && (
             <Card><CardContent className="p-4">
               <div className="mb-2 text-sm font-semibold">Adiamentos por tipo de tarefa</div>
               <div className="space-y-1">
-                {data!.por_subtipo.map((s) => (
+                {data.por_subtipo.map((s) => (
                   <div key={s.subtipo} className="flex items-center gap-2 text-xs">
                     <div className="w-56 truncate" title={s.subtipo}>{s.subtipo}</div>
                     <div className="h-3 flex-1 overflow-hidden rounded-full bg-muted">
-                      <div className="h-full bg-amber-400" style={{ width: `${(s.total / data!.por_subtipo[0].total) * 100}%` }} />
+                      <div className="h-full bg-amber-400" style={{ width: `${(s.total / data.por_subtipo[0].total) * 100}%` }} />
                     </div>
                     <div className="w-10 text-right font-semibold tabular-nums">{s.total}</div>
                   </div>
