@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     # Destinatário(s) do alerta quando o batch de classificação de publicações
     # FALHA ao ser criado na Anthropic (ex.: HTTP 502). Vírgula separa vários.
     # Sem valor, cai em mail_to/email_to. Setável no Coolify (CLASSIFICACAO_ALERT_EMAIL).
-    classificacao_alert_email: str | None = "ti@mdradvocacia.com"
+    classificacao_alert_email: str | None = "ti@mdradvocacia.com,jonilsonvilela@mdradvocacia.com"
     system_name: str | None = None
     app_name: str | None = None
 
