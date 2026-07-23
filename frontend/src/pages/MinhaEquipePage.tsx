@@ -8,7 +8,7 @@
 // profundo mede-se por volume + cycle time + prazo. O detalhe da pessoa sempre
 // informa a "fatia operacional" pra deixar claro quanto da leitura é confiável.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import { teamLabel } from "@/lib/teams";
@@ -31,6 +31,7 @@ import {
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import {
   Dialog,
   DialogContent,
@@ -199,49 +200,47 @@ export default function MinhaEquipePage() {
   const ehMista = team === "equipe-mista";
   const [abaMista, setAbaMista] = useState<"desempenho" | "base">("desempenho");
 
+  // Estado GLOBAL da atualização (vem do servidor): true = alguém está
+  // atualizando AGORA (qualquer equipe, qualquer usuário). Trava o botão e
+  // mostra a barra em todas as telas — sem isso, todo mundo apertava junto.
+  const running = syncStatus?.running?.running ?? false;
+  const prevRunningRef = useRef(false);
+
   useEffect(() => {
     getCargos(team).then(setCargos).catch(() => undefined);
     getSyncStatus().then(setSyncStatus).catch(() => undefined);
   }, [team]);
 
   const handleSyncNow = async () => {
+    if (running) return; // trava dura no clique
     setSyncing(true);
-    const prev = syncStatus?.last_sync?.em ?? null;
     try {
-      await triggerSync();
-      toast({
-        title: "Atualização disparada",
-        description: "Gerando um relatório NOVO no L1 (reflete o estado atual) e reingerindo — roda no servidor, leva alguns minutos.",
-      });
-      let tries = 0;
-      const poll = setInterval(async () => {
-        tries += 1;
-        try {
-          const st = await getSyncStatus();
-          setSyncStatus(st);
-          if (st.last_sync?.em && st.last_sync.em !== prev) {
-            clearInterval(poll);
-            setSyncing(false);
-            toast({ title: "Dados atualizados!", description: `${st.last_sync.tarefas} tarefas · relatório de ${st.last_sync.data}.` });
-            load();
-          }
-        } catch {
-          /* ignore */
-        }
-        // Geração fresca do relatório no L1 leva mais que um download: dá até
-        // ~12 min (48 × 15s) antes de soltar o spinner (o backend segue até
-        // concluir; o próximo reload pega). Antes eram 6 min e o toast de
-        // "atualizado" não chegava a disparar em relatório grande.
-        if (tries > 48) {
-          clearInterval(poll);
-          setSyncing(false);
-        }
-      }, 15000);
+      const r = await triggerSync();
+      if (r.ok === false || (r as { running?: boolean }).running) {
+        // outro clique já disparou — só avisa (a barra já vai aparecer no poll)
+        toast({ title: "Já em andamento", description: r.mensagem });
+      } else {
+        toast({
+          title: "Atualização disparada",
+          description: "Gerando um relatório NOVO no L1 (reflete o estado atual) e reingerindo — roda no servidor, leva alguns minutos.",
+        });
+      }
+      // força um refresh imediato do estado pra a barra aparecer na hora
+      getSyncStatus().then((st) => { setSyncStatus(st); prevRunningRef.current = st.running?.running ?? false; }).catch(() => undefined);
     } catch (e) {
       toast({ title: "Erro ao disparar atualização", description: String((e as Error).message), variant: "destructive" });
       setSyncing(false);
     }
   };
+
+  // Há quanto tempo o run atual começou (min), usando o relógio do servidor.
+  const rodandoHaMin = useMemo(() => {
+    const ini = syncStatus?.running?.iniciado_em;
+    const now = syncStatus?.server_now;
+    if (!ini) return null;
+    const base = now ? new Date(now).getTime() : Date.now();
+    return Math.max(0, Math.floor((base - new Date(ini).getTime()) / 60000));
+  }, [syncStatus]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -257,6 +256,35 @@ export default function MinhaEquipePage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Poll do estado de sync: rápido enquanto está rodando (pra a barra andar e
+  // pegar o fim), lento quando ocioso (só pra detectar um run iniciado por
+  // outra pessoa/equipe). Ao terminar (running true→false), recarrega os dados.
+  // Fica DEPOIS de `load` de propósito — referenciá-lo antes da definição dá
+  // TDZ (ReferenceError no render = tela branca).
+  useEffect(() => {
+    let vivo = true;
+    const tick = async () => {
+      try {
+        const st = await getSyncStatus();
+        if (!vivo) return;
+        setSyncStatus(st);
+        const agora = st.running?.running ?? false;
+        if (prevRunningRef.current && !agora) {
+          setSyncing(false);
+          load();
+          if (st.last_sync?.tarefas) {
+            toast({ title: "Dados atualizados!", description: `${st.last_sync.tarefas.toLocaleString("pt-BR")} tarefas · relatório de ${st.last_sync.data}.` });
+          }
+        }
+        prevRunningRef.current = agora;
+      } catch {
+        /* ignore */
+      }
+    };
+    const id = setInterval(tick, running ? 5000 : 20000);
+    return () => { vivo = false; clearInterval(id); };
+  }, [running, load, toast]);
 
   const handleRelatorioSetor = async () => {
     setGerandoRel(true);
@@ -323,12 +351,35 @@ export default function MinhaEquipePage() {
               size="sm"
               className="h-6 gap-1 px-2 text-xs"
               onClick={handleSyncNow}
-              disabled={syncing}
+              disabled={syncing || running}
             >
-              <RefreshCw className={`h-3 w-3 ${syncing ? "animate-spin" : ""}`} />
-              {syncing ? "Atualizando…" : "Atualizar agora"}
+              <RefreshCw className={`h-3 w-3 ${syncing || running ? "animate-spin" : ""}`} />
+              {running ? "Atualizando…" : "Atualizar agora"}
             </Button>
           </div>
+
+          {/* Barra GLOBAL de atualização — aparece em todas as equipes enquanto
+              alguém está atualizando, e trava o botão pra ninguém empilhar. */}
+          {running && (
+            <div className="mt-2 rounded-md border border-[hsl(var(--dunatech-blue))]/30 bg-[hsl(var(--dunatech-blue))]/5 px-3 py-2">
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className="flex items-center gap-1.5 font-medium text-[hsl(var(--dunatech-blue))]">
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  Atualizando os dados do Legal One…
+                </span>
+                <span className="text-muted-foreground">
+                  {syncStatus?.running?.fase ? `${syncStatus.running.fase} · ` : ""}
+                  {syncStatus?.running?.por ? `por ${syncStatus.running.por}` : ""}
+                  {rodandoHaMin != null ? ` · há ${rodandoHaMin} min` : ""}
+                </span>
+              </div>
+              {/* indeterminada: a geração do relatório no L1 é opaca (~minutos) */}
+              <Progress className="mt-1.5 h-1.5 [&>div]:animate-pulse" value={100} />
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                Roda no servidor pra todas as equipes — pode fechar a tela, o botão libera quando concluir.
+              </p>
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {/* Quem enxerga a página deste time já passou pelo gate por-time —

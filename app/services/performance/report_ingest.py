@@ -31,6 +31,8 @@ _LIST_URL = (
     "&ShowAdvancedFilters=True&IsSearchExecutedByUser=true"
 )
 SETTING_LAST_SYNC = "perf_minha_equipe_last_sync"
+# Estado da atualização EM ANDAMENTO (pro banner/barra global + trava de clique).
+SETTING_SYNC_RUNNING = "perf_minha_equipe_sync_running"
 
 # Cada linha tem 2 links GetFile (o do nome + o "Download") com o MESMO id; a
 # data de geração é a coluna "Data" (1ª dd/mm/aaaa da linha).
@@ -212,6 +214,63 @@ def get_last_sync():
 def ja_sincronizou_hoje() -> bool:
     ls = get_last_sync()
     return bool(ls and ls.get("ok") and ls.get("data") == _hoje_str())
+
+
+# ── Estado da atualização em andamento (banner/barra global + trava) ──
+# Persistido em app_settings pra qualquer worker do uvicorn (e qualquer aba/
+# equipe) enxergar a mesma verdade. Guard de segurança: um run "preso" há mais
+# de 20min é considerado morto (o container pode ter reiniciado no meio sem
+# limpar), então o próximo clique não fica bloqueado pra sempre.
+_SYNC_STALE_SEG = 20 * 60
+
+
+def marcar_sync_rodando(por_nome: str | None, fase: str = "gerando") -> None:
+    from app.services.app_settings import set_setting
+
+    set_setting(SETTING_SYNC_RUNNING, json.dumps(
+        {"running": True, "iniciado_em": _now().isoformat(), "por": por_nome, "fase": fase},
+        ensure_ascii=False,
+    ))
+
+
+def atualizar_fase_sync(fase: str) -> None:
+    st = get_sync_running()
+    if not st:
+        return
+    st["fase"] = fase
+    from app.services.app_settings import set_setting
+
+    set_setting(SETTING_SYNC_RUNNING, json.dumps(st, ensure_ascii=False))
+
+
+def limpar_sync_rodando() -> None:
+    from app.services.app_settings import set_setting
+
+    set_setting(SETTING_SYNC_RUNNING, json.dumps({"running": False}, ensure_ascii=False))
+
+
+def get_sync_running():
+    """Retorna o estado de execução, ou None se ocioso. Zera automaticamente um
+    run preso (> _SYNC_STALE_SEG) pra não travar o botão pra sempre."""
+    from app.services.app_settings import get_setting
+
+    raw = get_setting(SETTING_SYNC_RUNNING, default=None)
+    if not raw:
+        return None
+    try:
+        st = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not st.get("running"):
+        return None
+    try:
+        ini = datetime.datetime.fromisoformat(st["iniciado_em"])
+        if (_now() - ini).total_seconds() > _SYNC_STALE_SEG:
+            limpar_sync_rodando()
+            return None
+    except (ValueError, TypeError, KeyError):
+        pass
+    return st
 
 
 # ── Geração SOB DEMANDA do relatório (via runner Playwright) ──

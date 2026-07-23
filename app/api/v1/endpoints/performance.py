@@ -395,16 +395,28 @@ def baixar_relatorio(
 # ── Ingestão dos dados (download do relatório do L1) ──────────────────────
 @router.get("/sync", summary="Último sync da ingestão (download do relatório do L1)", dependencies=[_admin])
 def sync_status(db: Session = Depends(get_db)):
-    from app.services.performance.report_ingest import get_last_sync, ja_sincronizou_hoje
+    import datetime as _dt
 
-    return {"last_sync": get_last_sync(), "ja_sincronizou_hoje": ja_sincronizou_hoje()}
+    from app.services.performance.report_ingest import (
+        get_last_sync, get_sync_running, ja_sincronizou_hoje,
+    )
+
+    return {
+        "last_sync": get_last_sync(),
+        "ja_sincronizou_hoje": ja_sincronizou_hoje(),
+        # Estado da atualização em andamento (pro banner/barra global + trava).
+        "running": get_sync_running(),
+        "server_now": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
 
 
 def _run_sync_bg() -> None:
     from app.db.session import SessionLocal
     from app.services.onerequest._concurrency import single_worker_lock
     from app.services.performance.ingest_worker import _LOCK_KEY
-    from app.services.performance.report_ingest import baixar_e_ingerir, gerar_e_ingerir
+    from app.services.performance.report_ingest import (
+        atualizar_fase_sync, baixar_e_ingerir, gerar_e_ingerir, limpar_sync_rodando,
+    )
 
     # MESMO advisory lock do scheduler: sem ele, cliques repetidos no
     # "Atualizar agora" (ou o botão + o job das 9h juntos) rodavam ingestões
@@ -414,6 +426,7 @@ def _run_sync_bg() -> None:
     with single_worker_lock(_LOCK_KEY) as got:
         if not got:
             logger.info("Minha Equipe: ingestão manual pulada — já há uma rodando.")
+            limpar_sync_rodando()
             return
         db = SessionLocal()
         try:
@@ -425,21 +438,39 @@ def _run_sync_bg() -> None:
             # baixado era o das 13h. Gerar na hora reflete o estado ATUAL do L1.
             # Fallback pro download do existente se a geração falhar (ex.: runner
             # indisponível) — melhor um dado um pouco velho que dado nenhum.
+            atualizar_fase_sync("gerando relatório no L1")
             res = gerar_e_ingerir(db)
             if not res.get("ok"):
                 logger.warning(
                     "Minha Equipe: geração fresca falhou (%s) — baixando o relatório existente.",
                     res.get("motivo"),
                 )
+                atualizar_fase_sync("baixando relatório existente")
                 baixar_e_ingerir(db, force=True)
         except Exception:  # noqa: BLE001
             logger.exception("Minha Equipe: falha na ingestão manual.")
         finally:
+            limpar_sync_rodando()
             db.close()
 
 
 @router.post("/sync", summary="Gera um relatório FRESCO no L1 e ingere (reflete o estado atual)", dependencies=[_admin])
-def sync_now(background: BackgroundTasks):
+def sync_now(background: BackgroundTasks, current_user: LegalOneUser = Depends(get_current_user)):
+    from app.services.performance.report_ingest import (
+        get_sync_running, marcar_sync_rodando,
+    )
+
+    # Trava de clique múltiplo: se já há uma atualização em andamento, NÃO
+    # enfileira outra (o advisory lock já barra a execução concorrente, mas isto
+    # dá o feedback e evita pilha de background tasks quando todo mundo aperta).
+    ja = get_sync_running()
+    if ja:
+        return {
+            "ok": False, "running": True, "ja_rodando": ja,
+            "mensagem": f"Já há uma atualização em andamento (iniciada por {ja.get('por') or 'alguém'}). Aguarde concluir.",
+        }
+    # Marca ANTES de enfileirar pra o próximo clique já ver 'rodando'.
+    marcar_sync_rodando(getattr(current_user, "name", None) or getattr(current_user, "email", None))
     background.add_task(_run_sync_bg)
     return {
         "ok": True,

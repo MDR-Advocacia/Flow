@@ -404,6 +404,13 @@ export async function downloadRelatorioById(id: number): Promise<void> {
 }
 
 // ── Ingestão dos dados (download do relatório do L1) ──
+export interface SyncRunning {
+  running: boolean;
+  iniciado_em?: string;
+  por?: string | null;
+  fase?: string;
+}
+
 export interface SyncStatus {
   last_sync: {
     ok: boolean;
@@ -414,13 +421,15 @@ export interface SyncStatus {
     bytes: number;
   } | null;
   ja_sincronizou_hoje: boolean;
+  running?: SyncRunning | null;
+  server_now?: string;
 }
 
 export async function getSyncStatus(): Promise<SyncStatus> {
   return json(await apiFetch(`${BASE}/sync`));
 }
 
-export async function triggerSync(): Promise<{ ok: boolean; mensagem: string }> {
+export async function triggerSync(): Promise<{ ok: boolean; mensagem: string; running?: boolean }> {
   return json(await apiFetch(`${BASE}/sync`, { method: "POST" }));
 }
 
