@@ -274,7 +274,10 @@ def _auto_cadastrar(db: Session, run: BbRun) -> None:
     confirma cada pasta depois (→ CADASTRADO_L1).
     """
     from app.services.distribuidos_bb.import_l1_service import cadastrar_planilha
-    from app.services.distribuidos_bb.planilha_service import gerar_e_persistir
+    from app.services.distribuidos_bb.planilha_service import (
+        cnjs_liberados_da_planilha,
+        gerar_e_persistir,
+    )
 
     # Só o pool do BB: senão varreria junto os Ativos pendentes (outro cliente,
     # outro fluxo de entrada) e os misturaria nesta planilha e neste run.
@@ -292,7 +295,10 @@ def _auto_cadastrar(db: Session, run: BbRun) -> None:
     )
     db.commit()
 
-    rel = cadastrar_planilha(bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False)
+    rel = cadastrar_planilha(
+        bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False,
+        cnjs_liberados=cnjs_liberados_da_planilha(db, planilha.id),
+    )
     novos = rel.get("novos", 0)
     # O robô subiu a planilha → marca como subida (não fica pendente na tela).
     planilha.subido_legalone = True

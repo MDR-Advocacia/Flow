@@ -192,6 +192,32 @@ def contar_pool_novos(db: Session, *, cliente: Optional[str] = None) -> int:
     return q.count()
 
 
+def cnjs_liberados_da_planilha(db: Session, planilha_id: int) -> set:
+    """CNJs (dígitos) dos processos da planilha ainda PENDENTE_CADASTRO.
+
+    A trava pré-planilha (`_marcar_ja_existentes_no_l1`) já vinculou/excluiu quem
+    tinha pasta do MESMO cliente — então se o import do L1 apontar `duplicated`
+    pra um desses CNJs, a pasta existente é de OUTRO cliente (BB×Master×Ativos)
+    e a linha deve ser cadastrada mesmo assim (caso real 2026-07-24: CNJ do BB
+    descartado por dup de pasta do Banco Master). Usado como `cnjs_liberados`
+    do `cadastrar_planilha`."""
+    rows = (
+        db.query(BbProcesso.cnj)
+        .filter(
+            BbProcesso.planilha_id == planilha_id,
+            BbProcesso.planilha_status == POOL_PENDENTE_CADASTRO,
+            BbProcesso.cnj.isnot(None),
+        )
+        .all()
+    )
+    out = set()
+    for (cnj,) in rows:
+        d = norm.apenas_digitos(cnj or "") or ""
+        if len(d) == 20:
+            out.add(d)
+    return out
+
+
 def _marcar_ja_existentes_no_l1(db: Session, processos: list[BbProcesso]) -> set[BbProcesso]:
     """Consulta o L1 por CNJ e marca como CADASTRADO os que já têm pasta do MESMO cliente.
 

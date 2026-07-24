@@ -297,20 +297,36 @@ def _listar_staging(sess, h) -> list[dict]:
     return rows
 
 
-def _linhas_novas(rows: list[dict]) -> list[dict]:
+def _digitos_cnj(s: Optional[str]) -> str:
+    import re as _re
+
+    return _re.sub(r"\D", "", s or "")
+
+
+def _linhas_novas(rows: list[dict], cnjs_liberados: Optional[set] = None) -> list[dict]:
     """Linhas a cadastrar = sem erro real, descartando SÓ as duplicatas COM CNJ.
 
     A flag `duplicated` do L1 só é confiável quando há CNJ. Em BB Autor/pré-judicial
     (SEM CNJ) o L1 acusa "duplicado" comparando apenas o nome do autor — falso
     positivo que o fluxo manual ignora e cadastra assim mesmo. Então: dup COM CNJ =
-    duplicata real (fora); dup SEM CNJ = falso positivo (entra)."""
+    duplicata real (fora); dup SEM CNJ = falso positivo (entra).
+
+    `cnjs_liberados` (dígitos): CNJs que o CALLER garante não terem pasta do MESMO
+    cliente (a trava pré-planilha `_marcar_ja_existentes_no_l1` já vinculou/excluiu
+    esses casos). A dedup do import do L1 é TENANT-WIDE — o mesmo CNJ pode existir
+    legitimamente pra outro cliente (BB×Master×Ativos, caso real 2026-07-24: CNJ do
+    BB descartado por dup de pasta do Master). Linha dup COM CNJ liberado → ENTRA
+    (o save aceita linha duplicated, validado em prod)."""
+    liberados = cnjs_liberados or set()
     out = []
     for x in rows:
         if x.get("errors") or x.get("errorMessage"):
             continue  # erro real sempre fora
         tem_cnj = bool((x.get("identifierNumber") or "").strip())
         if x.get("duplicated") and tem_cnj:
-            continue  # duplicata confiável (com CNJ) → fora
+            if _digitos_cnj(x.get("identifierNumber")) in liberados:
+                out.append(x)  # dup de OUTRO cliente — cadastra mesmo assim
+            continue
         out.append(x)
     return out
 
@@ -327,14 +343,18 @@ def cadastrar_planilha(
     firm_id: int = 1,
     dry_run: bool = True,
     poll_max_s: int = 180,
+    cnjs_liberados: Optional[set] = None,
 ) -> dict[str, Any]:
     """Sobe a planilha e importa via API interna, commitando SÓ as linhas novas
     (não-duplicadas) via selectedIds — NUNCA varre o staging inteiro. Retry
-    automático 1x se o token tiver expirado (401). Devolve relatório por passo."""
+    automático 1x se o token tiver expirado (401). Devolve relatório por passo.
+
+    `cnjs_liberados` (dígitos): resgata linhas dup-com-CNJ cuja pasta existente é
+    de OUTRO cliente (ver _linhas_novas)."""
     try:
         return _cadastrar_once(
             conteudo, file_name, firm_id=firm_id, dry_run=dry_run,
-            poll_max_s=poll_max_s, tok=obter_token(),
+            poll_max_s=poll_max_s, tok=obter_token(), cnjs_liberados=cnjs_liberados,
         )
     except ImportL1Error as exc:
         if not _is_unauthorized(exc):
@@ -344,6 +364,7 @@ def cadastrar_planilha(
             return _cadastrar_once(
                 conteudo, file_name, firm_id=firm_id, dry_run=dry_run,
                 poll_max_s=poll_max_s, tok=obter_token(forcar=True),
+                cnjs_liberados=cnjs_liberados,
             )
         except ImportL1Error as exc2:
             # 401 MESMO com token fresco = credencial/gateway inválido nessa
@@ -362,7 +383,8 @@ def cadastrar_planilha(
             raise
 
 
-def _cadastrar_once(conteudo, file_name, *, firm_id, dry_run, poll_max_s, tok) -> dict[str, Any]:
+def _cadastrar_once(conteudo, file_name, *, firm_id, dry_run, poll_max_s, tok,
+                    cnjs_liberados: Optional[set] = None) -> dict[str, Any]:
     rel: dict[str, Any] = {"passos": [], "dry_run": dry_run, "file": file_name}
     size = len(conteudo)
     rel["importado_por"] = {"user_id": tok.get("user_id"), "nome": tok.get("user_name")}
@@ -395,10 +417,16 @@ def _cadastrar_once(conteudo, file_name, *, firm_id, dry_run, poll_max_s, tok) -
 
     # Só as linhas DESTA planilha (id não estava no baseline) e cadastráveis.
     desta_planilha = [r for r in _listar_staging(sess, h) if r.get("id") not in baseline_ids]
-    novos = _linhas_novas(desta_planilha)
+    novos = _linhas_novas(desta_planilha, cnjs_liberados)
     novos_ids = [x["id"] for x in novos]
+    resgatadas = sum(
+        1 for x in novos
+        if x.get("duplicated") and (x.get("identifierNumber") or "").strip()
+    )
     rel["novos"] = len(novos_ids)
-    rel["passos"].append({"passo": "match_novos", "ok": True, "novos": len(novos_ids)})
+    rel["resgatadas_dup_outro_cliente"] = resgatadas
+    rel["passos"].append({"passo": "match_novos", "ok": True, "novos": len(novos_ids),
+                          "resgatadas_dup": resgatadas})
 
     if dry_run:
         rel["resultado"] = f"DRY_RUN — {len(novos_ids)} linha(s) nova(s) prontas (nada criado)."

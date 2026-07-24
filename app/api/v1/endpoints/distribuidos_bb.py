@@ -884,8 +884,13 @@ def cadastrar_planilha_l1(
             status_code=409,
             detail="Esta planilha já foi cadastrada no Legal One (marcada como subida).",
         )
+    from app.services.distribuidos_bb.planilha_service import cnjs_liberados_da_planilha
+
     try:
-        rel = cadastrar_planilha(bytes(pl.conteudo), pl.nome_arquivo, dry_run=dry_run)
+        rel = cadastrar_planilha(
+            bytes(pl.conteudo), pl.nome_arquivo, dry_run=dry_run,
+            cnjs_liberados=cnjs_liberados_da_planilha(db, pl.id),
+        )
     except ImportL1Error as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
