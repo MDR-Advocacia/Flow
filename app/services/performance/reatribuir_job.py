@@ -95,6 +95,19 @@ def _reatribuir_uma(c, task_id: int, cid: int, origem: str = "tarefa") -> dict:
         return {"reason": "error", "http": None, "papeis": None}
 
     papeis = _papel_ids(atuais)
+
+    if origem == "compromisso":
+        # NÃO tentar a API em compromisso: o PATCH /Appointments responde
+        # HTTP 204 (sucesso) mas NÃO aplica a troca — no-op silencioso. Medido
+        # em prod 2026-07-28 sobre todo o histórico: pela API 17 de 18 seguiam
+        # com o responsável ANTIGO; pelo caminho web, 32 de 32 aplicaram.
+        # O 204 mentiroso fazia o job marcar "reatribuída" e a tarefa voltava
+        # pro supervisor na rodada seguinte (caso Geovanna: 4 tentativas).
+        # Só os compromissos VENCIDOS escapavam, porque aí o PATCH dá 400 de
+        # validação e caíam no web por acidente. Agora vão sempre pelo web,
+        # que ainda confirma a troca por GET participants na fase 2.
+        return {"reason": "web_pendente", "http": None, "papeis": papeis}
+
     requester_id = papeis["requester"]
 
     if requester_id and requester_id != cid:
@@ -341,7 +354,7 @@ def _run(job_id: str, team: str, itens: list, movimentos: list, dry_run: bool) -
 
             if reason in ("reassigned", "dry_ok"):
                 job.reatribuidas = (job.reatribuidas or 0) + 1
-            elif reason == "workflow_locked" or (reason == "error" and http == 400 and papeis is not None):
+            elif reason == "web_pendente" or reason == "workflow_locked" or (reason == "error" and http == 400 and papeis is not None):
                 # 400 no PATCH = lock de Workflow OU validação do modelo (ex.:
                 # tarefa ATRASADA — endDateTime no passado reprova a edição via
                 # API: "status 'Pendente' com data de conclusão anterior à
