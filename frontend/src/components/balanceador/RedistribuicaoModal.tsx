@@ -349,7 +349,8 @@ export default function RedistribuicaoModal({
               <Users className="h-5 w-5 text-[hsl(var(--dunatech-blue))]" />
               Redistribuição — {teamLabel(team)}
               <span className="text-sm font-normal text-muted-foreground">
-                {pessoas.length} colaborador(es) · conclusão prevista {fmtBR(faixa.inicio)}–{fmtBR(faixa.fim)} (vencidas incluídas)
+                {pessoas.length} colaborador(es) · conclusão prevista {fmtBR(faixa.inicio)}–{fmtBR(faixa.fim)}
+                {faixa.incluirAtrasadas ? " + vencidas" : " (só a faixa)"}
               </span>
             </DialogTitle>
           </DialogHeader>

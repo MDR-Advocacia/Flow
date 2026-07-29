@@ -67,7 +67,9 @@ def live_pessoa(
     team: str = Query(...),
     pessoa_id: int = Query(...),
     dias: int = Query(0, description="legado: janela de N dias (usar inicio/fim)"),
-    incluir_atrasadas: bool = Query(True),
+    incluir_atrasadas: bool = Query(
+        False, description="além da faixa, puxar também as vencidas (prazo < hoje)"
+    ),
     inicio: str | None = Query(None, description="faixa exata: data de conclusão prevista inicial (YYYY-MM-DD)"),
     fim: str | None = Query(None, description="faixa exata: data de conclusão prevista final (YYYY-MM-DD)"),
     db: Session = Depends(get_db),

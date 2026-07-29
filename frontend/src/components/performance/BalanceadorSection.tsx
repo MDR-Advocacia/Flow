@@ -65,6 +65,9 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
     const hoje = new Date();
     return { from: hoje, to: addDays(hoje, 30) };
   });
+  // Vencidas (prazo < hoje) NÃO entram por padrão: com o calendário fixo, a
+  // faixa escolhida é o recorte exato (decisão do operador 2026-07-29).
+  const [redistAtrasadas, setRedistAtrasadas] = useState(false);
   const [faixaModalOpen, setFaixaModalOpen] = useState(false);
   const [cargo, setCargo] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
@@ -138,8 +141,12 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
   // Faixa da REDISTRIBUIÇÃO (escolhida no modal do botão Redistribuir).
   const redistFaixa: FaixaData | null = useMemo(() => {
     if (!redistRange?.from || !redistRange?.to) return null;
-    return { inicio: toISO(redistRange.from), fim: toISO(redistRange.to) };
-  }, [redistRange]);
+    return {
+      inicio: toISO(redistRange.from),
+      fim: toISO(redistRange.to),
+      incluirAtrasadas: redistAtrasadas,
+    };
+  }, [redistRange, redistAtrasadas]);
   const rangeLabel = (r: DateRange | undefined, vazio: string) =>
     r?.from ? (r.to ? `${fmtBR(r.from)} – ${fmtBR(r.to)}` : `${fmtBR(r.from)} – …`) : vazio;
 
@@ -318,13 +325,27 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
             <DialogTitle>Faixa da redistribuição</DialogTitle>
             <DialogDescription>
               Quais tarefas entram no rebalanceamento de <b>{selecionados.length}</b> colaborador(es), pela{" "}
-              <b>data de conclusão prevista</b>. As <b>vencidas entram sempre</b>. Não afeta a tabela.
+              <b>data de conclusão prevista</b>. Entra <b>só o que cai nas datas escolhidas</b>. Não afeta a tabela.
             </DialogDescription>
           </DialogHeader>
           <Calendar mode="range" numberOfMonths={2} selected={redistRange}
             onSelect={setRedistRange} defaultMonth={redistRange?.from} />
+          <label className="flex cursor-pointer items-start gap-2 rounded-md border p-2.5 text-sm hover:bg-muted/40">
+            <Checkbox
+              className="mt-0.5"
+              checked={redistAtrasadas}
+              onCheckedChange={(c) => setRedistAtrasadas(!!c)}
+            />
+            <span>
+              Puxar também as <b>atrasadas</b>
+              <span className="block text-xs text-muted-foreground">
+                Inclui as vencidas (conclusão prevista anterior a hoje), mesmo fora da faixa.
+              </span>
+            </span>
+          </label>
           <div className="text-xs text-muted-foreground">
             Faixa: <span className="font-medium text-foreground">{rangeLabel(redistRange, "escolha início e fim")}</span>
+            {redistAtrasadas && <span className="font-medium text-amber-700"> + vencidas</span>}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setFaixaModalOpen(false)}>Cancelar</Button>

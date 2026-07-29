@@ -116,6 +116,9 @@ export async function getUsuarios(team: string, busca: string): Promise<UsuarioB
 export interface FaixaData {
   inicio: string;
   fim: string;
+  /** Puxar TAMBÉM as vencidas (prazo < hoje), além da faixa. Default: não —
+   *  com o calendário fixo, a faixa escolhida é o recorte exato. */
+  incluirAtrasadas?: boolean;
 }
 
 export async function getLivePessoa(
@@ -128,6 +131,7 @@ export async function getLivePessoa(
   if (faixa) {
     qs.set("inicio", faixa.inicio);
     qs.set("fim", faixa.fim);
+    qs.set("incluir_atrasadas", String(!!faixa.incluirAtrasadas));
   } else {
     qs.set("dias", String(dias));
     qs.set("incluir_atrasadas", "true");

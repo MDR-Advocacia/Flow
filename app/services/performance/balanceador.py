@@ -373,9 +373,9 @@ class BalanceadorService:
         tempo real — o número que o supervisor vê é o de AGORA, não o snapshot.
 
         Recorte de data pela **data de conclusão prevista** (endDateTime):
-        - `inicio`/`fim` (YYYY-MM-DD): faixa EXATA; as VENCIDAS (prazo < hoje)
-          entram SEMPRE, independentemente do início (decisão do operador —
-          o balanceamento existe pra resolver atraso).
+        - `inicio`/`fim` (YYYY-MM-DD): faixa EXATA — puxa SÓ o que cai nas datas
+          escolhidas. As VENCIDAS (prazo < hoje) entram apenas com
+          `incluir_atrasadas=True` (checkbox no modal da faixa).
         - fallback legado `dias>0`: janela "próximos N dias" (+ vencidas se
           incluir_atrasadas). Mantido pra compat de chamadas antigas.
         A ordenação é por prazo CRESCENTE (mais antigo/vencido primeiro) — a
@@ -407,14 +407,20 @@ class BalanceadorService:
             " and statusId eq 0 and endDateTime ne null"
         )
         if inicio or fim:
-            # Faixa EXATA por data de conclusão prevista. Vencidas sempre entram.
+            # Faixa EXATA por data de conclusão prevista. As VENCIDAS (prazo <
+            # hoje) só entram se `incluir_atrasadas` — antes entravam sempre, o
+            # que virou ruído depois que o calendário fixo passou a definir o
+            # recorte (decisão do operador 2026-07-29).
             if fim:
                 flt += f" and endDateTime le {fim}T23:59:59-03:00"
             if inicio:
-                flt += (
-                    f" and (endDateTime ge {inicio}T00:00:00-03:00"
-                    f" or endDateTime lt {hoje.isoformat()}T00:00:00-03:00)"
-                )
+                if incluir_atrasadas:
+                    flt += (
+                        f" and (endDateTime ge {inicio}T00:00:00-03:00"
+                        f" or endDateTime lt {hoje.isoformat()}T00:00:00-03:00)"
+                    )
+                else:
+                    flt += f" and endDateTime ge {inicio}T00:00:00-03:00"
         else:
             # Legado: janela "próximos N dias" (+ vencidas se pedido).
             if not incluir_atrasadas:
