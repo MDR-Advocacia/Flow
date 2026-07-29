@@ -37,6 +37,8 @@ import { Trash2, Crown, Star } from "lucide-react";
 import TaxonomiaAdminTab from "@/components/TaxonomiaAdminTab";
 import { AdminNoticesManager } from "@/components/AdminNoticesManager";
 import { UserFeedbackManager } from "@/components/UserFeedbackManager";
+import EquipesManager from "@/components/admin/EquipesManager";
+import { useTeams } from "@/lib/teams";
 
 // Permissões de módulo exibidas no dropdown condensado da tabela de usuários.
 const PERMISSOES = [
@@ -49,25 +51,6 @@ const PERMISSOES = [
   { key: "notify_onerequest_errors", label: "Notificação OneRequest", abbr: "Notif" },
 ] as const;
 
-// Equipes disponíveis no "Minha Equipe" — filhas da permissão can_use_minha_equipe
-// (a árvore: liberar o menu + marcar quais equipes o usuário enxerga).
-const EQUIPES = [
-  { key: "bb-reu", label: "BB Réu" },
-  { key: "bb-execucao", label: "BB Execução & Encerramento" },
-  { key: "bb-acordos", label: "BB Acordos" },
-  { key: "bb-estrategico", label: "BB Estratégico" },
-  { key: "master-reu", label: "Master Réu" },
-  { key: "ativos-reu", label: "Ativos Réu" },
-  { key: "trabalhista", label: "Trabalhista" },
-  { key: "bb-autor-processual", label: "BB Autor — Processual" },
-  { key: "ativos-autor", label: "Ativos Autor" },
-  { key: "autor-recursal", label: "Autor — Recursal" },
-  { key: "ajuizamento", label: "Ajuizamento" },
-  { key: "estrategico-autor", label: "Estratégico Autor" },
-  { key: "cobranca", label: "Cobrança" },
-  { key: "equipe-mista", label: "Equipe Mista" },
-  { key: "bb-cadastro", label: "Controladoria" },
-] as const;
 
 // --- Tipos de Dados ---
 interface Sector { id: number; name: string; }
@@ -910,6 +893,9 @@ const SyncManager = () => {
 // --- Componente de Usuários & Permissões ---
 const UsersAndPermissions = () => {
     const { toast } = useToast();
+    // Equipes vêm do catálogo (aba Equipes) — antes eram uma 3ª lista hardcoded
+    // aqui, que vivia desalinhada do menu e causava permissão faltando.
+    const EQUIPES = useTeams();
     const [editingUserId, setEditingUserId] = useState<number | null>(null);
     const [editingData, setEditingData] = useState<Partial<AdminUser>>({});
     const [tempPasswordDialog, setTempPasswordDialog] = useState<{ isOpen: boolean; password?: string; userName?: string }>({ isOpen: false });
@@ -1503,6 +1489,7 @@ const AdminPage = () => {
                 <TabsList>
                     <TabsTrigger value="sync">Sincronização</TabsTrigger>
                     <TabsTrigger value="squads">Squads</TabsTrigger>
+                    <TabsTrigger value="equipes">Equipes</TabsTrigger>
                     <TabsTrigger value="taxonomy">Taxonomia</TabsTrigger>
                     <TabsTrigger value="users">Usuários & Permissões</TabsTrigger>
                     <TabsTrigger value="sso">Contas SSO</TabsTrigger>
@@ -1515,6 +1502,9 @@ const AdminPage = () => {
                 </TabsContent>
                 <TabsContent value="squads" className="space-y-6">
                     <SquadsManager />
+                </TabsContent>
+                <TabsContent value="equipes" className="space-y-6">
+                    <EquipesManager />
                 </TabsContent>
                 <TabsContent value="taxonomy" className="space-y-6">
                     <TaxonomiaAdminTab />

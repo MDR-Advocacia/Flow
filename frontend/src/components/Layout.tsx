@@ -27,7 +27,7 @@ import {
 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
-import { TEAMS } from "@/lib/teams";
+import { gruposDeEquipes, useTeams } from "@/lib/teams";
 import { Button } from "./ui/button";
 import {
   DropdownMenu,
@@ -75,6 +75,9 @@ export default function Layout({ children }: PropsWithChildren) {
     isAdmin,
   } = useAuth();
   const navigate = useNavigate();
+  // Catálogo de equipes vem do backend (admin cria/renomeia sem deploy); até
+  // chegar, o hook devolve o fallback embutido e re-renderiza quando carrega.
+  const teams = useTeams();
 
   // Seções recolhíveis da sidebar — estado por seção, persistido em localStorage
   // (cada usuário lembra o que deixou fechado). Default: tudo aberto.
@@ -160,9 +163,9 @@ export default function Layout({ children }: PropsWithChildren) {
     },
     {
       title: "Minha Equipe",
-      subgroups: ["Contencioso Passivo", "Recuperação de Crédito", "Especializada"].map((grupo) => ({
+      subgroups: gruposDeEquipes(teams).map((grupo) => ({
         title: grupo,
-        items: TEAMS.filter((t) => t.grupo === grupo).map((t) => ({
+        items: teams.filter((t) => t.grupo === grupo).map((t) => ({
           to: `/minha-equipe/${t.key}`,
           icon: Gauge,
           label: t.label,
@@ -191,7 +194,9 @@ export default function Layout({ children }: PropsWithChildren) {
         return { ...sec, items: (sec.items ?? []).filter(okItem) };
       })
       .filter((sec) => (sec.subgroups ? sec.subgroups.length > 0 : (sec.items?.length ?? 0) > 0));
-  }, [canScheduleBatch, canUsePublications, canUsePrazosIniciais, canUseOnerequest, canUseMinhaEquipe, minhaEquipeEquipes, isAdmin]);
+    // `teams` entra nas deps: o catálogo chega DEPOIS do primeiro paint (fetch)
+    // e sem isto o menu ficaria congelado no fallback embutido.
+  }, [canScheduleBatch, canUsePublications, canUsePrazosIniciais, canUseOnerequest, canUseMinhaEquipe, minhaEquipeEquipes, isAdmin, teams]);
 
   const handleLogout = () => {
     logout();

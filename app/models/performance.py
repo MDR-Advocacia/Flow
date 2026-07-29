@@ -61,6 +61,26 @@ class PerfPessoa(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class PerfEquipe(Base):
+    """Equipe/setor do Minha Equipe — fonte da verdade do menu, das rotas e das
+    permissões (antes hardcoded em 3 listas; ver migration perf012).
+
+    `key` é imutável: é o slug que vive em `perf_pessoa.equipe` e no CSV de
+    `legal_one_users.minha_equipe_equipes`. O admin edita rótulo/grupo/ordem.
+    Exclusão é SOFT (`ativo=False`) pra não revogar acesso nem orfanar gente.
+    """
+
+    __tablename__ = "perf_equipe"
+
+    id = Column(Integer, primary_key=True)
+    key = Column(String(60), nullable=False, unique=True)
+    label = Column(String(120), nullable=False)
+    grupo = Column(String(80), nullable=False)
+    ordem = Column(Integer, nullable=False, server_default="999")
+    ativo = Column(Boolean, nullable=False, server_default="true")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class PerfTarefa(Base):
     __tablename__ = "perf_l1_tarefa"
 

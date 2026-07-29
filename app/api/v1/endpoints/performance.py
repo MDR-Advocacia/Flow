@@ -18,7 +18,7 @@ from app.models.legal_one import LegalOneUser
 from app.services.performance import relatorios as rel_jobs
 from app.services.performance.report import build_individual_pdf, build_sector_pdf
 from app.services.performance.service import PerformanceService
-from app.services.performance.teams import TEAM_KEYS
+from app.services.performance.teams import team_keys
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def require_team_access(
     current_user: LegalOneUser = Depends(get_current_user),
 ) -> str:
     """Gate por time: admin vê todos; demais precisam do time liberado na árvore."""
-    if team not in TEAM_KEYS:
+    if team not in team_keys():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
     if getattr(current_user, "role", "user") == "admin":
         return team
@@ -76,7 +76,7 @@ def _exigir_acesso_ao_time(current_user: LegalOneUser, team: str) -> None:
     módulo + o time liberado na árvore."""
     if getattr(current_user, "role", "user") == "admin":
         return  # admin passa mesmo com equipe legada fora do catálogo
-    if team not in TEAM_KEYS:
+    if team not in team_keys():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
     if not getattr(current_user, "can_use_minha_equipe", False):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sem permissão para o Minha Equipe.")
@@ -361,7 +361,7 @@ def criar_relatorio(
     current_user: LegalOneUser = Depends(_require_minha_equipe),
     db: Session = Depends(get_db),
 ):
-    if req.team not in TEAM_KEYS:
+    if req.team not in team_keys():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
     if getattr(current_user, "role", "user") != "admin" and req.team not in _user_teams(current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sem acesso a este time.")
@@ -519,7 +519,7 @@ def update_roster(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(get_current_user),
 ):
-    if req.equipe is not None and req.equipe not in TEAM_KEYS:
+    if req.equipe is not None and req.equipe not in team_keys():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
     equipe_atual = _equipe_da_pessoa(db, pessoa_id)
     if equipe_atual is None:
@@ -553,7 +553,7 @@ def roster_adicionar(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(get_current_user),
 ):
-    if req.team not in TEAM_KEYS:
+    if req.team not in team_keys():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
     _exigir_acesso_ao_time(current_user, req.team)
     out = PerformanceService(db).adicionar_pessoa(req.nome, req.team)

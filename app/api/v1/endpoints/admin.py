@@ -1151,3 +1151,187 @@ def change_password(
         "name": current_user.name,
         "message": "Senha alterada com sucesso.",
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Equipes do Minha Equipe (CRUD)
+#
+# Antes viviam hardcoded em TRÊS listas (teams.py, teams.ts e o EQUIPES do
+# AdminPage) e criar equipe exigia deploy — o desencontro entre elas já causou
+# bug de permissão. Fonte da verdade agora é `perf_equipe` (migration perf012).
+#
+# `key` é IMUTÁVEL: é o slug gravado em `perf_pessoa.equipe` e no CSV de
+# `legal_one_users.minha_equipe_equipes`. Renomear a key revogaria acesso e
+# orfanaria gente — por isso o admin edita só rótulo/grupo/ordem, e a exclusão
+# é SOFT (ativo=False), preservando histórico e permissões.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _slug_equipe(texto: str) -> str:
+    import re as _re
+    import unicodedata as _ud
+
+    s = _ud.normalize("NFKD", str(texto or ""))
+    s = "".join(c for c in s if not _ud.combining(c))
+    s = _re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-").lower()
+    return _re.sub(r"-{2,}", "-", s)
+
+
+class EquipePayload(BaseModel):
+    label: str
+    grupo: str
+    key: Optional[str] = None   # só na criação; derivado do label quando vazio
+    ordem: Optional[int] = None
+    ativo: Optional[bool] = None
+
+
+def _exige_admin(current_user: LegalOneUser) -> None:
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required"
+        )
+
+
+def _equipe_dto(e, pessoas: int) -> dict:
+    return {
+        "id": e.id, "key": e.key, "label": e.label, "grupo": e.grupo,
+        "ordem": e.ordem, "ativo": e.ativo, "pessoas": pessoas,
+    }
+
+
+def _headcount(db) -> dict:
+    """Pessoas ATIVAS por equipe — alimenta o aviso de impacto na exclusão."""
+    from app.models.performance import PerfPessoa
+
+    return {
+        k: int(n)
+        for k, n in db.query(PerfPessoa.equipe, func.count(PerfPessoa.id))
+        .filter(PerfPessoa.ativo)
+        .group_by(PerfPessoa.equipe)
+        .all()
+    }
+
+
+@router.get("/equipes", tags=["Admin"], summary="Equipes do Minha Equipe (inclui as desativadas)")
+def listar_equipes(
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _exige_admin(current_user)
+    from app.models.performance import PerfEquipe
+
+    contagem = _headcount(db)
+    rows = db.query(PerfEquipe).order_by(PerfEquipe.ordem, PerfEquipe.label).all()
+    return [_equipe_dto(e, contagem.get(e.key, 0)) for e in rows]
+
+
+@router.post("/equipes", tags=["Admin"], status_code=201, summary="Cria uma equipe")
+def criar_equipe(
+    payload: EquipePayload,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _exige_admin(current_user)
+    from app.models.performance import PerfEquipe
+    from app.services.performance.teams import invalidar_cache
+
+    label = (payload.label or "").strip()
+    grupo = (payload.grupo or "").strip()
+    if not label or not grupo:
+        raise HTTPException(status_code=400, detail="Informe o nome e o grupo da equipe.")
+    key = _slug_equipe(payload.key or label)
+    if not key:
+        raise HTTPException(status_code=400, detail="Não consegui gerar um identificador a partir desse nome.")
+
+    ja = db.query(PerfEquipe).filter(PerfEquipe.key == key).first()
+    if ja is not None:
+        # Reaproveita a desativada em vez de criar uma key duplicada — assim as
+        # permissões antigas daquela key voltam a valer, que é o esperado.
+        if not ja.ativo:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Já existe uma equipe desativada com esse identificador ('{key}'): {ja.label}. Reative-a em vez de criar outra.",
+            )
+        raise HTTPException(status_code=409, detail=f"Já existe a equipe '{ja.label}' com esse identificador ({key}).")
+
+    if payload.ordem is not None:
+        ordem = int(payload.ordem)
+    else:
+        # Entra no fim do próprio grupo, pra não embaralhar o menu.
+        ultimo = (
+            db.query(func.max(PerfEquipe.ordem)).filter(PerfEquipe.grupo == grupo).scalar()
+        )
+        ordem = int(ultimo or 0) + 10
+    nova = PerfEquipe(key=key, label=label, grupo=grupo, ordem=ordem, ativo=True)
+    db.add(nova)
+    db.commit()
+    db.refresh(nova)
+    invalidar_cache()
+    logger.info("Equipe criada: %s (%s / %s) por %s", label, key, grupo, current_user.email)
+    return _equipe_dto(nova, 0)
+
+
+@router.put("/equipes/{equipe_id}", tags=["Admin"], summary="Edita rótulo/grupo/ordem/ativo (a key é imutável)")
+def editar_equipe(
+    equipe_id: int,
+    payload: EquipePayload,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _exige_admin(current_user)
+    from app.models.performance import PerfEquipe
+    from app.services.performance.teams import invalidar_cache
+
+    e = db.get(PerfEquipe, equipe_id)
+    if e is None:
+        raise HTTPException(status_code=404, detail="Equipe não encontrada.")
+    label = (payload.label or "").strip()
+    grupo = (payload.grupo or "").strip()
+    if not label or not grupo:
+        raise HTTPException(status_code=400, detail="Informe o nome e o grupo da equipe.")
+    e.label = label
+    e.grupo = grupo
+    if payload.ordem is not None:
+        e.ordem = int(payload.ordem)
+    if payload.ativo is not None:
+        e.ativo = bool(payload.ativo)
+    db.commit()
+    db.refresh(e)
+    invalidar_cache()
+    logger.info("Equipe %s atualizada por %s", e.key, current_user.email)
+    return _equipe_dto(e, _headcount(db).get(e.key, 0))
+
+
+@router.delete("/equipes/{equipe_id}", tags=["Admin"], summary="Desativa a equipe (soft-delete)")
+def excluir_equipe(
+    equipe_id: int,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _exige_admin(current_user)
+    from app.models.performance import PerfEquipe
+    from app.services.performance.teams import invalidar_cache
+
+    e = db.get(PerfEquipe, equipe_id)
+    if e is None:
+        raise HTTPException(status_code=404, detail="Equipe não encontrada.")
+    e.ativo = False
+    db.commit()
+    invalidar_cache()
+    pessoas = _headcount(db).get(e.key, 0)
+    logger.info(
+        "Equipe %s desativada por %s (%s pessoa[s] seguem vinculadas).",
+        e.key, current_user.email, pessoas,
+    )
+    return {"ok": True, "key": e.key, "pessoas_vinculadas": pessoas}
+
+
+@me_router.get("/equipes", tags=["User"], summary="Catálogo de equipes ATIVAS (menu/rotas)")
+def catalogo_equipes(
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    """Qualquer usuário autenticado — a sidebar monta o menu com isto (o filtro
+    de quem vê o quê continua sendo a permissão por equipe do usuário)."""
+    from app.services.performance.teams import listar
+
+    return {"equipes": listar()}
