@@ -153,6 +153,15 @@ def aplicar(db: Session, user: Any, commit: bool = True) -> dict:
     Devolve {"mudou": bool, "diffs": {campo: (antes, depois)}} — a validação da
     migração usa isto pra provar que ninguém mudou de acesso na virada.
     """
+    # Admin bypassa TODOS os gates (auth.require_permission, _require_minha_equipe,
+    # require_team_access) — o cache não muda nada pra ele. Materializar só geraria
+    # ruído: o cargo "Administrador" concede todas as equipes e sobrescreveria a
+    # lista que o operador deixou lá. Se um dia virar 'user', o próximo aplicar
+    # ajusta. (Pego pela validação local em 29/07: o admin tinha 1 equipe e o
+    # recálculo expandia pra 15.)
+    if (getattr(user, "role", "user") or "user") == "admin":
+        return {"mudou": False, "diffs": {}, "pulado": "admin"}
+
     ef = efetivas(db, user)
     diffs: dict = {}
 
