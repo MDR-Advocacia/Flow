@@ -40,6 +40,16 @@ import { UserFeedbackManager } from "@/components/UserFeedbackManager";
 import EquipesManager from "@/components/admin/EquipesManager";
 import { useTeams } from "@/lib/teams";
 
+// Blocos LEGADOS — escondidos da tela a pedido do operador (29/07/2026) por
+// já terem cumprido seu papel. O código fica: é só voltar pra `true` se algum
+// dia precisar. O que sai de vista (e em que valor cada flag CONGELA):
+//   - aba Taxonomia (o motor roda sozinho; a curadoria não é mais usada)
+//   - Toggle Taxonomy v1<->v2  → congela em taxonomy_active_version = 'v2'
+//   - Modo árvore enxuta        → congela em template_driven_taxonomy = true
+//   - Índice de Processos por Escritório / Cache de Dados de Processos
+// Nada some do backend: os endpoints e os valores em app_settings seguem lá.
+const MOSTRAR_LEGADO = false;
+
 // Permissões de módulo exibidas no dropdown condensado da tabela de usuários.
 const PERMISSOES = [
   { key: "can_schedule_batch", label: "LegalOne", abbr: "L1" },
@@ -730,6 +740,8 @@ const SyncManager = () => {
                 </CardContent>
             </Card>
 
+            {MOSTRAR_LEGADO && (
+              <>
             {/* Card: Toggle Taxonomy v1 <-> v2 (fase 11) */}
             <TaxonomyToggleCard />
 
@@ -886,6 +898,8 @@ const SyncManager = () => {
                     )}
                 </CardContent>
             </Card>
+              </>
+            )}
         </div>
     );
 }
@@ -1490,7 +1504,7 @@ const AdminPage = () => {
                     <TabsTrigger value="sync">Sincronização</TabsTrigger>
                     <TabsTrigger value="squads">Squads</TabsTrigger>
                     <TabsTrigger value="equipes">Equipes</TabsTrigger>
-                    <TabsTrigger value="taxonomy">Taxonomia</TabsTrigger>
+                    {MOSTRAR_LEGADO && <TabsTrigger value="taxonomy">Taxonomia</TabsTrigger>}
                     <TabsTrigger value="users">Usuários & Permissões</TabsTrigger>
                     <TabsTrigger value="sso">Contas SSO</TabsTrigger>
                     <TabsTrigger value="notices">Avisos</TabsTrigger>
@@ -1506,9 +1520,11 @@ const AdminPage = () => {
                 <TabsContent value="equipes" className="space-y-6">
                     <EquipesManager />
                 </TabsContent>
+                {MOSTRAR_LEGADO && (
                 <TabsContent value="taxonomy" className="space-y-6">
                     <TaxonomiaAdminTab />
                 </TabsContent>
+                )}
                 <TabsContent value="users" className="space-y-6">
                     <UsersAndPermissions />
                 </TabsContent>
