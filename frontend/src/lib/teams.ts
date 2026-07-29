@@ -20,6 +20,7 @@ export const TEAMS = [
   { key: "autor-recursal", label: "Autor — Recursal", grupo: GRUPO_CREDITO },
   { key: "ajuizamento", label: "Ajuizamento", grupo: GRUPO_CREDITO },
   { key: "estrategico-autor", label: "Estratégico Autor", grupo: GRUPO_CREDITO },
+  { key: "cobranca", label: "Cobrança", grupo: GRUPO_CREDITO },
   { key: "equipe-mista", label: "Equipe Mista", grupo: GRUPO_ESPECIALIZADA },
   // Controladoria — sucede o antigo "BB Cadastro" (perfil extinto em 2026-07-20).
   // Key preservada de propósito: ver comentário em performance/teams.py.
