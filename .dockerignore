@@ -22,7 +22,11 @@ venv/
 .ruff_cache
 .coverage
 
-# Node (instalado dentro do container)
+# Node (instalado dentro do container pelo `npm ci` do Dockerfile).
+# `node_modules` sem `**/` casa SÓ na raiz — sem isto, o node_modules do runner
+# Playwright (app/runners/legalone) entrava no build context: 4,75 GB por build
+# e falha em `.bin/playwright` (symlink). Vale pro deploy do Coolify também.
+**/node_modules
 node_modules
 frontend/node_modules
 frontend/dist

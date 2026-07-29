@@ -44,6 +44,7 @@ from app.api.v1.endpoints import (
     user_feedback,
     users,
     varredura,
+    cargos,
 )
 from app.core import auth as auth_security
 from app.core.config import settings
@@ -454,6 +455,8 @@ app.add_middleware(
 protected_dependencies = [Depends(auth_security.get_current_user)]
 
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"], dependencies=protected_dependencies)
+app.include_router(cargos.router, prefix="/api/v1/admin", tags=["Admin"], dependencies=protected_dependencies)
+app.include_router(cargos.me_router, prefix="/api/v1", tags=["User"], dependencies=protected_dependencies)
 # admin_notices.router usa o prefixo /api/v1 cru porque algumas rotas
 # (active/dismiss) sao acessiveis a qualquer JWT, e outras (CRUD) tem
 # guard interno de role=admin. Manter sob /api/v1/admin/notices nao

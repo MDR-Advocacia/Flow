@@ -9,6 +9,7 @@ import TaxonomiaAdminTab from "@/components/TaxonomiaAdminTab";
 import { AdminNoticesManager } from "@/components/AdminNoticesManager";
 import { UserFeedbackManager } from "@/components/UserFeedbackManager";
 import EquipesManager from "@/components/admin/EquipesManager";
+import CargosManager from "@/components/admin/CargosManager";
 import SquadsManager from "@/components/admin/SquadsManager";
 import SyncManager from "@/components/admin/SyncManager";
 import UsersAndPermissions from "@/components/admin/UsersAndPermissions";
@@ -51,6 +52,7 @@ const AdminPage = () => {
                     <TabsTrigger value="squads">Squads</TabsTrigger>
                     <TabsTrigger value="equipes">Equipes</TabsTrigger>
                     {MOSTRAR_LEGADO && <TabsTrigger value="taxonomy">Taxonomia</TabsTrigger>}
+                    <TabsTrigger value="cargos">Cargos</TabsTrigger>
                     <TabsTrigger value="users">Usuários & Permissões</TabsTrigger>
                     <TabsTrigger value="sso">Contas SSO</TabsTrigger>
                     <TabsTrigger value="notices">Avisos</TabsTrigger>
@@ -71,6 +73,9 @@ const AdminPage = () => {
                     <TaxonomiaAdminTab />
                 </TabsContent>
                 )}
+                <TabsContent value="cargos" className="space-y-6">
+                    <CargosManager />
+                </TabsContent>
                 <TabsContent value="users" className="space-y-6">
                     <UsersAndPermissions />
                 </TabsContent>

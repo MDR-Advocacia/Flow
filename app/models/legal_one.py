@@ -1,4 +1,5 @@
 from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, Text, DateTime, JSON
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -81,10 +82,36 @@ class LegalOneUser(Base):
     # por SSO. Usado pro selo "Entra ID" no admin de usuários.
     last_sso_at = Column(DateTime(timezone=True), nullable=True)
 
+    # ── RBAC (migration usr005) ───────────────────────────────────────────
+    # A política vem do CARGO; a exceção individual entra por cima ({chave:
+    # bool} — true concede, false revoga). As colunas booleanas acima viram
+    # CACHE do resultado, escrito só por app/services/permissoes.py.
+    cargo_id = Column(Integer, ForeignKey("flow_cargo.id", ondelete="SET NULL"),
+                      nullable=True, index=True)
+    modulos_extra = Column(JSONB, nullable=True)
+    equipes_extra = Column(JSONB, nullable=True)
+
     # Relationships
     squad_members = relationship("SquadMember", back_populates="user")
     saved_filters = relationship("SavedFilter", back_populates="user", cascade="all, delete-orphan")
     default_office = relationship("LegalOneOffice", foreign_keys=[default_office_id])
+
+
+class FlowCargo(Base):
+    """Cargo/papel do RBAC — a política de acesso é POR CARGO (ver
+    app/services/permissoes.py). Espelha o modelo do Painel Financeiro."""
+
+    __tablename__ = "flow_cargo"
+
+    id = Column(Integer, primary_key=True)
+    nome = Column(String(80), nullable=False, unique=True)
+    descricao = Column(String(200), nullable=True)
+    modulos = Column(JSONB, nullable=False, server_default="{}")
+    # nenhuma | lista | todas | supervisionadas
+    equipes_modo = Column(String(20), nullable=False, server_default="nenhuma")
+    equipes = Column(JSONB, nullable=False, server_default="[]")
+    ativo = Column(Boolean, nullable=False, server_default="true")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class SavedFilter(Base):

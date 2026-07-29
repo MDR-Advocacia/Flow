@@ -510,22 +510,26 @@ def update_user(
 
     if payload.role is not None:
         user.role = payload.role
-    if payload.can_schedule_batch is not None:
-        user.can_schedule_batch = payload.can_schedule_batch
-    if payload.can_use_publications is not None:
-        user.can_use_publications = payload.can_use_publications
-    if payload.can_use_prazos_iniciais is not None:
-        user.can_use_prazos_iniciais = payload.can_use_prazos_iniciais
-    if payload.can_use_onerequest is not None:
-        user.can_use_onerequest = payload.can_use_onerequest
-    if payload.can_use_minha_equipe is not None:
-        user.can_use_minha_equipe = payload.can_use_minha_equipe
+    # RBAC (usr005): marcar módulo/equipe aqui NÃO grava a coluna direto — vira
+    # EXCEÇÃO sobre o cargo (e some se voltar a bater com ele). Assim a tela
+    # continua funcionando e o cache materializado nunca desencontra da
+    # política. Ver app/services/permissoes.py.
+    from app.services import permissoes as _perm
+
+    _mods = {
+        "can_schedule_batch": payload.can_schedule_batch,
+        "can_use_publications": payload.can_use_publications,
+        "can_use_prazos_iniciais": payload.can_use_prazos_iniciais,
+        "can_use_onerequest": payload.can_use_onerequest,
+        "can_use_minha_equipe": payload.can_use_minha_equipe,
+        "can_manage_distribuidos_bb": payload.can_manage_distribuidos_bb,
+        "notify_onerequest_errors": payload.notify_onerequest_errors,
+    }
+    _mods = {k: v for k, v in _mods.items() if v is not None}
+    if _mods:
+        _perm.definir_modulos(db, user, _mods)
     if payload.minha_equipe_equipes is not None:
-        user.minha_equipe_equipes = ",".join(payload.minha_equipe_equipes)
-    if payload.can_manage_distribuidos_bb is not None:
-        user.can_manage_distribuidos_bb = payload.can_manage_distribuidos_bb
-    if payload.notify_onerequest_errors is not None:
-        user.notify_onerequest_errors = payload.notify_onerequest_errors
+        _perm.definir_equipes(db, user, list(payload.minha_equipe_equipes))
     if payload.default_office_id is not None:
         user.default_office_id = payload.default_office_id
 
