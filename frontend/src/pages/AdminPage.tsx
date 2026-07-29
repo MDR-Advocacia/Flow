@@ -3,6 +3,9 @@
 // Só o esqueleto: cabeçalho + abas. Cada aba é um componente em
 // components/admin/ (antes tudo morava aqui, em 1.548 linhas).
 
+import { useAuth } from "@/hooks/useAuth";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { AlertCircle, ShieldCheck } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { BaseProcessualPage } from "@/pages/BaseProcessualPage";
 import TaxonomiaAdminTab from "@/components/TaxonomiaAdminTab";
