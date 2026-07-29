@@ -468,6 +468,9 @@ def list_users(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
 
     users = db.query(LegalOneUser).order_by(LegalOneUser.name).all()
+    from app.models.legal_one import FlowCargo
+
+    _cargos = {c.id: c.nome for c in db.query(FlowCargo).all()}
     return [
         {
             "id": u.id,
@@ -488,6 +491,13 @@ def list_users(
             "has_password": u.hashed_password is not None,
             "is_sso": getattr(u, "last_sso_at", None) is not None,
             "must_change_password": u.must_change_password,
+            # RBAC (usr005): de onde vem a permissão e se há desvio individual.
+            "cargo_id": getattr(u, "cargo_id", None),
+            "cargo_nome": _cargos.get(getattr(u, "cargo_id", None)),
+            "excecoes": (
+                len(getattr(u, "modulos_extra", None) or {})
+                + len(getattr(u, "equipes_extra", None) or {})
+            ),
         }
         for u in users
     ]

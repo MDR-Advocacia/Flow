@@ -24,6 +24,15 @@ import { apiFetch } from "@/lib/api-client";
 import { useTeams } from "@/lib/teams";
 import { AdminUser, Office, PERMISSOES } from "@/components/admin/types";
 
+// Campos que a listagem passou a devolver com o RBAC (migration usr005).
+type UsuarioRBAC = AdminUser & {
+  cargo_id?: number | null;
+  cargo_nome?: string | null;
+  excecoes?: number;
+};
+interface CargoRef { id: number; nome: string }
+const TAMANHOS_PAGINA = [25, 50, 100];
+
 // --- Componente de Usuários & Permissões ---
 const UsersAndPermissions = () => {
     const { toast } = useToast();
@@ -34,6 +43,22 @@ const UsersAndPermissions = () => {
     const [editingData, setEditingData] = useState<Partial<AdminUser>>({});
     const [tempPasswordDialog, setTempPasswordDialog] = useState<{ isOpen: boolean; password?: string; userName?: string }>({ isOpen: false });
     const [searchQuery, setSearchQuery] = useState('');
+    // Sem acesso ficam ESCONDIDOS por padrão: eram 146 de 175 ativos, e
+    // empurravam pra fora da tela justamente quem tem permissão.
+    const [mostrarSemAcesso, setMostrarSemAcesso] = useState(false);
+    const [mostrarInativos, setMostrarInativos] = useState(false);
+    const [filtroCargo, setFiltroCargo] = useState<string>('todos');
+    const [pagina, setPagina] = useState(0);
+    const [porPagina, setPorPagina] = useState(25);
+
+    const { data: cargos = [] } = useQuery({
+        queryKey: ['admin-cargos-ref'],
+        queryFn: async () => {
+            const res = await apiFetch('/api/v1/admin/cargos');
+            if (!res.ok) return [] as CargoRef[];
+            return res.json() as Promise<CargoRef[]>;
+        },
+    });
 
     const { data: users = [], isLoading: usersLoading, refetch: refetchUsers } = useQuery({
         queryKey: ['admin-users'],
@@ -142,10 +167,29 @@ const UsersAndPermissions = () => {
         });
     };
 
-    const filteredUsers = users.filter(u =>
-        u.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        u.email.toLowerCase().includes(searchQuery.toLowerCase())
-    );
+    const temAlgumAcesso = (u: UsuarioRBAC) =>
+        u.role === 'admin' ||
+        PERMISSOES.some((p) => (u as any)[p.key]) ||
+        (u.minha_equipe_equipes?.length ?? 0) > 0;
+
+    const filtrados = (users as UsuarioRBAC[]).filter((u) => {
+        const q = searchQuery.trim().toLowerCase();
+        if (q && !u.name.toLowerCase().includes(q) && !u.email.toLowerCase().includes(q)) return false;
+        if (!mostrarInativos && !u.is_active) return false;
+        if (!mostrarSemAcesso && !temAlgumAcesso(u)) return false;
+        if (filtroCargo !== 'todos') {
+            if (filtroCargo === 'sem-cargo' && u.cargo_id) return false;
+            if (filtroCargo !== 'sem-cargo' && String(u.cargo_id ?? '') !== filtroCargo) return false;
+        }
+        return true;
+    });
+
+    const totalPaginas = Math.max(1, Math.ceil(filtrados.length / porPagina));
+    const paginaAtual = Math.min(pagina, totalPaginas - 1);
+    const filteredUsers = filtrados.slice(paginaAtual * porPagina, (paginaAtual + 1) * porPagina);
+    const ocultosSemAcesso = mostrarSemAcesso
+        ? 0
+        : (users as UsuarioRBAC[]).filter((u) => u.is_active && !temAlgumAcesso(u)).length;
 
     const getOfficeName = (id: number | null) => {
         if (!id) return '—';
@@ -166,12 +210,37 @@ const UsersAndPermissions = () => {
                 <CardDescription>Gerencie papéis, permissões e acesso dos usuários.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-                <Input
-                    placeholder="Buscar por nome ou e-mail..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full"
-                />
+                <div className="flex flex-wrap items-center gap-3">
+                    <Input
+                        placeholder="Buscar por nome ou e-mail..."
+                        value={searchQuery}
+                        onChange={(e) => { setSearchQuery(e.target.value); setPagina(0); }}
+                        className="min-w-[220px] flex-1"
+                    />
+                    <Select value={filtroCargo} onValueChange={(v) => { setFiltroCargo(v); setPagina(0); }}>
+                        <SelectTrigger className="w-[190px]"><SelectValue placeholder="Cargo" /></SelectTrigger>
+                        <SelectContent>
+                            <SelectItem value="todos">Todos os cargos</SelectItem>
+                            <SelectItem value="sem-cargo">Sem cargo</SelectItem>
+                            {cargos.map((c) => (
+                                <SelectItem key={c.id} value={String(c.id)}>{c.nome}</SelectItem>
+                            ))}
+                        </SelectContent>
+                    </Select>
+                    <label className="flex cursor-pointer items-center gap-2 text-sm">
+                        <Checkbox checked={mostrarSemAcesso}
+                                  onCheckedChange={(c) => { setMostrarSemAcesso(!!c); setPagina(0); }} />
+                        Mostrar sem acesso
+                        {ocultosSemAcesso > 0 && (
+                            <span className="text-xs text-muted-foreground">({ocultosSemAcesso} ocultos)</span>
+                        )}
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-2 text-sm">
+                        <Checkbox checked={mostrarInativos}
+                                  onCheckedChange={(c) => { setMostrarInativos(!!c); setPagina(0); }} />
+                        Incluir inativos
+                    </label>
+                </div>
                 <div className="overflow-x-auto">
                     <Table>
                         <TableHeader>
@@ -181,6 +250,7 @@ const UsersAndPermissions = () => {
                                 <TableHead>Status</TableHead>
                                 <TableHead>Acesso</TableHead>
                                 <TableHead>Papel</TableHead>
+                                <TableHead>Cargo</TableHead>
                                 <TableHead>Permissões</TableHead>
                                 <TableHead>Escritório</TableHead>
                                 <TableHead>Ações</TableHead>
@@ -218,6 +288,43 @@ const UsersAndPermissions = () => {
                                             </Select>
                                         ) : (
                                             <span className="text-sm">{user.role}</span>
+                                        )}
+                                    </TableCell>
+                                    <TableCell>
+                                        {/* De onde vem a permissão. A exceção é destacada de
+                                            propósito: desvio individual não pode ser invisível. */}
+                                        <Select
+                                            value={String((user as UsuarioRBAC).cargo_id ?? '')}
+                                            onValueChange={async (v) => {
+                                                const res = await apiFetch(`/api/v1/admin/users/${user.id}/cargo`, {
+                                                    method: 'PATCH',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({ cargo_id: v ? Number(v) : null }),
+                                                });
+                                                if (res.ok) {
+                                                    toast({ title: 'Cargo alterado', description: 'O acesso atual foi preservado como exceção.' });
+                                                    refetchUsers();
+                                                } else {
+                                                    const b = await res.json().catch(() => ({}));
+                                                    toast({ title: 'Erro ao trocar o cargo', description: b.detail, variant: 'destructive' });
+                                                }
+                                            }}
+                                        >
+                                            <SelectTrigger className="h-8 w-[150px] text-xs">
+                                                <SelectValue placeholder="Sem cargo" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                {cargos.map((c) => (
+                                                    <SelectItem key={c.id} value={String(c.id)}>{c.nome}</SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
+                                        {((user as UsuarioRBAC).excecoes ?? 0) > 0 && (
+                                            <Badge variant="outline"
+                                                   className="mt-1 border-amber-300 text-[10px] text-amber-800"
+                                                   title="Este usuário tem permissões diferentes do cargo">
+                                                +{(user as UsuarioRBAC).excecoes} exceção(ões)
+                                            </Badge>
                                         )}
                                     </TableCell>
                                     <TableCell>
@@ -381,6 +488,33 @@ const UsersAndPermissions = () => {
                             ))}
                         </TableBody>
                     </Table>
+                </div>
+                {/* Paginação — regra da casa: nenhuma listagem renderiza tudo.
+                    Antes esta tabela desenhava os 312 usuários de uma vez. */}
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3 text-xs text-muted-foreground">
+                    <span>
+                        {filtrados.length === 0
+                            ? 'Nenhum usuário com esses filtros'
+                            : `${paginaAtual * porPagina + 1}–${Math.min((paginaAtual + 1) * porPagina, filtrados.length)} de ${filtrados.length}`}
+                        {' · '}Página {paginaAtual + 1} de {totalPaginas}
+                    </span>
+                    <div className="flex items-center gap-2">
+                        <Select value={String(porPagina)}
+                                onValueChange={(v) => { setPorPagina(Number(v)); setPagina(0); }}>
+                            <SelectTrigger className="h-8 w-[110px] text-xs"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                                {TAMANHOS_PAGINA.map((n) => (
+                                    <SelectItem key={n} value={String(n)}>{n} por página</SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                        <Button size="sm" variant="outline" className="h-8 text-xs"
+                                disabled={paginaAtual === 0}
+                                onClick={() => setPagina((p) => Math.max(0, p - 1))}>Anterior</Button>
+                        <Button size="sm" variant="outline" className="h-8 text-xs"
+                                disabled={paginaAtual + 1 >= totalPaginas}
+                                onClick={() => setPagina((p) => p + 1)}>Próxima</Button>
+                    </div>
                 </div>
             </CardContent>
 
