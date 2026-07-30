@@ -990,10 +990,15 @@ class LegalOneApiClient:
 
         Mapeamento confirmado na entidade Lawsuit (validado lendo um processo
         encerrado manualmente pela UI):
-          closed=True          <-> IsEncerrado do form
           closingDate          <-> DataEncerramento (ISO yyyy-mm-dd)
           closingReason        <-> MotivoEncerramento (convencao MDR:
                                    NOME COMPLETO - dd/mm/aaaa hh:mm)
+
+        ATENCAO: `closed` e READ-ONLY na API. Enviar a propriedade faz o L1
+        responder 400 Validation "A propriedade 'closed' nao deve ser
+        informada para uma acao de alteracao" — quem deriva o closed=true e o
+        proprio L1 a partir da data de encerramento. (Descoberto em producao
+        no primeiro encerramento real, 30/07/2026.)
 
         Nao altera o responsavel da pasta nem os campos de resultado
         (result/resultType/resultReason/datas) — estes seguem preenchidos
@@ -1004,7 +1009,6 @@ class LegalOneApiClient:
         Levanta HTTPError se o L1 recusar em ambas.
         """
         payload = {
-            "closed": True,
             "closingDate": closing_date,
             "closingReason": closing_reason,
         }
