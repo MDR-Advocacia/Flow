@@ -501,6 +501,8 @@ app.include_router(onerequest.intake_router, prefix="/api/v1")
 # Intake do Sistema de Encerramentos: auth via header X-Encerramentos-Api-Key,
 # SEM JWT. Encerra o processo no Legal One quando encerrado la.
 app.include_router(encerramentos.intake_router, prefix="/api/v1")
+# Menu "Encerramentos" (gestao, admin): rastro do que a integracao encerrou no L1.
+app.include_router(encerramentos.router, prefix="/api/v1", tags=["Encerramentos"], dependencies=protected_dependencies)
 # UI do operador OneRequest (tratamento + agendar): JWT + permissão onerequest.
 app.include_router(
     onerequest.router, prefix="/api/v1", tags=["OneRequest"], dependencies=protected_dependencies

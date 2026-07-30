@@ -42,6 +42,7 @@ import ContatosLegalOnePage from './pages/ContatosLegalOnePage';
 import OnerequestPage from './pages/OnerequestPage';
 import OnerequestDashboardPage from './pages/OnerequestDashboardPage';
 import DistribuidosBBPage from './pages/DistribuidosBBPage';
+import EncerramentosL1Page from './pages/EncerramentosL1Page';
 import DistribuidosBBDashboardPage from './pages/DistribuidosBBDashboardPage';
 import DistribuidosBBConfigPage from './pages/DistribuidosBBConfigPage';
 import MinhaEquipePage from './pages/MinhaEquipePage';
@@ -78,6 +79,7 @@ function AppContent() {
             <Route path="/tasks/template-batch" element={<CreateTaskByTemplatePage />} />
             <Route path="/tasks/spreadsheet-batch" element={<CreateTaskFromSpreadsheetPage />} />
             <Route path="/cancelamento-duplicadas" element={<CancelamentoDuplicadasPage />} />
+            <Route path="/encerramentos-legalone" element={<EncerramentosL1Page />} />
             <Route path="/publications" element={<PublicationsPage />} />
             <Route path="/publications/dashboard" element={<PublicationsDashboardPage />} />
             <Route path="/publications/lookup" element={<LookupByCnjPage />} />
