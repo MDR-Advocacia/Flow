@@ -5,6 +5,7 @@ from app.services.mail_service import send_failure_report
 
 class FakeSMTP:
     instances = []
+    refused_recipients = {}
 
     def __init__(self, server, port):
         self.server = server
@@ -32,10 +33,12 @@ class FakeSMTP:
             "recipients": recipients,
             "message": message,
         }
+        return self.refused_recipients
 
 
 def test_send_failure_report_uses_mail_env_and_explicit_recipients(monkeypatch):
     FakeSMTP.instances = []
+    FakeSMTP.refused_recipients = {}
     monkeypatch.setattr("app.services.mail_service.smtplib.SMTP", FakeSMTP)
     monkeypatch.setenv("MAIL_HOST", "smtp.example.test")
     monkeypatch.setenv("MAIL_PORT", "587")
@@ -74,3 +77,26 @@ def test_send_failure_report_uses_mail_env_and_explicit_recipients(monkeypatch):
     assert "sistema Flow" in html
     assert "Lote #7 / Item #11" in html
     assert "Processo &lt;nao encontrado&gt;" in html
+
+
+def test_send_failure_report_retries_when_smtp_refuses_a_recipient(monkeypatch):
+    FakeSMTP.instances = []
+    FakeSMTP.refused_recipients = {
+        "destino@example.test": (550, b"mailbox unavailable")
+    }
+    monkeypatch.setattr("app.services.mail_service.smtplib.SMTP", FakeSMTP)
+    monkeypatch.setenv("MAIL_HOST", "smtp.example.test")
+    monkeypatch.setenv("MAIL_PORT", "587")
+    monkeypatch.setenv("MAIL_USERNAME", "sender@example.test")
+    monkeypatch.setenv("MAIL_PASSWORD", "secret")
+    monkeypatch.setenv("MAIL_ENCRYPTION", "tls")
+    monkeypatch.setenv("MAIL_FROM_ADDRESS", "sender@example.test")
+
+    sent = send_failure_report(
+        [{"cnj": "Busca #1", "motivo": "HTTP 502"}],
+        "Publicações",
+        recipients=["destino@example.test"],
+        system_name="Flow",
+    )
+
+    assert sent is False

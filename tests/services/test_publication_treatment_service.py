@@ -37,6 +37,9 @@ def _create_record(
 ):
     record = PublicationRecord(
         search_id=search_id,
+        source_provider="LEGAL_ONE",
+        source_external_id=str(legal_one_update_id),
+        ingestion_key=f"LEGAL_ONE:{legal_one_update_id}",
         legal_one_update_id=legal_one_update_id,
         publication_date="2026-04-20T00:00:00",
         creation_date="2026-04-20T10:00:00",

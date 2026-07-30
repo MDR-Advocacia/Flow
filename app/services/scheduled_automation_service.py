@@ -4,15 +4,18 @@ Service para gerenciar agendamentos automáticos.
 Integra com APScheduler para executar jobs periodicamente.
 """
 
+import hashlib
+import json
 import logging
+from collections import defaultdict
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Iterator
 
 from sqlalchemy.orm import Session
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
 from app.models.scheduled_automation import ScheduledAutomation, ScheduledAutomationRun
 from app.models.publication_search import PublicationRecord
@@ -32,6 +35,65 @@ from app.models.publication_capture import (
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+AUTOMATION_LOCK_NAMESPACE = 4242
+PUBLICATION_RETRY_SWEEP_LOCK_NAMESPACE = 4243
+PUBLICATION_RETRY_SWEEP_LOCK_KEY = 1
+PUBLICATION_RETRY_JOB_ID = "publication_capture_retry_sweep"
+
+
+def _publication_alert_key(
+    alert_type: str,
+    *,
+    automation_id: Optional[int],
+    run_id: Optional[int],
+    payload: Any,
+) -> str:
+    """Chave estável para não duplicar um mesmo aviso em reentrâncias."""
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:24]
+    return (
+        f"{alert_type}:automation:{automation_id or 0}:"
+        f"run:{run_id or 0}:{digest}"
+    )
+
+
+@contextmanager
+def _postgres_advisory_lock(namespace: int, key: int) -> Iterator[bool]:
+    """Lock cross-worker; libera sempre, inclusive se o callback falhar."""
+    from sqlalchemy import text as sql_text
+    from app.db.session import engine
+
+    connection = engine.connect()
+    acquired = False
+    try:
+        acquired = bool(
+            connection.execute(
+                sql_text("SELECT pg_try_advisory_lock(:namespace, :key)"),
+                {"namespace": namespace, "key": key},
+            ).scalar()
+        )
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                connection.execute(
+                    sql_text("SELECT pg_advisory_unlock(:namespace, :key)"),
+                    {"namespace": namespace, "key": key},
+                )
+            except Exception:
+                logger.exception(
+                    "Falha ao liberar advisory lock (%s, %s)",
+                    namespace,
+                    key,
+                )
+        connection.close()
 
 
 def _overlap_hours() -> int:
@@ -260,6 +322,397 @@ class ScheduledAutomationService:
             except Exception:
                 pass
 
+    @staticmethod
+    def _failure_detail(
+        office_id: int,
+        error: str,
+        attempt: PublicationFetchAttempt,
+    ) -> Dict[str, Any]:
+        return {
+            "office_id": office_id,
+            "error": (error or "Erro desconhecido")[:2000],
+            "attempt_n": int(attempt.attempt_n or 1),
+            "attempt_id": int(attempt.id),
+            "attempt_status": attempt.status,
+            "next_retry_at": (
+                attempt.next_retry_at.isoformat()
+                if attempt.next_retry_at is not None
+                else None
+            ),
+        }
+
+    def _record_automation_pull_failure(
+        self,
+        automation: ScheduledAutomation,
+        error: str,
+    ) -> List[Dict[str, Any]]:
+        """Cria estado de retry mesmo se a etapa falhar antes do loop normal."""
+        now = datetime.now(timezone.utc)
+        failures: List[Dict[str, Any]] = []
+        for office_id in automation.office_ids or []:
+            try:
+                cursor = self._get_or_create_cursor(office_id)
+                window_from, window_to = self._compute_window(
+                    cursor,
+                    now,
+                    initial_lookback_days=automation.initial_lookback_days,
+                    overlap_hours=automation.overlap_hours,
+                )
+                attempt = self._record_attempt_failure(
+                    office_id,
+                    window_from,
+                    window_to,
+                    error,
+                    automation.id,
+                )
+                failures.append(
+                    self._failure_detail(office_id, error, attempt)
+                )
+            except Exception:
+                logger.exception(
+                    "Não foi possível persistir retry do escritório %s.",
+                    office_id,
+                )
+                try:
+                    self.db.rollback()
+                except Exception:
+                    pass
+        return failures
+
+    def _alert_publication_capture_failures(
+        self,
+        automation_id: Optional[int],
+        failures: List[Dict[str, Any]],
+        *,
+        run_id: Optional[int] = None,
+        is_retry: bool = False,
+    ) -> bool:
+        """Envia um único e-mail por rodada, com todos os escritórios afetados."""
+        if not failures or automation_id is None:
+            return False
+
+        try:
+            from app.models.legal_one import LegalOneOffice
+            from app.models.publication_capture import (
+                PUBLICATION_ALERT_STATUS_SENT,
+            )
+            from app.services.publication_capture_alert_service import (
+                PublicationCaptureAlertService,
+            )
+
+            automation = None
+            if automation_id is not None:
+                automation = (
+                    self.db.query(ScheduledAutomation)
+                    .filter(ScheduledAutomation.id == automation_id)
+                    .first()
+                )
+
+            office_ids = sorted(
+                {
+                    int(item["office_id"])
+                    for item in failures
+                    if item.get("office_id") is not None
+                }
+            )
+            office_rows = (
+                self.db.query(
+                    LegalOneOffice.id,
+                    LegalOneOffice.path,
+                    LegalOneOffice.name,
+                )
+                .filter(LegalOneOffice.id.in_(office_ids))
+                .all()
+                if office_ids
+                else []
+            )
+            office_labels = {
+                row[0]: (row[1] or row[2] or f"Escritório {row[0]}")
+                for row in office_rows
+            }
+
+            failed_items = []
+            for item in failures:
+                office_id = item.get("office_id")
+                retry_at = item.get("next_retry_at")
+                retry_text = (
+                    f"Nova tentativa automática prevista para {retry_at}."
+                    if retry_at
+                    else "Limite de tentativas atingido; requer intervenção."
+                )
+                failed_items.append(
+                    {
+                        "cnj": office_labels.get(
+                            office_id,
+                            f"Escritório {office_id or '?'}",
+                        ),
+                        "motivo": (
+                            f"{item.get('error') or 'Erro desconhecido'}\n"
+                            f"Tentativa: {item.get('attempt_n', '?')}. "
+                            f"{retry_text}"
+                        ),
+                        "execution_id": run_id,
+                    }
+                )
+
+            recipients = (
+                settings.publication_capture_alert_email
+                or settings.classificacao_alert_email
+                or settings.mail_to
+                or settings.email_to
+            )
+            if not recipients:
+                logger.error(
+                    "Falha na captura de publicações sem destinatário de alerta "
+                    "(PUBLICATION_CAPTURE_ALERT_EMAIL/CLASSIFICACAO_ALERT_EMAIL/MAIL_TO)."
+                )
+                return False
+
+            automation_label = (
+                automation.name
+                if automation is not None
+                else f"Automação #{automation_id or '?'}"
+            )
+            source = (
+                f"Retry da Busca de Publicações · {automation_label}"
+                if is_retry
+                else f"Busca Agendada de Publicações · {automation_label}"
+            )
+            attempt_ids = sorted(
+                {
+                    int(item["attempt_id"])
+                    for item in failures
+                    if item.get("attempt_id") is not None
+                }
+            )
+            alert = PublicationCaptureAlertService(self.db).enqueue(
+                idempotency_key=_publication_alert_key(
+                    "scheduled_capture_retry_failure"
+                    if is_retry
+                    else "scheduled_capture_failure",
+                    automation_id=automation_id,
+                    run_id=run_id,
+                    payload=failures,
+                ),
+                alert_type=(
+                    "scheduled_capture_retry_failure"
+                    if is_retry
+                    else "scheduled_capture_failure"
+                ),
+                failed_items=failed_items,
+                batch_source=source,
+                recipients=recipients,
+                system_name="Flow",
+                alert_context={
+                    "automation_id": automation_id,
+                    "run_id": run_id,
+                    "is_retry": is_retry,
+                    "failure_count": len(failures),
+                    "attempt_ids": attempt_ids,
+                },
+            )
+            if attempt_ids:
+                (
+                    self.db.query(PublicationFetchAttempt)
+                    .filter(
+                        PublicationFetchAttempt.id.in_(attempt_ids),
+                        PublicationFetchAttempt.alert_required.is_(True),
+                    )
+                    .update(
+                        {
+                            PublicationFetchAttempt.alert_outbox_id: alert.id,
+                        },
+                        synchronize_session=False,
+                    )
+                )
+                self.db.commit()
+            sent = alert.status == PUBLICATION_ALERT_STATUS_SENT
+            if sent:
+                logger.info(
+                    "Alerta da captura enviado: automation=%s run=%s falhas=%s retry=%s",
+                    automation_id,
+                    run_id,
+                    len(failures),
+                    is_retry,
+                )
+            else:
+                logger.warning(
+                    "Alerta da captura persistido para retry de e-mail: "
+                    "automation=%s run=%s alert=%s status=%s",
+                    automation_id,
+                    run_id,
+                    alert.id,
+                    alert.status,
+                )
+            return bool(sent)
+        except Exception:
+            logger.exception(
+                "Falha ao enviar alerta da captura de publicações "
+                "(automation=%s run=%s).",
+                automation_id,
+                run_id,
+            )
+            return False
+
+    def _alert_publication_capture_degraded(
+        self,
+        automation_id: Optional[int],
+        degraded: List[Dict[str, Any]],
+        fallback_metadata: Dict[str, Any],
+        *,
+        run_id: Optional[int] = None,
+        is_retry: bool = False,
+    ) -> bool:
+        """Avisa o 502 mesmo quando o DJEN recuperou a captura."""
+        if not degraded or automation_id is None:
+            return False
+        try:
+            from app.models.legal_one import LegalOneOffice
+            from app.models.publication_capture import (
+                PUBLICATION_ALERT_STATUS_SENT,
+            )
+            from app.services.publication_capture_alert_service import (
+                PublicationCaptureAlertService,
+            )
+
+            automation = (
+                self.db.query(ScheduledAutomation)
+                .filter(ScheduledAutomation.id == automation_id)
+                .first()
+            )
+            office_ids = sorted(
+                {
+                    int(item["office_id"])
+                    for item in degraded
+                    if item.get("office_id") is not None
+                }
+            )
+            rows = (
+                self.db.query(
+                    LegalOneOffice.id,
+                    LegalOneOffice.path,
+                    LegalOneOffice.name,
+                )
+                .filter(LegalOneOffice.id.in_(office_ids))
+                .all()
+            )
+            labels = {
+                row[0]: (row[1] or row[2] or f"Escritório {row[0]}")
+                for row in rows
+            }
+            jurisdictions = fallback_metadata.get("jurisdictions") or {}
+            report = (
+                fallback_metadata.get("report_title")
+                or fallback_metadata.get("report_id")
+                or fallback_metadata.get("source")
+                or "snapshot local"
+            )
+            items = []
+            for item in degraded:
+                retry_at = item.get("next_retry_at")
+                items.append(
+                    {
+                        "cnj": labels.get(
+                            item.get("office_id"),
+                            f"Escritório {item.get('office_id') or '?'}",
+                        ),
+                        "motivo": (
+                            "Legal One GET /Updates retornou HTTP 502. "
+                            "A contingência suplementar DJEN foi executada.\n"
+                            f"Publicações DJEN da rodada: {fallback_metadata.get('publications', 0)}. "
+                            f"Relatório: {report}. Tribunais: "
+                            f"{jurisdictions or 'nenhum resultado no período'}.\n"
+                            f"{fallback_metadata.get('coverage_note') or 'Cobertura parcial por OAB; reconciliação Legal One obrigatória.'} "
+                            "A reconciliação com o Legal One continua agendada"
+                            + (
+                                f" para {retry_at}."
+                                if retry_at
+                                else " e atingiu o limite de tentativas."
+                            )
+                        ),
+                        "execution_id": run_id,
+                    }
+                )
+
+            recipients = (
+                settings.publication_capture_alert_email
+                or settings.classificacao_alert_email
+                or settings.mail_to
+                or settings.email_to
+            )
+            if not recipients:
+                return False
+            automation_label = (
+                automation.name
+                if automation is not None
+                else f"Automação #{automation_id}"
+            )
+            source = (
+                "Contingência DJEN no Retry"
+                if is_retry
+                else "Contingência DJEN na Busca Agendada"
+            )
+            attempt_ids = sorted(
+                {
+                    int(item["attempt_id"])
+                    for item in degraded
+                    if item.get("attempt_id") is not None
+                }
+            )
+            alert = PublicationCaptureAlertService(self.db).enqueue(
+                idempotency_key=_publication_alert_key(
+                    "scheduled_djen_retry_degraded"
+                    if is_retry
+                    else "scheduled_djen_degraded",
+                    automation_id=automation_id,
+                    run_id=run_id,
+                    payload={
+                        "degraded": degraded,
+                        "fallback_metadata": fallback_metadata,
+                    },
+                ),
+                alert_type=(
+                    "scheduled_djen_retry_degraded"
+                    if is_retry
+                    else "scheduled_djen_degraded"
+                ),
+                failed_items=items,
+                batch_source=f"{source} · {automation_label}",
+                recipients=recipients,
+                system_name="Flow",
+                alert_context={
+                    "automation_id": automation_id,
+                    "run_id": run_id,
+                    "is_retry": is_retry,
+                    "fallback_metadata": fallback_metadata,
+                    "attempt_ids": attempt_ids,
+                },
+            )
+            if attempt_ids:
+                (
+                    self.db.query(PublicationFetchAttempt)
+                    .filter(
+                        PublicationFetchAttempt.id.in_(attempt_ids),
+                        PublicationFetchAttempt.alert_required.is_(True),
+                    )
+                    .update(
+                        {
+                            PublicationFetchAttempt.alert_outbox_id: alert.id,
+                        },
+                        synchronize_session=False,
+                    )
+                )
+                self.db.commit()
+            return alert.status == PUBLICATION_ALERT_STATUS_SENT
+        except Exception:
+            logger.exception(
+                "Falha ao enviar alerta da contingência DJEN "
+                "(automation=%s run=%s).",
+                automation_id,
+                run_id,
+            )
+            return False
+
     def _execute_automation(self, automation_id: int) -> None:
         """Execute an automation, protegido por advisory lock no Postgres.
 
@@ -275,17 +728,11 @@ class ScheduledAutomationService:
         dispara o mesmo cron sem coordenacao. max_instances=1 do APScheduler
         so protege dentro de UM processo, nao entre processos.
         """
-        from sqlalchemy import text as _sql_text
-        from app.db.session import engine as _engine
-
-        _LOCK_NAMESPACE = 4242
-        lock_conn = _engine.connect()
-        try:
-            got_lock = lock_conn.execute(
-                _sql_text("SELECT pg_try_advisory_lock(:k1, :k2)"),
-                {"k1": _LOCK_NAMESPACE, "k2": automation_id},
-            ).scalar()
-            if not got_lock:
+        with _postgres_advisory_lock(
+            AUTOMATION_LOCK_NAMESPACE,
+            automation_id,
+        ) as acquired:
+            if not acquired:
                 logger.info(
                     "Automation %d: outro worker/container ja esta executando "
                     "esta automation - abortando esta instancia.",
@@ -293,18 +740,6 @@ class ScheduledAutomationService:
                 )
                 return
             self._execute_automation_inner(automation_id)
-        finally:
-            try:
-                lock_conn.execute(
-                    _sql_text("SELECT pg_advisory_unlock(:k1, :k2)"),
-                    {"k1": _LOCK_NAMESPACE, "k2": automation_id},
-                )
-            except Exception:
-                logger.exception(
-                    "Falha ao liberar advisory lock da automation %d",
-                    automation_id,
-                )
-            lock_conn.close()
 
     def _execute_automation_inner(self, automation_id: int) -> None:
         """Execute an automation (called by scheduler)."""
@@ -351,10 +786,23 @@ class ScheduledAutomationService:
                             overlap_hours=automation.overlap_hours,
                             run_id=run_id,
                         )
+                        failed_offices = result.get("offices_failed") or []
+                        degraded_offices = result.get("offices_degraded") or []
                         steps_executed.append({
                             "step": "pull_publications",
-                            "status": "success",
+                            "status": (
+                                "failed"
+                                if failed_offices
+                                else ("warning" if degraded_offices else "success")
+                            ),
                             "records_found": result.get("records_found", 0),
+                            "offices_ok": result.get("offices_ok", []),
+                            "offices_failed": failed_offices,
+                            "offices_degraded": degraded_offices,
+                            "offices_skipped": result.get("offices_skipped", []),
+                            "failures": result.get("failures", []),
+                            "fallback_metadata": result.get("fallback_metadata"),
+                            "alert_sent": bool(result.get("alert_sent")),
                         })
                     elif step == "classify":
                         # Skip se o step pull_publications anterior (no mesmo
@@ -375,6 +823,19 @@ class ScheduledAutomationService:
                             None,
                         )
                         if pull_records_found == 0:
+                            pull_step = next(
+                                (
+                                    item
+                                    for item in steps_executed
+                                    if item.get("step") == "pull_publications"
+                                ),
+                                {},
+                            )
+                            skip_reason = (
+                                "pull_failed"
+                                if pull_step.get("status") == "failed"
+                                else "no_new_records"
+                            )
                             logger.info(
                                 "Classify pulado: pull_publications retornou 0 novos. "
                                 "Sem nada pra classificar nesse run.",
@@ -383,7 +844,7 @@ class ScheduledAutomationService:
                                 "step": "classify",
                                 "status": "skipped",
                                 "records_classified": 0,
-                                "reason": "no_new_records",
+                                "reason": skip_reason,
                             })
                         else:
                             self._update_progress(
@@ -427,25 +888,120 @@ class ScheduledAutomationService:
                         })
                 except Exception as e:
                     logger.error("Step %s failed: %s", step, e)
+                    alert_sent = False
+                    pull_failures: List[Dict[str, Any]] = []
+                    if step == "pull_publications":
+                        pull_failures = self._record_automation_pull_failure(
+                            automation,
+                            str(e),
+                        )
+                        alert_sent = self._alert_publication_capture_failures(
+                            automation.id,
+                            pull_failures
+                            or [
+                                {
+                                    "office_id": None,
+                                    "error": str(e),
+                                    "attempt_n": "?",
+                                    "next_retry_at": None,
+                                }
+                            ],
+                            run_id=run_id,
+                        )
                     steps_executed.append({
                         "step": step,
                         "status": "failed",
                         "error": str(e),
+                        **(
+                            {
+                                "alert_sent": alert_sent,
+                                "offices_failed": [
+                                    item.get("office_id")
+                                    for item in pull_failures
+                                    if item.get("office_id") is not None
+                                ],
+                                "failures": pull_failures,
+                            }
+                            if step == "pull_publications"
+                            else {}
+                        ),
                     })
 
             # Update run and automation
-            run.status = "success"
+            failed_steps = [
+                item
+                for item in steps_executed
+                if item.get("status") == "failed"
+            ]
+            warning_steps = [
+                item
+                for item in steps_executed
+                if item.get("status") == "warning"
+            ]
+            failure_summary = "; ".join(
+                (
+                    item.get("error")
+                    or (
+                        f"{len(item.get('offices_failed') or [])} "
+                        "escritório(s) falharam na busca"
+                    )
+                )
+                for item in failed_steps
+            )
+            warning_summary = "; ".join(
+                (
+                    item.get("error")
+                    or (
+                        f"{len(item.get('offices_degraded') or [])} "
+                        "escritório(s) cobertos pelo DJEN, com reconciliação "
+                        "do Legal One pendente"
+                    )
+                )
+                for item in warning_steps
+            )
+
+            run.status = (
+                "failed"
+                if failed_steps
+                else ("warning" if warning_steps else "success")
+            )
             run.steps_executed = steps_executed
+            run.error_message = failure_summary or warning_summary or None
             run.finished_at = datetime.now(timezone.utc)
-            run.progress_phase = "done"
-            run.progress_message = "Execução concluída"
+            run.progress_phase = (
+                "failed"
+                if failed_steps
+                else ("warning" if warning_steps else "done")
+            )
+            run.progress_message = (
+                "Execução concluída com falha"
+                if failed_steps
+                else (
+                    "Execução concluída com contingência DJEN"
+                    if warning_steps
+                    else "Execução concluída"
+                )
+            )
             run.progress_updated_at = datetime.now(timezone.utc)
 
             automation.last_run_at = datetime.now(timezone.utc)
-            automation.last_status = "success"
-            automation.last_error = None
+            automation.last_status = run.status
+            automation.last_error = failure_summary or warning_summary or None
 
-            logger.info("Automation %d completed successfully", automation_id)
+            if failed_steps:
+                logger.error(
+                    "Automation %d concluída com falha: %s",
+                    automation_id,
+                    failure_summary,
+                )
+            elif warning_steps:
+                logger.warning(
+                    "Automation %d concluída com contingência: %s",
+                    automation_id,
+                    warning_summary,
+                )
+            else:
+                logger.info("Automation %d completed successfully", automation_id)
         except Exception as e:
             logger.error("Automation %d failed: %s", automation_id, e)
             run.status = "failed"
@@ -466,6 +1022,302 @@ class ScheduledAutomationService:
     # ──────────────────────────────────────────────
     # Cursor + retry helpers
     # ──────────────────────────────────────────────
+
+    def _collect_due_publication_retries(
+        self,
+        now: Optional[datetime] = None,
+    ) -> Dict[int, List[int]]:
+        """Agrupa escritórios com a tentativa mais recente vencida."""
+        now = now or datetime.now(timezone.utc)
+        groups: Dict[int, List[int]] = defaultdict(list)
+        automation_cache: Dict[int, Optional[ScheduledAutomation]] = {}
+
+        cursors = (
+            self.db.query(OfficePublicationCursor)
+            .filter(OfficePublicationCursor.last_status == CURSOR_STATUS_FAILED)
+            .all()
+        )
+        for cursor in cursors:
+            latest = (
+                self.db.query(PublicationFetchAttempt)
+                .filter(PublicationFetchAttempt.office_id == cursor.office_id)
+                .order_by(PublicationFetchAttempt.id.desc())
+                .first()
+            )
+            if (
+                latest is None
+                or latest.status != ATTEMPT_STATUS_FAILED
+                or latest.next_retry_at is None
+                or latest.automation_id is None
+            ):
+                continue
+
+            retry_at = latest.next_retry_at
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            if retry_at > now:
+                continue
+
+            automation_id = int(latest.automation_id)
+            if automation_id not in automation_cache:
+                automation_cache[automation_id] = (
+                    self.db.query(ScheduledAutomation)
+                    .filter(ScheduledAutomation.id == automation_id)
+                    .first()
+                )
+            automation = automation_cache[automation_id]
+            if (
+                automation is None
+                or not automation.is_enabled
+                or "pull_publications" not in (automation.steps or [])
+            ):
+                continue
+            groups[automation_id].append(cursor.office_id)
+
+        return {
+            automation_id: sorted(set(office_ids))
+            for automation_id, office_ids in groups.items()
+        }
+
+    def run_due_publication_retries(self) -> int:
+        """Executa retries persistidos; seguro com vários workers da API."""
+        if not settings.publication_capture_retry_enabled:
+            return 0
+
+        with _postgres_advisory_lock(
+            PUBLICATION_RETRY_SWEEP_LOCK_NAMESPACE,
+            PUBLICATION_RETRY_SWEEP_LOCK_KEY,
+        ) as acquired:
+            if not acquired:
+                logger.debug("Outro worker já está processando retries de publicações.")
+                return 0
+
+            executed = 0
+            groups = self._collect_due_publication_retries()
+            for automation_id, office_ids in groups.items():
+                has_running = (
+                    self.db.query(ScheduledAutomationRun.id)
+                    .filter(
+                        ScheduledAutomationRun.automation_id == automation_id,
+                        ScheduledAutomationRun.status == "running",
+                    )
+                    .first()
+                    is not None
+                )
+                if has_running:
+                    logger.info(
+                        "Retry da automation %s adiado: execução principal ainda ativa.",
+                        automation_id,
+                    )
+                    continue
+                if self._execute_publication_retry(automation_id, office_ids):
+                    executed += 1
+            return executed
+
+    def _execute_publication_retry(
+        self,
+        automation_id: int,
+        office_ids: List[int],
+    ) -> bool:
+        """Executa somente os escritórios vencidos, sob o mesmo lock da rotina."""
+        with _postgres_advisory_lock(
+            AUTOMATION_LOCK_NAMESPACE,
+            automation_id,
+        ) as acquired:
+            if not acquired:
+                logger.info(
+                    "Retry da automation %s adiado: lock ocupado.",
+                    automation_id,
+                )
+                return False
+            self._execute_publication_retry_inner(automation_id, office_ids)
+            return True
+
+    def _execute_publication_retry_inner(
+        self,
+        automation_id: int,
+        office_ids: List[int],
+    ) -> None:
+        automation = (
+            self.db.query(ScheduledAutomation)
+            .filter(ScheduledAutomation.id == automation_id)
+            .first()
+        )
+        if automation is None or not automation.is_enabled or not office_ids:
+            return
+
+        run = ScheduledAutomationRun(
+            automation_id=automation_id,
+            status="running",
+            progress_phase="pull_publications_retry",
+            progress_message=(
+                f"Retry automático da busca para {len(office_ids)} escritório(s)"
+            ),
+            progress_updated_at=datetime.now(timezone.utc),
+        )
+        self.db.add(run)
+        self.db.commit()
+        self.db.refresh(run)
+
+        steps_executed: List[Dict[str, Any]] = []
+        try:
+            result = self._execute_pull_publications(
+                office_ids,
+                automation_id=automation.id,
+                initial_lookback_days=automation.initial_lookback_days,
+                overlap_hours=automation.overlap_hours,
+                run_id=run.id,
+                is_retry=True,
+            )
+            failed_offices = result.get("offices_failed") or []
+            degraded_offices = result.get("offices_degraded") or []
+            steps_executed.append(
+                {
+                    "step": "pull_publications",
+                    "retry": True,
+                    "status": (
+                        "failed"
+                        if failed_offices
+                        else ("warning" if degraded_offices else "success")
+                    ),
+                    "records_found": result.get("records_found", 0),
+                    "offices_ok": result.get("offices_ok", []),
+                    "offices_failed": failed_offices,
+                    "offices_degraded": degraded_offices,
+                    "offices_skipped": result.get("offices_skipped", []),
+                    "failures": result.get("failures", []),
+                    "fallback_metadata": result.get("fallback_metadata"),
+                    "alert_sent": bool(result.get("alert_sent")),
+                }
+            )
+
+            if (
+                int(result.get("records_found", 0) or 0) > 0
+                and "classify" in (automation.steps or [])
+            ):
+                try:
+                    classified = self._execute_classify(office_ids, run_id=run.id)
+                    steps_executed.append(
+                        {
+                            "step": "classify",
+                            "retry": True,
+                            "status": "success",
+                            "records_classified": classified.get(
+                                "records_classified",
+                                0,
+                            ),
+                        }
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "Classificação do retry da automation %s falhou.",
+                        automation_id,
+                    )
+                    steps_executed.append(
+                        {
+                            "step": "classify",
+                            "retry": True,
+                            "status": "failed",
+                            "error": str(exc),
+                        }
+                    )
+
+            failed_steps = [
+                item
+                for item in steps_executed
+                if item.get("status") == "failed"
+            ]
+            warning_steps = [
+                item
+                for item in steps_executed
+                if item.get("status") == "warning"
+            ]
+            failure_summary = "; ".join(
+                (
+                    item.get("error")
+                    or (
+                        f"{len(item.get('offices_failed') or [])} "
+                        "escritório(s) falharam no retry"
+                    )
+                )
+                for item in failed_steps
+            )
+            warning_summary = "; ".join(
+                (
+                    item.get("error")
+                    or (
+                        f"{len(item.get('offices_degraded') or [])} "
+                        "escritório(s) cobertos pelo DJEN, com reconciliação "
+                        "do Legal One pendente"
+                    )
+                )
+                for item in warning_steps
+            )
+            run.status = (
+                "failed"
+                if failed_steps
+                else ("warning" if warning_steps else "success")
+            )
+            run.error_message = failure_summary or warning_summary or None
+            run.steps_executed = steps_executed
+            run.finished_at = datetime.now(timezone.utc)
+            run.progress_phase = (
+                "failed"
+                if failed_steps
+                else ("warning" if warning_steps else "done")
+            )
+            run.progress_message = (
+                "Retry automático falhou"
+                if failed_steps
+                else (
+                    "Retry concluído com contingência DJEN"
+                    if warning_steps
+                    else "Retry automático concluído"
+                )
+            )
+            run.progress_updated_at = datetime.now(timezone.utc)
+
+            automation.last_run_at = datetime.now(timezone.utc)
+            automation.last_status = run.status
+            automation.last_error = failure_summary or warning_summary or None
+        except Exception as exc:
+            logger.exception(
+                "Erro inesperado no retry da automation %s.",
+                automation_id,
+            )
+            alert_sent = self._alert_publication_capture_failures(
+                automation_id,
+                [
+                    {
+                        "office_id": None,
+                        "error": str(exc),
+                        "attempt_n": "?",
+                        "next_retry_at": None,
+                    }
+                ],
+                run_id=run.id,
+                is_retry=True,
+            )
+            run.status = "failed"
+            run.error_message = str(exc)
+            run.steps_executed = [
+                {
+                    "step": "pull_publications",
+                    "retry": True,
+                    "status": "failed",
+                    "error": str(exc),
+                    "alert_sent": alert_sent,
+                }
+            ]
+            run.finished_at = datetime.now(timezone.utc)
+            run.progress_phase = "failed"
+            run.progress_message = "Retry automático falhou"
+            run.progress_updated_at = datetime.now(timezone.utc)
+            automation.last_run_at = datetime.now(timezone.utc)
+            automation.last_status = "failed"
+            automation.last_error = str(exc)
+        finally:
+            self.db.commit()
 
     def _get_or_create_cursor(self, office_id: int) -> OfficePublicationCursor:
         cursor = self.db.query(OfficePublicationCursor).filter(
@@ -505,13 +1357,31 @@ class ScheduledAutomationService:
         return date_from, now
 
     def _should_skip_office(self, office_id: int, now: datetime) -> bool:
-        """Se há attempt em backoff pendente que ainda não venceu, pula neste run."""
-        pending = self.db.query(PublicationFetchAttempt).filter(
-            PublicationFetchAttempt.office_id == office_id,
-            PublicationFetchAttempt.status == ATTEMPT_STATUS_FAILED,
-            PublicationFetchAttempt.next_retry_at > now,
-        ).order_by(PublicationFetchAttempt.id.desc()).first()
-        return pending is not None
+        """Pula somente quando a tentativa MAIS RECENTE ainda está em backoff."""
+        cursor = (
+            self.db.query(OfficePublicationCursor)
+            .filter(OfficePublicationCursor.office_id == office_id)
+            .first()
+        )
+        if cursor is None or cursor.last_status != CURSOR_STATUS_FAILED:
+            return False
+
+        latest = (
+            self.db.query(PublicationFetchAttempt)
+            .filter(PublicationFetchAttempt.office_id == office_id)
+            .order_by(PublicationFetchAttempt.id.desc())
+            .first()
+        )
+        if (
+            latest is None
+            or latest.status != ATTEMPT_STATUS_FAILED
+            or latest.next_retry_at is None
+        ):
+            return False
+        retry_at = latest.next_retry_at
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return retry_at > now
 
     def _record_attempt_success(
         self,
@@ -538,6 +1408,12 @@ class ScheduledAutomationService:
         cursor.last_status = CURSOR_STATUS_OK
         cursor.last_error = None
         cursor.consecutive_failures = 0
+        cursor.djen_reconciliation_pending = False
+        cursor.djen_covered_from = None
+        cursor.djen_covered_to = None
+        cursor.djen_fallback_at = None
+        cursor.djen_coverage_complete = False
+        cursor.djen_coverage_metadata = None
         self.db.commit()
 
     def _record_attempt_failure(
@@ -547,14 +1423,35 @@ class ScheduledAutomationService:
         window_to: datetime,
         error: str,
         automation_id: Optional[int],
-    ) -> None:
+        *,
+        djen_covered: bool = False,
+        djen_coverage_complete: bool = False,
+        djen_coverage_metadata: Optional[Dict[str, Any]] = None,
+    ) -> PublicationFetchAttempt:
         cursor = self._get_or_create_cursor(office_id)
         cursor.consecutive_failures = (cursor.consecutive_failures or 0) + 1
         cursor.last_run_at = datetime.now(timezone.utc)
         cursor.last_error = error[:2000]
+        if djen_covered:
+            cursor.djen_reconciliation_pending = True
+            cursor.djen_covered_from = window_from
+            cursor.djen_covered_to = window_to
+            cursor.djen_fallback_at = datetime.now(timezone.utc)
+            cursor.djen_coverage_complete = bool(djen_coverage_complete)
+            cursor.djen_coverage_metadata = (
+                dict(djen_coverage_metadata)
+                if djen_coverage_metadata
+                else None
+            )
 
         attempt_n = cursor.consecutive_failures
-        if attempt_n >= MAX_CONSECUTIVE_FAILURES_BEFORE_DEAD_LETTER:
+        has_djen_reconciliation = bool(
+            cursor.djen_reconciliation_pending or djen_covered
+        )
+        if (
+            attempt_n >= MAX_CONSECUTIVE_FAILURES_BEFORE_DEAD_LETTER
+            and not has_djen_reconciliation
+        ):
             status = ATTEMPT_STATUS_DEAD_LETTER
             cursor.last_status = CURSOR_STATUS_DEAD_LETTER
             next_retry = None
@@ -577,9 +1474,12 @@ class ScheduledAutomationService:
             next_retry_at=next_retry,
             last_error=error[:2000],
             automation_id=automation_id,
+            alert_required=True,
         )
         self.db.add(attempt)
         self.db.commit()
+        self.db.refresh(attempt)
+        return attempt
 
     def _execute_pull_publications(
         self,
@@ -588,6 +1488,7 @@ class ScheduledAutomationService:
         initial_lookback_days: Optional[int] = None,
         overlap_hours: Optional[int] = None,
         run_id: Optional[int] = None,
+        is_retry: bool = False,
     ) -> Dict[str, Any]:
         """
         Executa pull_publications por escritório, usando watermark + overlap defensivo
@@ -601,6 +1502,11 @@ class ScheduledAutomationService:
         skipped: List[int] = []
         failed: List[int] = []
         ok: List[int] = []
+        degraded: List[int] = []
+        failure_details: List[Dict[str, Any]] = []
+        degraded_details: List[Dict[str, Any]] = []
+        fallback_metadata: Dict[str, Any] = {}
+        alert_sent = False
 
         # Cliente L1 + service
         client = LegalOneApiClient()
@@ -646,8 +1552,32 @@ class ScheduledAutomationService:
                 "records_found": 0,
                 "offices_ok": ok,
                 "offices_failed": failed,
+                "offices_degraded": degraded,
                 "offices_skipped": skipped,
+                "failures": failure_details,
+                "fallback_metadata": fallback_metadata,
+                "alert_sent": alert_sent,
             }
+
+        allow_djen_fallback = True
+        if is_retry:
+            active_ids = [office_id for office_id, _, _ in active]
+            reconciliation_state = {
+                row[0]: (bool(row[1]), bool(row[2]))
+                for row in self.db.query(
+                    OfficePublicationCursor.office_id,
+                    OfficePublicationCursor.djen_reconciliation_pending,
+                    OfficePublicationCursor.djen_coverage_complete,
+                )
+                .filter(OfficePublicationCursor.office_id.in_(active_ids))
+                .all()
+            }
+            # Cadernos completos deixam o retry exclusivo para o /Updates.
+            # Cobertura parcial (comum antes das 03h) refaz o DJEN até fechar.
+            allow_djen_fallback = any(
+                not all(reconciliation_state.get(office_id, (False, False)))
+                for office_id in active_ids
+            )
 
         # ── BATCH MODE: 1 fetch L1 + fan-out ──────────────────────────
         # Substitui o loop legado de "1 fetch por escritório" (saturava
@@ -660,7 +1590,18 @@ class ScheduledAutomationService:
         # (UI Histórico de Buscas), seu cursor próprio e seu retry/backoff.
         from app.core.config import settings as _settings
 
-        if _settings.publication_scheduler_batch_mode:
+        use_batch_mode = bool(_settings.publication_scheduler_batch_mode)
+        if _settings.djen_fallback_enabled and not use_batch_mode:
+            # O fallback é uma coleta nacional. Rodá-lo no loop legado faria
+            # até uma paginação completa por escritório; com a contingência
+            # habilitada, o fan-out batch é obrigatório.
+            logger.warning(
+                "PUBLICATION_SCHEDULER_BATCH_MODE=false ignorado porque "
+                "DJEN_FALLBACK_ENABLED=true; usando fetch único + fan-out."
+            )
+            use_batch_mode = True
+
+        if use_batch_mode:
             union_from = min(df for _, df, _ in active)
             union_to = max(dt for _, _, dt in active)
             total_active = len(active)
@@ -681,9 +1622,20 @@ class ScheduledAutomationService:
                 publications = search_service.fetch_publications_for_window(
                     date_from=union_from.strftime("%Y-%m-%dT%H:%M:%SZ"),
                     date_to=union_to.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    responsible_office_ids=[
+                        internal_to_external.get(office_id, office_id)
+                        for office_id, _, _ in active
+                    ],
+                    allow_djen_fallback=allow_djen_fallback,
+                )
+                fallback_metadata = dict(search_service.last_fetch_metadata)
+                fallback_used = bool(
+                    fallback_metadata.get("fallback_used")
                 )
                 logger.info(
-                    "Batch L1 fetch: %s publicações no período união (%s..%s) — fan-out p/ %s escritórios.",
+                    "Batch %s fetch: %s publicações no período união (%s..%s) "
+                    "— fan-out p/ %s escritórios.",
+                    "DJEN" if fallback_used else "L1",
                     len(publications), union_from, union_to, total_active,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -695,8 +1647,23 @@ class ScheduledAutomationService:
                 )
                 err_msg = f"L1 batch fetch failed: {exc}"
                 for office_id, df, dt in active:
-                    self._record_attempt_failure(office_id, df, dt, err_msg, automation_id)
+                    attempt = self._record_attempt_failure(
+                        office_id,
+                        df,
+                        dt,
+                        err_msg,
+                        automation_id,
+                    )
                     failed.append(office_id)
+                    failure_details.append(
+                        self._failure_detail(office_id, err_msg, attempt)
+                    )
+                alert_sent = self._alert_publication_capture_failures(
+                    automation_id,
+                    failure_details,
+                    run_id=run_id,
+                    is_retry=is_retry,
+                )
                 if run_id is not None:
                     self._update_progress(
                         run_id,
@@ -709,10 +1676,15 @@ class ScheduledAutomationService:
                     "records_found": 0,
                     "offices_ok": ok,
                     "offices_failed": failed,
+                    "offices_degraded": degraded,
                     "offices_skipped": skipped,
+                    "failures": failure_details,
+                    "fallback_metadata": fallback_metadata,
+                    "alert_sent": alert_sent,
                 }
 
             # Fan-out: cada office processa o subset que é dele.
+            fallback_used = bool(fallback_metadata.get("fallback_used"))
             for idx, (office_id, date_from, date_to) in enumerate(active, start=1):
                 if run_id is not None:
                     ext = internal_to_external.get(office_id, office_id)
@@ -729,13 +1701,50 @@ class ScheduledAutomationService:
                         date_from=date_from.strftime("%Y-%m-%dT%H:%M:%SZ"),
                         date_to=date_to.strftime("%Y-%m-%dT%H:%M:%SZ"),
                         responsible_office_id=internal_to_external.get(office_id, office_id),
+                        origin_type="DJEN" if fallback_used else "OfficialJournalsCrawler",
                         auto_classify=False,
                         requested_by="scheduler",
                         prefetched_publications=publications,
                     )
                     records_found = int(result.get("total_new", 0) or result.get("total_found", 0) or 0)
                     total_found += records_found
-                    self._record_attempt_success(office_id, date_from, date_to, records_found, automation_id)
+                    if fallback_used:
+                        primary_error = (
+                            fallback_metadata.get("primary_error")
+                            or "Legal One GET /Updates retornou HTTP 502."
+                        )
+                        attempt = self._record_attempt_failure(
+                            office_id,
+                            date_from,
+                            date_to,
+                            (
+                                f"{primary_error} Contingência DJEN capturou "
+                                f"{records_found} publicação(ões) como cobertura "
+                                "suplementar; reconciliação L1 pendente."
+                            ),
+                            automation_id,
+                            djen_covered=True,
+                            djen_coverage_complete=bool(
+                                fallback_metadata.get("coverage_complete")
+                            ),
+                            djen_coverage_metadata=fallback_metadata,
+                        )
+                        degraded.append(office_id)
+                        degraded_details.append(
+                            self._failure_detail(
+                                office_id,
+                                str(primary_error),
+                                attempt,
+                            )
+                        )
+                    else:
+                        self._record_attempt_success(
+                            office_id,
+                            date_from,
+                            date_to,
+                            records_found,
+                            automation_id,
+                        )
                     ok.append(office_id)
                     if run_id is not None:
                         self._update_progress(
@@ -746,8 +1755,17 @@ class ScheduledAutomationService:
                         )
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("Falha ao processar publicações do escritório %s", office_id)
-                    self._record_attempt_failure(office_id, date_from, date_to, str(exc), automation_id)
+                    attempt = self._record_attempt_failure(
+                        office_id,
+                        date_from,
+                        date_to,
+                        str(exc),
+                        automation_id,
+                    )
                     failed.append(office_id)
+                    failure_details.append(
+                        self._failure_detail(office_id, str(exc), attempt)
+                    )
                     if run_id is not None:
                         self._update_progress(
                             run_id,
@@ -756,11 +1774,35 @@ class ScheduledAutomationService:
                             message=f"Escritório {idx}/{total_active}: falhou",
                         )
 
+            if failure_details:
+                alert_sent = self._alert_publication_capture_failures(
+                    automation_id,
+                    failure_details,
+                    run_id=run_id,
+                    is_retry=is_retry,
+                )
+            if degraded_details:
+                alert_sent = (
+                    self._alert_publication_capture_degraded(
+                        automation_id,
+                        degraded_details,
+                        fallback_metadata,
+                        run_id=run_id,
+                        is_retry=is_retry,
+                    )
+                    or alert_sent
+                )
+
             return {
                 "records_found": total_found,
                 "offices_ok": ok,
                 "offices_failed": failed,
+                "offices_degraded": degraded,
                 "offices_skipped": skipped,
+                "failures": failure_details,
+                "degraded": degraded_details,
+                "fallback_metadata": fallback_metadata,
+                "alert_sent": alert_sent,
             }
 
         # ── LEGACY MODE (feature flag OFF) ────────────────────────────
@@ -789,10 +1831,49 @@ class ScheduledAutomationService:
                     responsible_office_id=internal_to_external.get(office_id, office_id),
                     auto_classify=False,
                     requested_by="scheduler",
+                    allow_djen_fallback=allow_djen_fallback,
                 )
                 records_found = int(result.get("total_new", 0) or result.get("total_found", 0) or 0)
                 total_found += records_found
-                self._record_attempt_success(office_id, date_from, date_to, records_found, automation_id)
+                result_fetch_metadata = result.get("fetch_metadata") or {}
+                if result_fetch_metadata.get("fallback_used"):
+                    fallback_metadata = dict(result_fetch_metadata)
+                    attempt = self._record_attempt_failure(
+                        office_id,
+                        date_from,
+                        date_to,
+                        (
+                            f"{fallback_metadata.get('primary_error') or 'Legal One /Updates HTTP 502.'} "
+                            f"Contingência DJEN capturou {records_found} publicação(ões) "
+                            "como cobertura suplementar; "
+                            "reconciliação L1 pendente."
+                        ),
+                        automation_id,
+                        djen_covered=True,
+                        djen_coverage_complete=bool(
+                            fallback_metadata.get("coverage_complete")
+                        ),
+                        djen_coverage_metadata=fallback_metadata,
+                    )
+                    degraded.append(office_id)
+                    degraded_details.append(
+                        self._failure_detail(
+                            office_id,
+                            str(
+                                fallback_metadata.get("primary_error")
+                                or "Legal One /Updates HTTP 502."
+                            ),
+                            attempt,
+                        )
+                    )
+                else:
+                    self._record_attempt_success(
+                        office_id,
+                        date_from,
+                        date_to,
+                        records_found,
+                        automation_id,
+                    )
                 ok.append(office_id)
                 if run_id is not None:
                     self._update_progress(
@@ -803,8 +1884,26 @@ class ScheduledAutomationService:
                     )
             except Exception as exc:  # noqa: BLE001 — queremos capturar qualquer falha
                 logger.exception("Falha ao capturar publicações do escritório %s", office_id)
-                self._record_attempt_failure(office_id, date_from, date_to, str(exc), automation_id)
+                attempt = self._record_attempt_failure(
+                    office_id,
+                    date_from,
+                    date_to,
+                    str(exc),
+                    automation_id,
+                )
                 failed.append(office_id)
+                failure_details.append(
+                    self._failure_detail(office_id, str(exc), attempt)
+                )
+                # O modo legado pode levar muitos minutos. A primeira falha
+                # avisa imediatamente; ao final enviamos o consolidado.
+                if len(failure_details) == 1:
+                    alert_sent = self._alert_publication_capture_failures(
+                        automation_id,
+                        failure_details,
+                        run_id=run_id,
+                        is_retry=is_retry,
+                    )
                 if run_id is not None:
                     self._update_progress(
                         run_id,
@@ -813,11 +1912,38 @@ class ScheduledAutomationService:
                         message=f"Escritório {idx}/{total_offices}: falhou",
                     )
 
+        if len(failure_details) > 1:
+            alert_sent = (
+                self._alert_publication_capture_failures(
+                    automation_id,
+                    failure_details,
+                    run_id=run_id,
+                    is_retry=is_retry,
+                )
+                or alert_sent
+            )
+        if degraded_details:
+            alert_sent = (
+                self._alert_publication_capture_degraded(
+                    automation_id,
+                    degraded_details,
+                    fallback_metadata,
+                    run_id=run_id,
+                    is_retry=is_retry,
+                )
+                or alert_sent
+            )
+
         return {
             "records_found": total_found,
             "offices_ok": ok,
             "offices_failed": failed,
+            "offices_degraded": degraded,
             "offices_skipped": skipped,
+            "failures": failure_details,
+            "degraded": degraded_details,
+            "fallback_metadata": fallback_metadata,
+            "alert_sent": alert_sent,
         }
 
     def _execute_classify(self, office_ids: List[int], run_id: Optional[int] = None) -> Dict[str, Any]:
@@ -1051,3 +2177,88 @@ class ScheduledAutomationService:
                 }
 
             time.sleep(poll_seconds)
+
+
+def run_publication_capture_retry_sweep() -> int:
+    """Consome retries agendados, manuais e alertas pendentes."""
+    if not settings.publication_capture_retry_enabled:
+        return 0
+
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        processed = 0
+        try:
+            processed += ScheduledAutomationService(
+                db=db
+            ).run_due_publication_retries()
+        except Exception:
+            logger.exception(
+                "Falha no sweep de retries agendados da captura."
+            )
+            db.rollback()
+
+        try:
+            from app.services.legal_one_client import LegalOneApiClient
+            from app.services.publication_search_service import (
+                PublicationSearchService,
+            )
+
+            processed += PublicationSearchService(
+                db,
+                LegalOneApiClient(),
+            ).reconcile_due_manual_searches()
+        except Exception:
+            logger.exception(
+                "Falha no sweep de reconciliações manuais do Legal One."
+            )
+            db.rollback()
+
+        try:
+            from app.services.publication_capture_alert_service import (
+                repair_missing_publication_capture_alerts,
+                sweep_publication_capture_alerts,
+            )
+
+            repair_result = repair_missing_publication_capture_alerts(db)
+            processed += int(
+                repair_result.created + repair_result.linked_existing
+            )
+            alert_result = sweep_publication_capture_alerts(db)
+            processed += int(alert_result.attempted)
+        except Exception:
+            logger.exception("Falha no sweep de alertas da captura.")
+            db.rollback()
+
+        return processed
+    finally:
+        db.close()
+
+
+def register_publication_capture_retry_job(
+    scheduler: BackgroundScheduler,
+) -> None:
+    """Registra o consumidor periódico do estado persistido no Postgres."""
+    if not settings.publication_capture_retry_enabled:
+        logger.info("Retry automático da captura de publicações desabilitado.")
+        return
+
+    poll_minutes = max(
+        1,
+        int(settings.publication_capture_retry_poll_minutes or 5),
+    )
+    scheduler.add_job(
+        run_publication_capture_retry_sweep,
+        trigger=IntervalTrigger(minutes=poll_minutes),
+        id=PUBLICATION_RETRY_JOB_ID,
+        name="Retry automático da captura de publicações",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    logger.info(
+        "Retry automático da captura registrado (a cada %s min).",
+        poll_minutes,
+    )

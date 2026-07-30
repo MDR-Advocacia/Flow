@@ -52,7 +52,9 @@ type TreatmentInfo = {
 type RecordDetail = {
   id: number;
   search_id: number;
-  legal_one_update_id: number;
+  source_provider?: "LEGAL_ONE" | "DJEN" | string;
+  source_external_id?: string;
+  legal_one_update_id: number | null;
   description_preview?: string;
   description?: string;
   notes?: string;
@@ -909,7 +911,13 @@ function RecordCard({ record }: { record: RecordDetail }) {
           {/* Metadados técnicos */}
           <div className="text-xs text-muted-foreground border-t pt-2 flex flex-wrap gap-x-4 gap-y-1">
             <span>ID interno: {record.id}</span>
-            <span>update_id: {record.legal_one_update_id}</span>
+            <span>
+              origem: {record.source_provider === "DJEN"
+                ? `DJEN #${record.source_external_id || "—"}${record.legal_one_update_id
+                  ? ` · ID reconciliado no Legal One #${record.legal_one_update_id}`
+                  : ""}`
+                : `Legal One #${record.legal_one_update_id || record.source_external_id || "—"}`}
+            </span>
             <span>lawsuit_id: {record.linked_lawsuit_id || "—"}</span>
             <span>office_id: {record.linked_office_id || "—"}</span>
             <span>criado: {formatDateTime(record.created_at)}</span>

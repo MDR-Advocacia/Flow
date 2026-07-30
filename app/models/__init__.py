@@ -14,7 +14,12 @@ from .publication_batch import PublicationBatchClassification
 from .task_template import TaskTemplate
 from .office_classification import OfficeClassificationOverride
 from .scheduled_automation import ScheduledAutomation, ScheduledAutomationRun
-from .publication_capture import OfficePublicationCursor, PublicationFetchAttempt
+from .publication_capture import (
+    OfficePublicationCursor,
+    PublicationCaptureAlert,
+    PublicationFetchAttempt,
+)
+from .djen_capture import DjenCadernoShardCache
 from .lawsuit_cache import LawsuitCache
 from .office_lawsuit_index import OfficeLawsuitIndex, OfficeLawsuitSync
 from .publication_treatment import PublicationTreatmentItem, PublicationTreatmentRun

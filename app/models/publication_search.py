@@ -5,7 +5,18 @@ PublicationSearch  → Registro de cada busca disparada (com filtros usados)
 PublicationRecord  → Cada publicação encontrada e seu status de processamento
 """
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Text,
+    and_,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -17,14 +28,21 @@ SEARCH_STATUS_COMPLETED = "CONCLUIDO"
 SEARCH_STATUS_FAILED = "FALHA"
 SEARCH_STATUS_CANCELLED = "CANCELADO"
 
+# Estado durável da reconciliação do GET /Updates no Legal One. Uma busca
+# manual pode terminar via contingência DJEN e, ainda assim, manter o vínculo
+# com o L1 pendente para uma rodada posterior sem contingência.
+L1_RECONCILIATION_NOT_REQUIRED = "NAO_NECESSARIA"
+L1_RECONCILIATION_PENDING = "PENDENTE"
+L1_RECONCILIATION_RUNNING = "EXECUTANDO"
+L1_RECONCILIATION_COMPLETED = "CONCLUIDA"
+
 RECORD_STATUS_NEW = "NOVO"
 RECORD_STATUS_CLASSIFIED = "CLASSIFICADO"
 RECORD_STATUS_SCHEDULED = "AGENDADO"
 RECORD_STATUS_IGNORED = "IGNORADO"
 RECORD_STATUS_ERROR = "ERRO"
-# Descartada por duplicidade de (lawsuit_id, publication_date) —
-# uma mesma publicação para um mesmo processo no mesmo dia é tratada
-# apenas uma vez, economizando tokens de classificação e chamadas à API do L1.
+# Descartada por identidade/conteúdo repetido. Publicações juridicamente
+# distintas do mesmo processo no mesmo dia continuam sendo preservadas.
 RECORD_STATUS_DISCARDED_DUPLICATE = "DESCARTADO_DUPLICADA"
 # Publicação anterior à data de criação da pasta do processo no Legal One —
 # já auditada na esteira processual de admissão, sem providência necessária.
@@ -65,11 +83,58 @@ class PublicationSearch(Base):
     finished_at = Column(DateTime(timezone=True), nullable=True)
     error_message = Column(String, nullable=True)
 
+    # Reconciliação durável do Legal One após um HTTP 502 em busca manual.
+    # O payload preserva o contrato original (período/escritórios/filtros),
+    # porque a busca concluída pelo DJEN muda `origin_type` para "DJEN".
+    l1_reconciliation_status = Column(
+        String(24),
+        nullable=False,
+        default=L1_RECONCILIATION_NOT_REQUIRED,
+        server_default=L1_RECONCILIATION_NOT_REQUIRED,
+        index=True,
+    )
+    l1_reconciliation_attempts = Column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    l1_reconciliation_next_retry_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    l1_reconciliation_started_at = Column(DateTime(timezone=True), nullable=True)
+    l1_reconciliation_completed_at = Column(DateTime(timezone=True), nullable=True)
+    l1_reconciliation_last_error = Column(Text, nullable=True)
+    l1_reconciliation_payload = Column(JSON, nullable=True)
+    # Token/lease tornam o claim seguro entre workers. O resultado aponta para
+    # a busca L1-only criada pela reconciliação para preservar a auditoria.
+    l1_reconciliation_run_token = Column(String(36), nullable=True, index=True)
+    l1_reconciliation_result_search_id = Column(Integer, nullable=True, index=True)
+    # Marcador atômico do alerta correspondente ao 502/retry. O reparador do
+    # outbox usa esses campos se houver restart entre o commit e o enqueue.
+    l1_alert_required_attempt = Column(Integer, nullable=True)
+    l1_alert_required_at = Column(DateTime(timezone=True), nullable=True)
+    l1_alert_outbox_id = Column(Integer, nullable=True, index=True)
+
     records = relationship(
         "PublicationRecord",
         back_populates="search",
         cascade="all, delete-orphan",
     )
+
+
+Index(
+    "ix_pub_search_l1_reconciliation_due",
+    PublicationSearch.l1_reconciliation_status,
+    PublicationSearch.l1_reconciliation_next_retry_at,
+)
+Index(
+    "ix_pub_search_l1_alert_repair",
+    PublicationSearch.l1_alert_required_at,
+    PublicationSearch.l1_alert_outbox_id,
+)
 
 
 class PublicationRecord(Base):
@@ -78,12 +143,23 @@ class PublicationRecord(Base):
     id = Column(Integer, primary_key=True, index=True)
     search_id = Column(Integer, ForeignKey("publicacao_buscas.id"), nullable=False)
 
-    # Dados da publicação do Legal One
-    legal_one_update_id = Column(Integer, nullable=False, index=True, unique=True)
+    # Identidade canônica da origem. Registros históricos são LEGAL_ONE;
+    # a contingência DJEN não possui update_id no L1 e usa ingestion_key.
+    source_provider = Column(
+        String(32), nullable=False, default="LEGAL_ONE", server_default="LEGAL_ONE", index=True,
+    )
+    source_external_id = Column(String(255), nullable=False, index=True)
+    ingestion_key = Column(String(255), nullable=False)
+    source_payload = Column(JSON, nullable=True)
+
+    # Preenchido apenas quando a origem é Legal One. Fica NULL no DJEN para
+    # impedir que o RPA tente abrir/tratar um ID que não existe no L1.
+    legal_one_update_id = Column(Integer, nullable=True, index=True, unique=True)
     origin_type = Column(String, nullable=True)
     update_type_id = Column(Integer, nullable=True)
     description = Column(Text, nullable=True)
     notes = Column(Text, nullable=True)
+    content_fingerprint = Column(String(64), nullable=True, index=True)
     publication_date = Column(String, nullable=True)
     creation_date = Column(String, nullable=True)
 
@@ -165,6 +241,30 @@ class PublicationRecord(Base):
         back_populates="record",
         uselist=False,
     )
+
+
+Index(
+    "uq_publicacao_registros_ingestion_key",
+    PublicationRecord.ingestion_key,
+    unique=True,
+)
+_live_content_predicate = and_(
+    PublicationRecord.linked_lawsuit_id.isnot(None),
+    PublicationRecord.publication_date.isnot(None),
+    PublicationRecord.publication_date != "",
+    PublicationRecord.content_fingerprint.isnot(None),
+    PublicationRecord.status != RECORD_STATUS_DISCARDED_DUPLICATE,
+    PublicationRecord.is_duplicate.is_(False),
+)
+Index(
+    "uq_pub_lawsuit_date_content",
+    PublicationRecord.linked_lawsuit_id,
+    PublicationRecord.publication_date,
+    PublicationRecord.content_fingerprint,
+    unique=True,
+    postgresql_where=_live_content_predicate,
+    sqlite_where=_live_content_predicate,
+)
 
 
 class PublicationL1EtiquetaCache(Base):

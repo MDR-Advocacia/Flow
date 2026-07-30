@@ -276,6 +276,11 @@ interface SearchItem {
   progress_pct: number | null;
   requested_by_email: string | null;
   error_message: string | null;
+  l1_reconciliation_status: string;
+  l1_reconciliation_attempts: number;
+  l1_reconciliation_next_retry_at: string | null;
+  l1_reconciliation_last_error: string | null;
+  l1_reconciliation_result_search_id: number | null;
   created_at: string | null;
   finished_at: string | null;
 }
@@ -299,7 +304,9 @@ interface Classification {
 interface PublicationRecord {
   id: number;
   search_id: number;
-  legal_one_update_id: number;
+  source_provider: "LEGAL_ONE" | "DJEN" | string;
+  source_external_id: string;
+  legal_one_update_id: number | null;
   origin_type: string | null;
   update_type_id: number | null;
   description_preview: string;
@@ -2872,7 +2879,25 @@ const PublicationsPage = () => {
                         {s.office_filter ? (officeName(parseInt(s.office_filter)) || s.office_filter) : "—"}
                       </TableCell>
                       <TableCell>
-                        <Badge variant={statusColor(s.status)} className="text-xs">{s.status}</Badge>
+                        <div className="flex flex-col items-start gap-1">
+                          <Badge variant={statusColor(s.status)} className="text-xs">{s.status}</Badge>
+                          {(s.l1_reconciliation_status === "PENDENTE"
+                            || s.l1_reconciliation_status === "EXECUTANDO") && (
+                            <>
+                              <Badge
+                                variant="outline"
+                                className="border-amber-300 bg-amber-100 text-[10px] text-amber-800"
+                              >
+                                Contingência DJEN · reconciliação pendente
+                              </Badge>
+                              {s.l1_reconciliation_next_retry_at && (
+                                <span className="text-[10px] text-amber-700">
+                                  Próxima tentativa: {formatDate(s.l1_reconciliation_next_retry_at)}
+                                </span>
+                              )}
+                            </>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell className="font-semibold">{s.total_found}</TableCell>
                       <TableCell className="text-green-600">{s.total_new}</TableCell>
@@ -3754,7 +3779,7 @@ const PublicationsPage = () => {
                               {group.records.slice(0, 2).map((r) => (
                                 <div key={r.id} className="flex items-center gap-1">
                                   <span className="max-w-[200px] truncate text-xs text-muted-foreground">
-                                    {r.description_preview || String(r.legal_one_update_id)}
+                                    {r.description_preview || r.source_external_id || String(r.id)}
                                   </span>
                                   <Button variant="ghost" size="sm" className="h-5 w-5 flex-shrink-0 p-0"
                                     onClick={() => loadRecordDetail(r.id)}
@@ -4077,7 +4102,15 @@ const PublicationsPage = () => {
         <DialogContent className="!max-w-[min(95vw,72rem)] max-h-[92vh] w-[95vw] overflow-y-auto overflow-x-hidden p-5 sm:p-6">
           <DialogHeader>
             <DialogTitle className="text-xl">
-              Publicação #{selectedRecord?.id} (LO: {selectedRecord?.legal_one_update_id})
+              Publicação #{selectedRecord?.id} (
+              {selectedRecord?.source_provider === "DJEN"
+                ? `DJEN: ${selectedRecord.source_external_id || "sem ID"}${selectedRecord.legal_one_update_id
+                  ? ` · LO reconciliado: ${selectedRecord.legal_one_update_id}`
+                  : ""}`
+                : `Legal One: ${selectedRecord?.legal_one_update_id
+                  || selectedRecord?.source_external_id
+                  || "sem ID"}`}
+              )
             </DialogTitle>
             <DialogDescription>Detalhe completo do registro.</DialogDescription>
           </DialogHeader>
@@ -4633,7 +4666,7 @@ const PublicationsPage = () => {
                       <div key={r.id} className={ri > 0 ? "mt-3 border-t pt-3" : ""}>
                         {scheduleGroup.records.length > 1 && (
                           <p className="mb-1 text-[10px] font-medium text-muted-foreground">
-                            Publicação {ri + 1} — {r.description_preview || r.legal_one_update_id}
+                            Publicação {ri + 1} — {r.description_preview || r.source_external_id || r.id}
                           </p>
                         )}
                         <p className="whitespace-pre-wrap text-xs leading-relaxed text-foreground/80">
@@ -4654,7 +4687,7 @@ const PublicationsPage = () => {
                       <div key={r.id} className="flex items-center gap-2 text-xs">
                         <Badge variant={statusColor(r.status)} className="shrink-0">{r.status}</Badge>
                         <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                          {r.description_preview || r.legal_one_update_id}
+                          {r.description_preview || r.source_external_id || r.id}
                         </span>
                         <span className="shrink-0 tabular-nums text-muted-foreground">
                           {formatDateShort(r.publication_date)}

@@ -39,6 +39,9 @@ def _seed_search(db):
 def _record(search, *, update_id, status, category=None):
     return PublicationRecord(
         search_id=search.id,
+        source_provider="LEGAL_ONE",
+        source_external_id=str(update_id),
+        ingestion_key=f"LEGAL_ONE:{update_id}",
         legal_one_update_id=update_id,
         description="Texto da publicacao",
         publication_date="2026-04-28T00:00:00Z",

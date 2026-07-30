@@ -185,6 +185,11 @@ const AutomationsPage = () => {
             title: 'Execução concluída',
             description: `"${a.name}" terminou com sucesso.`,
           });
+        } else if (now === 'warning') {
+          toast({
+            title: 'Contingência DJEN acionada',
+            description: `"${a.name}" executou busca suplementar no DJEN (cobertura parcial). A reconciliação obrigatória com o Legal One está pendente.`,
+          });
         } else if (now === 'failed') {
           toast({
             title: 'Execução falhou',
@@ -854,8 +859,13 @@ const AutomationsPage = () => {
                                 ? 'destructive'
                                 : 'secondary'
                           }
+                          className={
+                            run.status === 'warning'
+                              ? 'border-amber-300 bg-amber-100 text-amber-800 hover:bg-amber-100'
+                              : undefined
+                          }
                         >
-                          {run.status}
+                          {run.status === 'warning' ? 'Contingência DJEN' : run.status}
                         </Badge>
                       </TableCell>
                       <TableCell className="text-sm">

@@ -12,11 +12,14 @@ Responsabilidades:
 """
 
 import asyncio
+import hashlib
+import html
 import logging
 import re
+import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
@@ -24,6 +27,10 @@ from sqlalchemy import func as sa_func, literal_column, case, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.publication_search import (
+    L1_RECONCILIATION_COMPLETED,
+    L1_RECONCILIATION_NOT_REQUIRED,
+    L1_RECONCILIATION_PENDING,
+    L1_RECONCILIATION_RUNNING,
     RECORD_STATUS_CLASSIFIED,
     RECORD_STATUS_ERROR,
     RECORD_STATUS_IGNORED,
@@ -44,6 +51,191 @@ from app.services.legal_one_client import LegalOneApiClient
 logger = logging.getLogger(__name__)
 
 _METRICS_TZ = ZoneInfo("America/Fortaleza")
+# O sweep roda a cada cinco minutos. Trinta minutos deixa margem suficiente
+# para cumprir "dentro de uma hora" mesmo com atraso/misfire do scheduler.
+_L1_RECONCILIATION_RETRY_DELAY = timedelta(minutes=30)
+_L1_RECONCILIATION_LEASE_TIMEOUT = timedelta(minutes=30)
+
+
+def _alert_manual_publication_search_failure(
+    search: PublicationSearch,
+    error: Exception,
+) -> bool:
+    """Avisa falhas manuais sem duplicar o alerta consolidado do scheduler."""
+    if (search.requested_by_email or "").strip().lower() == "scheduler":
+        return False
+
+    try:
+        from app.core.config import settings
+        from app.models.publication_capture import PUBLICATION_ALERT_STATUS_SENT
+        from app.services.publication_capture_alert_service import (
+            PublicationCaptureAlertService,
+        )
+
+        recipients = (
+            settings.publication_capture_alert_email
+            or settings.classificacao_alert_email
+            or search.requested_by_email
+            or settings.mail_to
+            or settings.email_to
+        )
+        if not recipients:
+            logger.error(
+                "Busca manual #%s falhou sem destinatário de alerta.",
+                search.id,
+            )
+            return False
+
+        attempt_number = int(search.l1_reconciliation_attempts or 0)
+        db = sa.inspect(search).session
+        if db is None:
+            raise RuntimeError(
+                f"Busca manual #{search.id} está fora de uma sessão SQLAlchemy."
+            )
+        alert = PublicationCaptureAlertService(
+            db
+        ).enqueue(
+            idempotency_key=(
+                f"manual-capture-failure:search:{search.id}:"
+                f"reconciliation-attempt:{attempt_number}"
+            ),
+            alert_type="manual_capture_failure",
+            failed_items=[
+                {
+                    "cnj": f"Busca manual de publicações #{search.id}",
+                    "motivo": str(error)[:2000],
+                    "execution_id": search.id,
+                }
+            ],
+            batch_source=(
+                "Busca Manual de Publicações · "
+                f"solicitante: {search.requested_by_email or 'não identificado'}"
+            ),
+            recipients=recipients,
+            system_name="Flow",
+            alert_context={
+                "search_id": search.id,
+                "requested_by": search.requested_by_email,
+                "reconciliation_attempt": attempt_number,
+            },
+        )
+        (
+            db.query(PublicationSearch)
+            .filter(
+                PublicationSearch.id == search.id,
+                PublicationSearch.l1_alert_required_attempt == attempt_number,
+            )
+            .update(
+                {
+                    PublicationSearch.l1_alert_outbox_id: alert.id,
+                },
+                synchronize_session=False,
+            )
+        )
+        db.commit()
+        sent = alert.status == PUBLICATION_ALERT_STATUS_SENT
+        if not sent:
+            logger.warning(
+                "Alerta da busca manual #%s persistido para retry de e-mail "
+                "(alert=%s status=%s).",
+                search.id,
+                alert.id,
+                alert.status,
+            )
+        return bool(sent)
+    except Exception:
+        logger.exception(
+            "Falha ao enviar alerta da busca manual #%s.",
+            search.id,
+        )
+        return False
+
+
+def _alert_manual_publication_fallback(
+    search: PublicationSearch,
+    metadata: dict[str, Any],
+) -> bool:
+    """Avisa que o L1 falhou, mesmo quando o DJEN recuperou a busca manual."""
+    if (search.requested_by_email or "").strip().lower() == "scheduler":
+        return False
+
+    try:
+        from app.core.config import settings
+        from app.models.publication_capture import PUBLICATION_ALERT_STATUS_SENT
+        from app.services.publication_capture_alert_service import (
+            PublicationCaptureAlertService,
+        )
+
+        recipients = (
+            settings.publication_capture_alert_email
+            or settings.classificacao_alert_email
+            or search.requested_by_email
+            or settings.mail_to
+            or settings.email_to
+        )
+        if not recipients:
+            return False
+
+        jurisdictions = metadata.get("jurisdictions") or {}
+        attempt_number = int(search.l1_reconciliation_attempts or 0)
+        db = sa.inspect(search).session
+        if db is None:
+            raise RuntimeError(
+                f"Busca manual #{search.id} está fora de uma sessão SQLAlchemy."
+            )
+        alert = PublicationCaptureAlertService(
+            db
+        ).enqueue(
+            idempotency_key=f"manual-djen-fallback:search:{search.id}",
+            alert_type="manual_djen_fallback",
+            failed_items=[
+                {
+                    "cnj": f"Busca manual de publicações #{search.id}",
+                    "motivo": (
+                        "Legal One GET /Updates retornou HTTP 502. "
+                        "A contingência suplementar DJEN foi executada.\n"
+                        f"Publicações DJEN: {metadata.get('publications', 0)}. "
+                        f"Relatório: {metadata.get('report_title') or metadata.get('report_id') or 'snapshot local'}. "
+                        f"Tribunais: {jurisdictions or 'nenhum resultado no período'}.\n"
+                        f"{metadata.get('coverage_note') or 'Cobertura parcial por OAB; reconciliação Legal One obrigatória.'} "
+                        "A reconciliação será tentada automaticamente."
+                    ),
+                    "execution_id": search.id,
+                }
+            ],
+            batch_source="Contingência DJEN · Busca Manual de Publicações",
+            recipients=recipients,
+            system_name="Flow",
+            alert_context={
+                "search_id": search.id,
+                "requested_by": search.requested_by_email,
+                "reconciliation_attempt": attempt_number,
+                "fallback_metadata": metadata,
+            },
+        )
+        (
+            db.query(PublicationSearch)
+            .filter(
+                PublicationSearch.id == search.id,
+                PublicationSearch.l1_alert_required_attempt == attempt_number,
+            )
+            .update(
+                {
+                    PublicationSearch.l1_alert_outbox_id: alert.id,
+                },
+                synchronize_session=False,
+            )
+        )
+        db.commit()
+        sent = alert.status == PUBLICATION_ALERT_STATUS_SENT
+        return bool(sent)
+    except Exception:
+        logger.exception(
+            "Falha ao enviar alerta da contingência DJEN da busca manual #%s.",
+            search.id,
+        )
+        return False
+
 
 # ── Checagem de duplicatas no L1 (agendamento) ─────────────────────────
 # Status IDs do Legal One. Mapeamento validado em 2026-04-30 via
@@ -204,6 +396,31 @@ def extract_cnj_from_text(text: Optional[str]) -> Optional[str]:
     return None
 
 
+_CONTENT_TAG_RE = re.compile(r"<[^>]+>")
+_CONTENT_SPACE_RE = re.compile(r"\s+")
+
+
+def publication_content_fingerprint(publication: dict[str, Any]) -> str:
+    """Identidade lógica do teor, independente da origem L1/DJEN."""
+    raw = (
+        publication.get("_content_text")
+        or publication.get("description")
+        or publication.get("notes")
+        or ""
+    )
+    normalized = html.unescape(str(raw))
+    normalized = _CONTENT_TAG_RE.sub(" ", normalized)
+    normalized = _CONTENT_SPACE_RE.sub(" ", normalized).strip().casefold()
+    if not normalized:
+        source_id = (
+            publication.get("_source_external_id")
+            or publication.get("id")
+            or ""
+        )
+        normalized = f"sem-texto:{source_id}"
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def _parse_csv_ints(raw) -> list:
     """Aceita int, string CSV ("61,62") ou None; retorna lista de ints."""
     if raw is None:
@@ -231,10 +448,503 @@ class PublicationSearchService:
     def __init__(self, db: Session, client: LegalOneApiClient):
         self.db = db
         self.client = client
+        self.last_fetch_metadata: dict[str, Any] = {
+            "provider": "LEGAL_ONE",
+            "fallback_used": False,
+        }
+        self._djen_fallback_cache: dict[tuple, tuple[list[dict], dict[str, Any]]] = {}
 
     # ──────────────────────────────────────────────
     # Progress helper
     # ──────────────────────────────────────────────
+
+    @staticmethod
+    def _is_manual_search_request(requested_by: Optional[str]) -> bool:
+        return (requested_by or "").strip().casefold() != "scheduler"
+
+    def _mark_manual_l1_reconciliation_pending(
+        self,
+        *,
+        search_id: int,
+        error: BaseException,
+        payload: dict[str, Any],
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """Persiste o retry antes de iniciar a contingência DJEN.
+
+        Uma segunda observação do mesmo 502 atualiza o diagnóstico, mas não
+        posterga um retry que já esteja agendado.
+        """
+        current_time = now or datetime.now(timezone.utc)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+
+        try:
+            search = (
+                self.db.query(PublicationSearch)
+                .filter(PublicationSearch.id == int(search_id))
+                .first()
+            )
+            if (
+                search is None
+                or not self._is_manual_search_request(search.requested_by_email)
+                or search.l1_reconciliation_status
+                in (L1_RECONCILIATION_RUNNING, L1_RECONCILIATION_COMPLETED)
+            ):
+                return False
+
+            search.l1_reconciliation_status = L1_RECONCILIATION_PENDING
+            if search.l1_reconciliation_next_retry_at is None:
+                search.l1_reconciliation_next_retry_at = (
+                    current_time + _L1_RECONCILIATION_RETRY_DELAY
+                )
+            search.l1_reconciliation_last_error = str(error)[:4000]
+            search.l1_reconciliation_payload = dict(payload)
+            search.l1_reconciliation_completed_at = None
+            search.l1_reconciliation_run_token = None
+            search.l1_alert_required_attempt = int(
+                search.l1_reconciliation_attempts or 0
+            )
+            search.l1_alert_required_at = current_time
+            search.l1_alert_outbox_id = None
+            self.db.commit()
+            logger.warning(
+                "Busca manual #%s: reconciliação L1 agendada para %s após GET /Updates 502.",
+                search.id,
+                search.l1_reconciliation_next_retry_at,
+            )
+            return True
+        except Exception:
+            self.db.rollback()
+            logger.exception(
+                "Falha ao persistir reconciliação L1 da busca manual #%s.",
+                search_id,
+            )
+            return False
+
+    @staticmethod
+    def _l1_reconciliation_to_dict(
+        search: PublicationSearch,
+        *,
+        claimed: bool,
+        attempted: bool,
+        success: Optional[bool],
+        reason: str,
+    ) -> dict[str, Any]:
+        return {
+            "search_id": search.id,
+            "claimed": claimed,
+            "attempted": attempted,
+            "success": success,
+            "reason": reason,
+            "status": search.l1_reconciliation_status,
+            "attempts": search.l1_reconciliation_attempts or 0,
+            "next_retry_at": (
+                search.l1_reconciliation_next_retry_at.isoformat()
+                if search.l1_reconciliation_next_retry_at
+                else None
+            ),
+            "result_search_id": search.l1_reconciliation_result_search_id,
+            "last_error": search.l1_reconciliation_last_error,
+        }
+
+    def reconcile_manual_search_if_due(
+        self,
+        search_id: int,
+        *,
+        now: Optional[datetime] = None,
+        lease_timeout: timedelta = _L1_RECONCILIATION_LEASE_TIMEOUT,
+    ) -> dict[str, Any]:
+        """Executa uma reconciliação vencida exclusivamente pelo Legal One.
+
+        O claim é atômico e o token impede uma execução recuperada pelo lease
+        de sobrescrever outra mais nova. Após sucesso, repetir é no-op.
+        """
+        current_time = now or datetime.now(timezone.utc)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+        stale_before = current_time - lease_timeout
+        run_token = str(uuid.uuid4())
+
+        claimable = sa.or_(
+            sa.and_(
+                PublicationSearch.l1_reconciliation_status
+                == L1_RECONCILIATION_PENDING,
+                sa.or_(
+                    PublicationSearch.l1_reconciliation_next_retry_at.is_(None),
+                    PublicationSearch.l1_reconciliation_next_retry_at
+                    <= current_time,
+                ),
+            ),
+            sa.and_(
+                PublicationSearch.l1_reconciliation_status
+                == L1_RECONCILIATION_RUNNING,
+                sa.or_(
+                    PublicationSearch.l1_reconciliation_started_at.is_(None),
+                    PublicationSearch.l1_reconciliation_started_at
+                    <= stale_before,
+                ),
+            ),
+        )
+        claimed_rows = (
+            self.db.query(PublicationSearch)
+            .filter(
+                PublicationSearch.id == int(search_id),
+                sa.or_(
+                    PublicationSearch.requested_by_email.is_(None),
+                    sa_func.lower(PublicationSearch.requested_by_email)
+                    != "scheduler",
+                ),
+                claimable,
+            )
+            .update(
+                {
+                    PublicationSearch.l1_reconciliation_status:
+                        L1_RECONCILIATION_RUNNING,
+                    PublicationSearch.l1_reconciliation_attempts:
+                        sa_func.coalesce(
+                            PublicationSearch.l1_reconciliation_attempts,
+                            0,
+                        )
+                        + 1,
+                    PublicationSearch.l1_reconciliation_started_at: current_time,
+                    PublicationSearch.l1_reconciliation_next_retry_at: None,
+                    PublicationSearch.l1_reconciliation_run_token: run_token,
+                },
+                synchronize_session=False,
+            )
+        )
+        self.db.commit()
+        self.db.expire_all()
+
+        search = self.db.get(PublicationSearch, int(search_id))
+        if search is None:
+            return {
+                "search_id": int(search_id),
+                "claimed": False,
+                "attempted": False,
+                "success": None,
+                "reason": "not_found",
+                "status": None,
+                "attempts": 0,
+                "next_retry_at": None,
+                "result_search_id": None,
+                "last_error": None,
+            }
+        if not claimed_rows:
+            if not self._is_manual_search_request(search.requested_by_email):
+                reason = "not_manual"
+                success: Optional[bool] = None
+            elif search.l1_reconciliation_status == L1_RECONCILIATION_COMPLETED:
+                reason = "already_completed"
+                success = True
+            elif search.l1_reconciliation_status == L1_RECONCILIATION_RUNNING:
+                reason = "already_running"
+                success = None
+            elif search.l1_reconciliation_status == L1_RECONCILIATION_PENDING:
+                reason = "not_due"
+                success = None
+            else:
+                reason = "not_required"
+                success = None
+            return self._l1_reconciliation_to_dict(
+                search,
+                claimed=False,
+                attempted=False,
+                success=success,
+                reason=reason,
+            )
+
+        return self._execute_claimed_l1_reconciliation(
+            search=search,
+            run_token=run_token,
+            now=now,
+        )
+
+    def reconcile_due_manual_searches(
+        self,
+        *,
+        limit: int = 10,
+        now: Optional[datetime] = None,
+    ) -> int:
+        """Consome buscas manuais vencidas sem deixar uma falha bloquear as demais."""
+        current_time = now or datetime.now(timezone.utc)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+        stale_before = current_time - _L1_RECONCILIATION_LEASE_TIMEOUT
+        due = sa.or_(
+            sa.and_(
+                PublicationSearch.l1_reconciliation_status
+                == L1_RECONCILIATION_PENDING,
+                sa.or_(
+                    PublicationSearch.l1_reconciliation_next_retry_at.is_(None),
+                    PublicationSearch.l1_reconciliation_next_retry_at
+                    <= current_time,
+                ),
+            ),
+            sa.and_(
+                PublicationSearch.l1_reconciliation_status
+                == L1_RECONCILIATION_RUNNING,
+                sa.or_(
+                    PublicationSearch.l1_reconciliation_started_at.is_(None),
+                    PublicationSearch.l1_reconciliation_started_at
+                    <= stale_before,
+                ),
+            ),
+        )
+        search_ids = [
+            int(row[0])
+            for row in (
+                self.db.query(PublicationSearch.id)
+                .filter(
+                    sa.or_(
+                        PublicationSearch.requested_by_email.is_(None),
+                        sa_func.lower(PublicationSearch.requested_by_email)
+                        != "scheduler",
+                    ),
+                    due,
+                )
+                .order_by(
+                    PublicationSearch.l1_reconciliation_next_retry_at.asc(),
+                    PublicationSearch.id.asc(),
+                )
+                .limit(max(1, int(limit)))
+                .all()
+            )
+        ]
+
+        attempted = 0
+        for search_id in search_ids:
+            try:
+                result = self.reconcile_manual_search_if_due(
+                    search_id,
+                    now=current_time,
+                )
+                if result.get("attempted"):
+                    attempted += 1
+            except Exception:
+                self.db.rollback()
+                logger.exception(
+                    "Sweep não conseguiu reconciliar a busca manual #%s.",
+                    search_id,
+                )
+        return attempted
+
+    def _execute_claimed_l1_reconciliation(
+        self,
+        *,
+        search: PublicationSearch,
+        run_token: str,
+        now: Optional[datetime],
+    ) -> dict[str, Any]:
+        """Executa o trabalho após o claim; separado para manter o claim curto."""
+        search_id = int(search.id)
+        try:
+            payload = dict(search.l1_reconciliation_payload or {})
+            date_from = str(payload.get("date_from") or search.date_from or "")
+            if not date_from:
+                raise ValueError("Reconciliação L1 sem data inicial.")
+            date_to = payload.get("date_to", search.date_to)
+            office_ids = _parse_csv_ints(
+                payload.get("responsible_office_ids")
+                if "responsible_office_ids" in payload
+                else search.office_filter
+            )
+            result = self.create_and_run_search(
+                date_from=date_from,
+                date_to=date_to,
+                origin_type=str(
+                    payload.get("origin_type")
+                    or "OfficialJournalsCrawler"
+                ),
+                responsible_office_ids=office_ids,
+                auto_classify=bool(payload.get("auto_classify", False)),
+                requested_by=search.requested_by_email,
+                only_unlinked=bool(payload.get("only_unlinked", False)),
+                # Se os cadernos do primeiro fallback ainda estavam
+                # incompletos (ex.: execução antes das 03h), cada retry do L1
+                # também tenta consolidar o DJEN. Após cobertura integral, o
+                # retry fica exclusivo para o /Updates.
+                allow_djen_fallback=(
+                    payload.get("djen_coverage_complete") is False
+                ),
+                track_l1_reconciliation=False,
+                send_failure_alert=False,
+            )
+            retry_fetch_metadata = dict(result.get("fetch_metadata") or {})
+            if retry_fetch_metadata.get("fallback_used"):
+                payload["djen_coverage_complete"] = bool(
+                    retry_fetch_metadata.get("coverage_complete")
+                )
+                payload["djen_last_coverage_mode"] = (
+                    retry_fetch_metadata.get("coverage_mode")
+                )
+                payload["djen_last_coverage_note"] = (
+                    retry_fetch_metadata.get("coverage_note")
+                )
+                original_search = self.db.get(PublicationSearch, search_id)
+                if original_search is not None:
+                    original_search.l1_reconciliation_payload = dict(payload)
+                    self.db.commit()
+                raise RuntimeError(
+                    "Legal One GET /Updates continua em HTTP 502; "
+                    "a contingência DJEN foi reexecutada e a reconciliação "
+                    "oficial permanece pendente."
+                )
+            return self._complete_claimed_l1_reconciliation(
+                search_id=search_id,
+                run_token=run_token,
+                result_search_id=int(result["id"]),
+                now=now,
+            )
+        except Exception as exc:
+            return self._reschedule_claimed_l1_reconciliation(
+                search_id=search_id,
+                run_token=run_token,
+                error=exc,
+                now=now,
+            )
+
+    def _complete_claimed_l1_reconciliation(
+        self,
+        *,
+        search_id: int,
+        run_token: str,
+        result_search_id: int,
+        now: Optional[datetime],
+    ) -> dict[str, Any]:
+        finished_time = now or datetime.now(timezone.utc)
+        if finished_time.tzinfo is None:
+            finished_time = finished_time.replace(tzinfo=timezone.utc)
+        finalized = (
+            self.db.query(PublicationSearch)
+            .filter(
+                PublicationSearch.id == int(search_id),
+                PublicationSearch.l1_reconciliation_status
+                == L1_RECONCILIATION_RUNNING,
+                PublicationSearch.l1_reconciliation_run_token == run_token,
+            )
+            .update(
+                {
+                    PublicationSearch.l1_reconciliation_status:
+                        L1_RECONCILIATION_COMPLETED,
+                    PublicationSearch.l1_reconciliation_completed_at:
+                        finished_time,
+                    PublicationSearch.l1_reconciliation_next_retry_at: None,
+                    PublicationSearch.l1_reconciliation_last_error: None,
+                    PublicationSearch.l1_reconciliation_run_token: None,
+                    PublicationSearch.l1_reconciliation_result_search_id:
+                        int(result_search_id),
+                    PublicationSearch.l1_alert_required_attempt: None,
+                    PublicationSearch.l1_alert_required_at: None,
+                },
+                synchronize_session=False,
+            )
+        )
+        self.db.commit()
+        self.db.expire_all()
+        search = self.db.get(PublicationSearch, int(search_id))
+        if not finalized or search is None:
+            return {
+                "search_id": int(search_id),
+                "claimed": True,
+                "attempted": True,
+                "success": None,
+                "reason": "superseded",
+                "status": (
+                    None if search is None else search.l1_reconciliation_status
+                ),
+                "attempts": (
+                    0 if search is None else search.l1_reconciliation_attempts
+                ),
+                "next_retry_at": None,
+                "result_search_id": int(result_search_id),
+                "last_error": (
+                    None if search is None else search.l1_reconciliation_last_error
+                ),
+            }
+        return self._l1_reconciliation_to_dict(
+            search,
+            claimed=True,
+            attempted=True,
+            success=True,
+            reason="completed",
+        )
+
+    def _reschedule_claimed_l1_reconciliation(
+        self,
+        *,
+        search_id: int,
+        run_token: str,
+        error: BaseException,
+        now: Optional[datetime],
+    ) -> dict[str, Any]:
+        self.db.rollback()
+        finished_time = now or datetime.now(timezone.utc)
+        if finished_time.tzinfo is None:
+            finished_time = finished_time.replace(tzinfo=timezone.utc)
+        rescheduled = (
+            self.db.query(PublicationSearch)
+            .filter(
+                PublicationSearch.id == int(search_id),
+                PublicationSearch.l1_reconciliation_status
+                == L1_RECONCILIATION_RUNNING,
+                PublicationSearch.l1_reconciliation_run_token == run_token,
+            )
+            .update(
+                {
+                    PublicationSearch.l1_reconciliation_status:
+                        L1_RECONCILIATION_PENDING,
+                    PublicationSearch.l1_reconciliation_next_retry_at:
+                        finished_time + _L1_RECONCILIATION_RETRY_DELAY,
+                    PublicationSearch.l1_reconciliation_last_error:
+                        str(error)[:4000],
+                    PublicationSearch.l1_reconciliation_run_token: None,
+                    PublicationSearch.l1_alert_required_attempt:
+                        PublicationSearch.l1_reconciliation_attempts,
+                    PublicationSearch.l1_alert_required_at: finished_time,
+                    PublicationSearch.l1_alert_outbox_id: None,
+                },
+                synchronize_session=False,
+            )
+        )
+        self.db.commit()
+        self.db.expire_all()
+        search = self.db.get(PublicationSearch, int(search_id))
+        if rescheduled and search is not None:
+            _alert_manual_publication_search_failure(search, error)
+            logger.warning(
+                "Reconciliação L1 da busca #%s falhou; nova tentativa em %s.",
+                search_id,
+                search.l1_reconciliation_next_retry_at,
+            )
+            return self._l1_reconciliation_to_dict(
+                search,
+                claimed=True,
+                attempted=True,
+                success=False,
+                reason="failed_rescheduled",
+            )
+        return {
+            "search_id": int(search_id),
+            "claimed": True,
+            "attempted": True,
+            "success": None,
+            "reason": "superseded",
+            "status": (
+                None if search is None else search.l1_reconciliation_status
+            ),
+            "attempts": (
+                0 if search is None else search.l1_reconciliation_attempts
+            ),
+            "next_retry_at": None,
+            "result_search_id": (
+                None
+                if search is None
+                else search.l1_reconciliation_result_search_id
+            ),
+            "last_error": str(error)[:4000],
+        }
 
     def _update_search_progress(self, search, step: str, detail: str, pct: int):
         """Atualiza progresso intermediário da busca (commit imediato)."""
@@ -255,6 +965,9 @@ class PublicationSearchService:
         date_from: str,
         date_to: Optional[str] = None,
         origin_type: str = "OfficialJournalsCrawler",
+        responsible_office_ids: Optional[list[int]] = None,
+        allow_djen_fallback: bool = True,
+        on_legal_one_502: Optional[Callable[[BaseException], bool]] = None,
     ) -> list[dict]:
         """
         Faz a chamada paginada ao Legal One pra trazer todas as publicações
@@ -264,11 +977,106 @@ class PublicationSearchService:
         O resultado pode ser passado como `prefetched_publications` em
         chamadas subsequentes a `create_and_run_search`.
         """
-        return self.client.fetch_all_publications(
-            date_from=date_from,
-            date_to=date_to,
-            origin_type=origin_type,
-        )
+        try:
+            publications = self.client.fetch_all_publications(
+                date_from=date_from,
+                date_to=date_to,
+                origin_type=origin_type,
+            )
+            self.last_fetch_metadata = {
+                "provider": "LEGAL_ONE",
+                "fallback_used": False,
+                "publications": len(publications),
+            }
+            return publications
+        except Exception as exc:
+            from app.core.config import settings
+            from app.services.djen_publication_fallback import (
+                DjenPublicationFallback,
+                is_legal_one_updates_502,
+            )
+
+            updates_502 = is_legal_one_updates_502(exc)
+            if updates_502:
+                self.last_fetch_metadata = {
+                    "provider": "LEGAL_ONE",
+                    "fallback_used": False,
+                    "primary_provider": "LEGAL_ONE",
+                    "primary_http_status": 502,
+                    "primary_route": "/Updates",
+                    "primary_error": str(exc)[:2000],
+                }
+                if on_legal_one_502 is not None:
+                    try:
+                        reconciliation_persisted = on_legal_one_502(exc)
+                    except Exception as persistence_exc:
+                        logger.exception(
+                            "Callback de persistência do retry L1 falhou."
+                        )
+                        raise RuntimeError(
+                            "Legal One GET /Updates retornou HTTP 502, mas não "
+                            "foi possível persistir a reconciliação obrigatória."
+                        ) from persistence_exc
+                    if reconciliation_persisted is not True:
+                        raise RuntimeError(
+                            "Legal One GET /Updates retornou HTTP 502, mas a "
+                            "reconciliação obrigatória não foi confirmada no banco."
+                        ) from exc
+
+            should_fallback = (
+                allow_djen_fallback
+                and settings.djen_fallback_enabled
+                and origin_type == "OfficialJournalsCrawler"
+                and updates_502
+            )
+            if not should_fallback:
+                raise
+
+            cache_key = (
+                (date_from or "")[:10],
+                (date_to or date_from or "")[:10],
+            )
+            cached = self._djen_fallback_cache.get(cache_key)
+            if cached is not None:
+                publications, metadata = cached
+                self.last_fetch_metadata = dict(metadata)
+                return [dict(item) for item in publications]
+
+            logger.exception(
+                "Legal One /Updates encerrou com HTTP 502; acionando contingência DJEN."
+            )
+            try:
+                fallback = DjenPublicationFallback(
+                    self.db,
+                    self.client,
+                ).fetch(
+                    date_from=date_from,
+                    date_to=date_to or date_from,
+                    # A consulta à Comunica é nacional e o filtro fino por
+                    # escritório já acontece no fan-out abaixo. Buscar o
+                    # universo uma vez permite que o modo legado também
+                    # reutilize o mesmo relatório/DJEN entre escritórios.
+                    responsible_office_ids=None,
+                )
+            except Exception as fallback_exc:
+                raise RuntimeError(
+                    "Legal One GET /Updates retornou HTTP 502 e a contingência "
+                    f"DJEN também falhou: {fallback_exc}"
+                ) from fallback_exc
+
+            metadata = {
+                **fallback.metadata,
+                "primary_provider": "LEGAL_ONE",
+                "primary_http_status": 502,
+                "primary_route": "/Updates",
+                "primary_error": str(exc)[:2000],
+            }
+            self.last_fetch_metadata = metadata
+            self._djen_fallback_cache[cache_key] = (
+                [dict(item) for item in fallback.publications],
+                dict(metadata),
+            )
+            return [dict(item) for item in fallback.publications]
 
     def create_and_run_search(
         self,
@@ -281,6 +1089,9 @@ class PublicationSearchService:
         requested_by: Optional[str] = None,
         only_unlinked: bool = False,
         prefetched_publications: Optional[list[dict]] = None,
+        allow_djen_fallback: bool = True,
+        track_l1_reconciliation: bool = True,
+        send_failure_alert: bool = True,
     ) -> dict[str, Any]:
         """
         Cria um registro de busca, executa, enriquece e persiste resultados.
@@ -312,10 +1123,37 @@ class PublicationSearchService:
                 ",".join(str(x) for x in _office_ids) if _office_ids else None
             ),
             requested_by_email=requested_by,
+            l1_reconciliation_status=L1_RECONCILIATION_NOT_REQUIRED,
         )
         self.db.add(search)
         self.db.commit()
         self.db.refresh(search)
+
+        reconciliation_payload = {
+            "date_from": date_from,
+            "date_to": date_to,
+            "origin_type": origin_type,
+            "responsible_office_ids": list(_office_ids),
+            "auto_classify": bool(auto_classify),
+            "only_unlinked": bool(only_unlinked),
+            # Fail-closed: até o fallback concluir e persistir os metadados,
+            # um restart deve refazer os cadernos no próximo sweep.
+            "djen_coverage_complete": False,
+        }
+        on_legal_one_502 = None
+        if (
+            track_l1_reconciliation
+            and prefetched_publications is None
+            and self._is_manual_search_request(requested_by)
+        ):
+            def _persist_l1_502(error: BaseException) -> bool:
+                return self._mark_manual_l1_reconciliation_pending(
+                    search_id=search.id,
+                    error=error,
+                    payload=reconciliation_payload,
+                )
+
+            on_legal_one_502 = _persist_l1_502
 
         try:
             # 1) Busca TODAS as publicações (paginação automática) ou usa
@@ -334,14 +1172,23 @@ class PublicationSearchService:
                 )
             else:
                 self._update_search_progress(search, "FETCH", "Buscando publicações na API Legal One...", 5)
-                publications = self.client.fetch_all_publications(
+                publications = self.fetch_publications_for_window(
                     date_from=date_from,
                     date_to=date_to,
                     origin_type=origin_type,
+                    responsible_office_ids=_office_ids,
+                    allow_djen_fallback=allow_djen_fallback and not only_unlinked,
+                    on_legal_one_502=on_legal_one_502,
                 )
+                if self.last_fetch_metadata.get("fallback_used"):
+                    search.origin_type = "DJEN"
                 self._update_search_progress(
                     search, "FETCH",
-                    f"{len(publications)} publicações encontradas na API",
+                    (
+                        f"{len(publications)} publicações recuperadas pela contingência DJEN"
+                        if self.last_fetch_metadata.get("fallback_used")
+                        else f"{len(publications)} publicações encontradas na API"
+                    ),
                     15,
                 )
 
@@ -390,6 +1237,13 @@ class PublicationSearchService:
                     before_prefilter = len(publications)
                     kept = []
                     for _p in publications:
+                        if _p.get("_djen_fallback"):
+                            if (
+                                _p.get("_responsible_office_id")
+                                in _office_ids_set
+                            ):
+                                kept.append(_p)
+                            continue
                         rels = _p.get("relationships") or []
                         lit = next(
                             (r for r in rels if r.get("linkType") == "Litigation"),
@@ -488,24 +1342,32 @@ class PublicationSearchService:
                 50,
             )
             #
-            # Dedup em duas camadas:
-            #   (a) legal_one_update_id (id único do Legal One) → duplicata exata
-            #   (b) (linked_lawsuit_id, publication_date) → mesma publicação de um
-            #       mesmo processo no mesmo dia é tratada uma única vez,
-            #       economizando tokens de classificação e chamadas à API do L1.
+            # Dedup em três camadas:
+            #   (a) ingestion_key da fonte;
+            #   (b) legal_one_update_id;
+            #   (c) processo + data + fingerprint do teor.
+            # Assim duas intimações diferentes no mesmo processo/dia não são
+            # perdidas, e o L1 pode reconciliar uma publicação antes vinda do DJEN.
             existing_ids = set(
                 row[0]
-                for row in self.db.query(PublicationRecord.legal_one_update_id).all()
+                for row in self.db.query(PublicationRecord.legal_one_update_id)
+                .filter(PublicationRecord.legal_one_update_id.isnot(None))
+                .all()
+            )
+            existing_ingestion_keys = set(
+                row[0]
+                for row in self.db.query(PublicationRecord.ingestion_key).all()
+                if row[0]
             )
 
-            # Chaves (lawsuit_id, publication_date) já presentes em registros
-            # "vivos" (não descartados). Mesmo conjunto coberto pelo índice
-            # único parcial uq_pub_lawsuit_date.
-            existing_keys = set(
-                (row[0], row[1])
-                for row in self.db.query(
+            live_rows = (
+                self.db.query(
+                    PublicationRecord.id,
                     PublicationRecord.linked_lawsuit_id,
                     PublicationRecord.publication_date,
+                    PublicationRecord.content_fingerprint,
+                    PublicationRecord.source_provider,
+                    PublicationRecord.legal_one_update_id,
                 )
                 .filter(PublicationRecord.linked_lawsuit_id.isnot(None))
                 .filter(PublicationRecord.publication_date.isnot(None))
@@ -514,10 +1376,42 @@ class PublicationSearchService:
                 .filter(PublicationRecord.is_duplicate == False)  # noqa: E712
                 .all()
             )
+            existing_content_records: dict[
+                tuple[Any, str, str],
+                tuple[int, str, Optional[int]] | PublicationRecord,
+            ] = {}
+            legacy_pair_keys: set[tuple[Any, str]] = set()
+            for (
+                record_id,
+                existing_lawsuit_id,
+                existing_date,
+                existing_fingerprint,
+                existing_provider,
+                existing_l1_id,
+            ) in live_rows:
+                pair = (existing_lawsuit_id, existing_date)
+                if existing_fingerprint:
+                    existing_content_records.setdefault(
+                        (
+                            existing_lawsuit_id,
+                            existing_date,
+                            existing_fingerprint,
+                        ),
+                        (
+                            int(record_id),
+                            str(existing_provider or "LEGAL_ONE").upper(),
+                            existing_l1_id,
+                        ),
+                    )
+                else:
+                    # Registros anteriores à migration não têm fingerprint;
+                    # preservamos para eles a regra histórica processo/data.
+                    legacy_pair_keys.add(pair)
 
             new_records: List[PublicationRecord] = []
             duplicate_records: List[PublicationRecord] = []
             obsolete_records: List[PublicationRecord] = []
+            reconciled_records: List[PublicationRecord] = []
             new_count = 0
             dup_count = 0
             discarded_count = 0
@@ -537,11 +1431,41 @@ class PublicationSearchService:
             total_pubs = len(publications)
 
             for pub in publications:
-                update_id = pub.get("id")
-                if not update_id:
+                source_provider = str(
+                    pub.get("_source_provider")
+                    or (
+                        "DJEN"
+                        if str(pub.get("originType") or "").upper() == "DJEN"
+                        else "LEGAL_ONE"
+                    )
+                ).upper()
+                source_external_id = str(
+                    pub.get("_source_external_id") or pub.get("id") or ""
+                ).strip()
+                ingestion_key = str(
+                    pub.get("_ingestion_key")
+                    or (
+                        f"{source_provider}:{source_external_id}"
+                        if source_external_id
+                        else ""
+                    )
+                ).strip()
+                if not source_external_id or not ingestion_key:
                     continue
 
-                if update_id in existing_ids:
+                update_id = None
+                if source_provider == "LEGAL_ONE":
+                    try:
+                        update_id = int(pub.get("id"))
+                    except (TypeError, ValueError):
+                        update_id = None
+                if (
+                    ingestion_key in existing_ingestion_keys
+                    or (
+                        update_id is not None
+                        and update_id in existing_ids
+                    )
+                ):
                     dup_count += 1
                     continue
 
@@ -552,18 +1476,66 @@ class PublicationSearchService:
                 )
                 lawsuit_id = lawsuit_rel.get("linkId") if lawsuit_rel else None
                 publication_date = pub.get("date")
+                content_fingerprint = publication_content_fingerprint(pub)
 
-                # Guarda (lawsuit_id, publication_date): se já temos uma
-                # publicação viva do mesmo processo no mesmo dia, descartamos
-                # — insere marcada para rastreabilidade sem consumir recursos
-                # de classificação nem colidir com o índice único parcial.
-                dedup_key = (
+                pair_key = (
                     (lawsuit_id, publication_date)
                     if lawsuit_id and publication_date
                     else None
                 )
-                is_lawsuit_date_duplicate = (
-                    dedup_key is not None and dedup_key in existing_keys
+                content_key = (
+                    (lawsuit_id, publication_date, content_fingerprint)
+                    if pair_key is not None
+                    else None
+                )
+                existing_content = (
+                    existing_content_records.get(content_key)
+                    if content_key is not None
+                    else None
+                )
+
+                # Quando o L1 volta, liga seu update_id ao registro DJEN de
+                # mesmo processo/data/teor. Isso permite o tratamento no L1
+                # sem criar uma segunda publicação para o operador.
+                if (
+                    source_provider == "LEGAL_ONE"
+                    and update_id is not None
+                    and existing_content is not None
+                ):
+                    if isinstance(existing_content, PublicationRecord):
+                        existing_record = existing_content
+                        existing_provider = existing_record.source_provider
+                        existing_l1_id = existing_record.legal_one_update_id
+                    else:
+                        existing_record_id, existing_provider, existing_l1_id = (
+                            existing_content
+                        )
+                        existing_record = self.db.get(
+                            PublicationRecord,
+                            existing_record_id,
+                        )
+                    if (
+                        existing_record is not None
+                        and existing_provider == "DJEN"
+                        and existing_l1_id is None
+                    ):
+                        existing_record.legal_one_update_id = int(update_id)
+                        reconciled_records.append(existing_record)
+                        existing_ids.add(int(update_id))
+                        dup_count += 1
+                        logger.info(
+                            "Publicação DJEN #%s reconciliada com update L1 #%s.",
+                            existing_record.id,
+                            update_id,
+                        )
+                        continue
+
+                is_content_duplicate = bool(
+                    existing_content is not None
+                    or (
+                        pair_key is not None
+                        and pair_key in legacy_pair_keys
+                    )
                 )
 
                 # ── Detecção de publicação obsoleta ─────────────────
@@ -571,7 +1543,7 @@ class PublicationSearchService:
                 # da pasta do processo no Legal One, a publicação já
                 # foi auditada na esteira de admissão → obsoleta.
                 is_obsolete = False
-                if not is_lawsuit_date_duplicate and publication_date:
+                if not is_content_duplicate and publication_date:
                     lawsuit_creation = pub.get("_lawsuit_creation_date")
                     if lawsuit_creation:
                         try:
@@ -584,7 +1556,7 @@ class PublicationSearchService:
                             pass
 
                 # Decide o status final do registro
-                if is_lawsuit_date_duplicate:
+                if is_content_duplicate:
                     record_status = RECORD_STATUS_DISCARDED_DUPLICATE
                 elif is_obsolete:
                     record_status = RECORD_STATUS_OBSOLETE
@@ -608,11 +1580,16 @@ class PublicationSearchService:
                         )
                 record = PublicationRecord(
                     search_id=search.id,
+                    source_provider=source_provider,
+                    source_external_id=source_external_id,
+                    ingestion_key=ingestion_key,
+                    source_payload=pub.get("_raw_source"),
                     legal_one_update_id=update_id,
                     origin_type=pub.get("originType"),
                     update_type_id=pub.get("typeId"),
                     description=pub.get("description"),
                     notes=pub.get("notes"),
+                    content_fingerprint=content_fingerprint,
                     publication_date=publication_date,
                     creation_date=pub.get("creationDate"),
                     linked_lawsuit_id=lawsuit_id,
@@ -620,25 +1597,18 @@ class PublicationSearchService:
                     linked_office_id=pub.get("_responsible_office_id"),
                     raw_relationships=relationships,
                     status=record_status,
-                    is_duplicate=is_lawsuit_date_duplicate,
+                    is_duplicate=is_content_duplicate,
                     uf=uf_from_cnj(cnj),
                 )
                 self.db.add(record)
-                existing_ids.add(update_id)
+                existing_ingestion_keys.add(ingestion_key)
+                if update_id is not None:
+                    existing_ids.add(update_id)
 
-                # Atualiza existing_keys ASSIM QUE registramos a primeira
-                # publicação com esse par (lawsuit_id, publication_date) —
-                # independente do status final (NOVO, OBSOLETA, etc.). Sem
-                # isso, duas publicações diferentes com o mesmo par dentro
-                # do MESMO batch geravam UniqueViolation no índice parcial
-                # uq_pub_lawsuit_date. Foi a causa real do travamento das
-                # Buscas #2 e #3 em 22/04/2026 (a #2 ficou órfã porque o
-                # except subsequente não conseguia commitar a marca de FALHA
-                # com a session em estado "transaction rolled back").
-                if dedup_key is not None and not is_lawsuit_date_duplicate:
-                    existing_keys.add(dedup_key)
+                if content_key is not None and not is_content_duplicate:
+                    existing_content_records[content_key] = record
 
-                if is_lawsuit_date_duplicate:
+                if is_content_duplicate:
                     discarded_count += 1
                     duplicate_records.append(record)
                 elif is_obsolete:
@@ -719,18 +1689,31 @@ class PublicationSearchService:
             # com target_status="sem providência": o RPA só marca a
             # publicação como tratada no Legal One.
             rpa_records = duplicate_records + obsolete_records
-            if rpa_records:
+            reconciled_for_treatment = [
+                record
+                for record in reconciled_records
+                if (
+                    record.status == RECORD_STATUS_SCHEDULED
+                    or record.status in _WITHOUT_PROVIDENCE_STATUSES
+                )
+            ]
+            records_to_sync = rpa_records + reconciled_for_treatment
+            if records_to_sync:
                 try:
                     from app.services.publication_treatment_service import (
                         PublicationTreatmentService,
                     )
                     treatment_service = PublicationTreatmentService(self.db)
-                    for rec in rpa_records:
+                    for rec in records_to_sync:
                         treatment_service.sync_item_from_record(rec, commit=False)
                     self.db.commit()
                     logger.info(
-                        "Busca #%s: %s duplicatas + %s obsoletas enfileiradas pro RPA (sem providência).",
-                        search.id, len(duplicate_records), len(obsolete_records),
+                        "Busca #%s: fila RPA sincronizada (%s duplicatas, "
+                        "%s obsoletas, %s registros DJEN reconciliados).",
+                        search.id,
+                        len(duplicate_records),
+                        len(obsolete_records),
+                        len(reconciled_for_treatment),
                     )
                 except Exception as exc:
                     logger.exception(
@@ -741,6 +1724,26 @@ class PublicationSearchService:
 
             # `total_found` = registros que ESTA busca efetivamente vinculou
             # ao sistema (novos + descartados + obsoletas).
+            fetch_metadata = dict(self.last_fetch_metadata)
+            if (
+                fetch_metadata.get("fallback_used")
+                and search.l1_reconciliation_status
+                == L1_RECONCILIATION_PENDING
+            ):
+                updated_payload = dict(
+                    search.l1_reconciliation_payload or reconciliation_payload
+                )
+                updated_payload["djen_coverage_complete"] = bool(
+                    fetch_metadata.get("coverage_complete")
+                )
+                updated_payload["djen_last_coverage_mode"] = (
+                    fetch_metadata.get("coverage_mode")
+                )
+                updated_payload["djen_last_coverage_note"] = (
+                    fetch_metadata.get("coverage_note")
+                )
+                search.l1_reconciliation_payload = updated_payload
+
             search.total_found = new_count + discarded_count + obsolete_count
             search.total_new = new_count
             # total_duplicate agrega: duplicata por update_id +
@@ -761,7 +1764,11 @@ class PublicationSearchService:
                 new_count, dup_count, discarded_count, obsolete_count,
             )
 
-            return self._search_to_dict(search)
+            if fetch_metadata.get("fallback_used"):
+                _alert_manual_publication_fallback(search, fetch_metadata)
+            response = self._search_to_dict(search)
+            response["fetch_metadata"] = fetch_metadata
+            return response
 
         except Exception as exc:
             logger.error("Erro na busca #%s: %s", search.id, exc)
@@ -786,7 +1793,22 @@ class PublicationSearchService:
                     fresh_search.error_message = str(exc)[:500]
                     fresh_search.finished_at = datetime.now(timezone.utc)
                     fresh_search.progress_step = "FAILED"
+                    if (
+                        send_failure_alert
+                        and self._is_manual_search_request(
+                            fresh_search.requested_by_email
+                        )
+                    ):
+                        fresh_search.l1_alert_required_attempt = int(
+                            fresh_search.l1_reconciliation_attempts or 0
+                        )
+                        fresh_search.l1_alert_required_at = (
+                            datetime.now(timezone.utc)
+                        )
+                        fresh_search.l1_alert_outbox_id = None
                     self.db.commit()
+                    if send_failure_alert:
+                        _alert_manual_publication_search_failure(fresh_search, exc)
             except Exception:
                 logger.exception(
                     "Falha ao marcar busca #%s como FALHA após erro principal.",
@@ -810,6 +1832,12 @@ class PublicationSearchService:
         """
         lawsuit_ids: List[int] = []
         for pub in publications:
+            if (
+                pub.get("_cnj")
+                and pub.get("_responsible_office_id") is not None
+                and pub.get("_djen_fallback")
+            ):
+                continue
             relationships = pub.get("relationships") or []
             for rel in relationships:
                 if rel.get("linkType") == "Litigation" and rel.get("linkId"):
@@ -828,6 +1856,12 @@ class PublicationSearchService:
             return publications
 
         for pub in publications:
+            if (
+                pub.get("_cnj")
+                and pub.get("_responsible_office_id") is not None
+                and pub.get("_djen_fallback")
+            ):
+                continue
             relationships = pub.get("relationships") or []
             lawsuit_rel = next(
                 (r for r in relationships if r.get("linkType") == "Litigation"),
@@ -4225,6 +5259,7 @@ class PublicationSearchService:
         # Encontra update_ids que aparecem mais de uma vez
         subq = (
             self.db.query(PublicationRecord.legal_one_update_id)
+            .filter(PublicationRecord.legal_one_update_id.isnot(None))
             .group_by(PublicationRecord.legal_one_update_id)
             .having(sqlfunc.count(PublicationRecord.id) > 1)
             .subquery()
@@ -4305,6 +5340,31 @@ class PublicationSearchService:
             "progress_pct": search.progress_pct,
             "requested_by_email": search.requested_by_email,
             "error_message": search.error_message,
+            "l1_reconciliation_status": search.l1_reconciliation_status,
+            "l1_reconciliation_attempts": (
+                search.l1_reconciliation_attempts or 0
+            ),
+            "l1_reconciliation_next_retry_at": (
+                search.l1_reconciliation_next_retry_at.isoformat()
+                if search.l1_reconciliation_next_retry_at
+                else None
+            ),
+            "l1_reconciliation_started_at": (
+                search.l1_reconciliation_started_at.isoformat()
+                if search.l1_reconciliation_started_at
+                else None
+            ),
+            "l1_reconciliation_completed_at": (
+                search.l1_reconciliation_completed_at.isoformat()
+                if search.l1_reconciliation_completed_at
+                else None
+            ),
+            "l1_reconciliation_last_error": (
+                search.l1_reconciliation_last_error
+            ),
+            "l1_reconciliation_result_search_id": (
+                search.l1_reconciliation_result_search_id
+            ),
             "created_at": search.created_at.isoformat() if search.created_at else None,
             "finished_at": search.finished_at.isoformat() if search.finished_at else None,
         }
@@ -4320,6 +5380,8 @@ class PublicationSearchService:
         result = {
             "id": record.id,
             "search_id": record.search_id,
+            "source_provider": record.source_provider,
+            "source_external_id": record.source_external_id,
             "legal_one_update_id": record.legal_one_update_id,
             "origin_type": record.origin_type,
             "update_type_id": record.update_type_id,
@@ -4359,4 +5421,5 @@ class PublicationSearchService:
             result["description"] = record.description
             result["notes"] = record.notes
             result["raw_relationships"] = record.raw_relationships
+            result["source_payload"] = record.source_payload
         return result

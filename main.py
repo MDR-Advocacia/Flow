@@ -89,6 +89,19 @@ async def lifespan(_: FastAPI):
     except Exception:
         logger.exception("Falha ao repopular automations no startup.")
 
+    # Consome os retries persistidos da captura de publicações. O estado fica
+    # em publication_fetch_attempt, então um deploy não perde a nova tentativa.
+    try:
+        from app.services.scheduled_automation_service import (
+            register_publication_capture_retry_job,
+        )
+
+        register_publication_capture_retry_job(scheduler)
+    except Exception:
+        logger.exception(
+            "Falha ao registrar retry automático da captura de publicações."
+        )
+
     try:
         from datetime import datetime, timezone
 

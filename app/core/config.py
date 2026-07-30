@@ -93,6 +93,28 @@ class Settings(BaseSettings):
     comunica_base_url: str = "https://comunicaapi.pje.jus.br"
     comunica_timeout_seconds: int = 30
     djen_default_meio: str = "D"
+    # Contingência da captura de publicações: quando o Legal One /Updates
+    # encerra as tentativas com HTTP 502, consulta a API pública do DJEN.
+    # A Comunica bloqueia o datacenter AWS fora do Brasil, por isso produção
+    # precisa configurar um proxy de saída brasileiro (socks5h/http).
+    djen_fallback_enabled: bool = True
+    djen_fallback_oabs: str = "5553:RN"
+    djen_proxy: str | None = None
+    djen_fallback_refresh_report: bool = True
+    djen_fallback_allow_filtered_snapshot: bool = False
+    djen_fallback_max_report_age_hours: int = 168
+    djen_fallback_max_pages: int = 200
+    djen_fallback_request_delay_seconds: float = 3.1
+    djen_fallback_min_portfolio_processes: int = 30000
+    # Cobertura integral: baixa os cadernos JSON dos tribunais relacionados
+    # aos estados/CNJs da carteira e filtra localmente pelo Agenda Analytics.
+    # A consulta por OAB continua como caminho rápido quando algum caderno do
+    # período ainda não foi processado pelo CNJ.
+    djen_fallback_cadernos_enabled: bool = True
+    djen_fallback_caderno_max_period_days: int = 7
+    djen_fallback_caderno_request_delay_seconds: float = 0.5
+    djen_fallback_caderno_max_total_download_mb: int = 8192
+    djen_fallback_caderno_cache_days: int = 14
 
     process_monitoring_idle_window_days: int = 15
     process_monitoring_recency_window_days: int = 10
@@ -116,6 +138,15 @@ class Settings(BaseSettings):
     # rate limit em rodadas multi-banco. Default ON desde 2026-05-07;
     # se voltar a falhar, setar False no Coolify pra rollback rápido.
     publication_scheduler_batch_mode: bool = True
+    # Alerta consolidado de falha da captura agendada. Sem valor, reutiliza
+    # CLASSIFICACAO_ALERT_EMAIL e depois MAIL_TO/EMAIL_TO.
+    publication_capture_alert_email: str | None = (
+        "ti@mdradvocacia.com,jonilsonvilela@mdradvocacia.com"
+    )
+    # Worker persistente: consulta publication_fetch_attempt e executa as
+    # tentativas vencidas. Como o estado fica no Postgres, sobrevive a deploy.
+    publication_capture_retry_enabled: bool = True
+    publication_capture_retry_poll_minutes: int = 5
 
     # Classifier Engine
     anthropic_api_key: str | None = None

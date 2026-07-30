@@ -172,16 +172,32 @@ def send_failure_report(
         msg.attach(MIMEText(plain_content, "plain", "utf-8"))
         msg.attach(MIMEText(html_content, "html", "utf-8"))
 
+        refused_recipients = {}
         if encryption in {"ssl", "smtps"}:
             with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
                 server.login(smtp_user, smtp_password)
-                server.sendmail(email_from, recipient_list, msg.as_string())
+                refused_recipients = server.sendmail(
+                    email_from,
+                    recipient_list,
+                    msg.as_string(),
+                )
         else:
             with smtplib.SMTP(smtp_server, smtp_port) as server:
                 if encryption not in {"none", "false", "0", "no"}:
                     server.starttls()
                 server.login(smtp_user, smtp_password)
-                server.sendmail(email_from, recipient_list, msg.as_string())
+                refused_recipients = server.sendmail(
+                    email_from,
+                    recipient_list,
+                    msg.as_string(),
+                )
+
+        if refused_recipients:
+            logging.error(
+                "SMTP recusou destinatário(s) do alerta: %s",
+                ", ".join(sorted(str(email) for email in refused_recipients)),
+            )
+            return False
 
         logging.info("E-mail de alerta de falhas enviado com sucesso para: %s", email_to_header)
         return True

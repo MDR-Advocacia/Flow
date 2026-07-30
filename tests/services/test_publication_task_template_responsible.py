@@ -48,6 +48,9 @@ def _seed_refs(db):
 def _record(search, *, update_id, lawsuit_id, category):
     return PublicationRecord(
         search_id=search.id,
+        source_provider="LEGAL_ONE",
+        source_external_id=str(update_id),
+        ingestion_key=f"LEGAL_ONE:{update_id}",
         legal_one_update_id=update_id,
         linked_lawsuit_id=lawsuit_id,
         linked_lawsuit_cnj=f"000000{update_id}-00.2026.8.00.0000",

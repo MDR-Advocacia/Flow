@@ -291,6 +291,7 @@ class LegalOneApiClient:
             requests.exceptions.ChunkedEncodingError,
         )
         last_exception = None
+        last_retry_response = None
 
         for attempt in range(8):
             # Rate limiter global: aguarda slot antes de cada tentativa.
@@ -299,10 +300,15 @@ class LegalOneApiClient:
 
             try:
                 response = self._authenticated_request(method, url, **kwargs)
+                # O último resultado observado deve prevalecer. Sem limpar uma
+                # exceção antiga, uma sequência timeout -> HTTP 502 terminava
+                # levantando o timeout e escondia o gatilho exato do fallback.
+                last_exception = None
                 if response.status_code == 404:
                     response.raise_for_status()
                     return response
                 if response.status_code in (429, 500, 502, 503, 504):
+                    last_retry_response = response
                     # 429 = rate-limited. Espera mais longo e com jitter amplo
                     # para evitar thundering herd entre threads.
                     if response.status_code == 429:
@@ -313,22 +319,40 @@ class LegalOneApiClient:
                         "Status %s recebido. Nova tentativa em %.1fs (attempt %d/8).",
                         response.status_code, wait, attempt + 1,
                     )
+                    # Na oitava tentativa não haverá nova chamada. O código
+                    # anterior ainda dormia até 2 minutos antes de falhar.
+                    if attempt == 7:
+                        break
                     time.sleep(wait)
                     continue
                 response.raise_for_status()
                 return response
             except retry_exceptions as exc:
                 last_exception = exc
+                last_retry_response = None
                 wait = (2 ** attempt) + random.uniform(0, 2)
                 self.logger.warning(
                     "Erro de conexao (%s): %s. Nova tentativa em %.1fs.",
                     type(exc).__name__, exc, wait,
                 )
+                if attempt == 7:
+                    break
                 time.sleep(wait)
 
         if last_exception:
             self.logger.error("Esgotadas tentativas apos erro de conexao: %s", last_exception)
             raise last_exception
+
+        if last_retry_response is not None:
+            status = last_retry_response.status_code
+            body = (last_retry_response.text or "").strip()[:1000]
+            detail = f"Legal One retornou HTTP {status} apos 8 tentativas."
+            if body:
+                detail += f" Resposta: {body}"
+            raise requests.exceptions.HTTPError(
+                detail,
+                response=last_retry_response,
+            )
 
         raise requests.exceptions.RequestException("Maximo de tentativas excedido sem sucesso.")
 
@@ -1914,7 +1938,9 @@ class LegalOneApiClient:
             )
             return {
                 "value": publications,
-                "@odata.count": data.get("@odata.count", 0),
+                # None significa que o servidor não informou o total. Zero é
+                # um total válido e não pode ser confundido com campo ausente.
+                "@odata.count": data.get("@odata.count"),
                 "@odata.nextLink": data.get("@odata.nextLink"),
             }
         except requests.exceptions.HTTPError as exc:
@@ -1942,6 +1968,7 @@ class LegalOneApiClient:
         skip = 0
         page_size = 30  # LegalOne limita $top a 30
         total_reported: Optional[int] = None
+        completed = False
 
         # max_pages aumentado: com 30/pag, 500 pags = 15.000 publicacoes max
         for page in range(max_pages):
@@ -1955,22 +1982,42 @@ class LegalOneApiClient:
             )
 
             if page == 0:
-                total_reported = int(result.get("@odata.count") or 0)
+                raw_total = result.get("@odata.count")
+                total_reported = (
+                    int(raw_total) if raw_total is not None else None
+                )
                 self.logger.info("Total de publicacoes reportado pela API: %s", total_reported)
 
             items = result.get("value", [])
             if not items:
+                completed = True
                 break
 
             all_publications.extend(items)
 
             # Paginacao baseada em count + item count (LegalOne nao retorna @odata.nextLink)
             if total_reported is not None and len(all_publications) >= total_reported:
+                completed = True
                 break
             if len(items) < page_size:
+                completed = True
                 break
 
             skip += page_size
+
+        if (
+            not completed
+            or (
+                total_reported is not None
+                and len(all_publications) < total_reported
+            )
+        ):
+            raise RuntimeError(
+                "Paginação de GET /Updates ficou incompleta: "
+                f"{len(all_publications)} de "
+                f"{total_reported if total_reported is not None else 'total desconhecido'} "
+                f"publicações após {max_pages} página(s). O cursor não será avançado."
+            )
 
         self.logger.info(
             "Busca completa: %s publicacoes carregadas (total reportado: %s).",
