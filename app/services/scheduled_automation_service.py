@@ -734,6 +734,7 @@ class ScheduledAutomationService:
                             conting.get("data_fim"),
                         )
                         err_msg = None
+                        self._alertar_contingencia(conting, str(exc))
                     else:
                         logger.error(
                             "Contingência por relatório não resolveu (%s). "
@@ -749,6 +750,11 @@ class ScheduledAutomationService:
                     for office_id, df, dt in active:
                         self._record_attempt_failure(office_id, df, dt, err_msg, automation_id)
                         failed.append(office_id)
+                    self._alertar_captura_falhou(
+                        failed=failed, ok=ok, erro=err_msg,
+                        janela=f"{union_from:%d/%m %H:%M} a {union_to:%d/%m %H:%M}",
+                        run_id=run_id,
+                    )
                     if run_id is not None:
                         self._update_progress(
                             run_id,
@@ -865,12 +871,117 @@ class ScheduledAutomationService:
                         message=f"Escritório {idx}/{total_offices}: falhou",
                     )
 
+        # ── Contingência no modo legado ───────────────────────────────
+        # PRECISA existir aqui: produção roda com
+        # PUBLICATION_SCHEDULER_BATCH_MODE=false, então é ESTE o caminho que
+        # falha de madrugada. Enganchar só no batch deixaria a rede de proteção
+        # instalada no corredor errado.
+        contingencia_txt = None
+        if failed and _settings.publication_report_fallback_enabled:
+            janela_l = {o: (df, dt) for o, df, dt in active}
+            try:
+                from app.services.publication_l1_report_fallback import (
+                    capturar_publicacoes,
+                )
+
+                conting = capturar_publicacoes(
+                    self.db,
+                    dias_atras=_settings.publication_report_fallback_dias_atras,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Contingência por relatório falhou (modo legado).")
+                conting = {"ok": False, "motivo": "excecao"}
+
+            if conting.get("ok"):
+                publicacoes = conting["publicacoes"]
+                recuperados: List[int] = []
+                for office_id in list(failed):
+                    df, dt = janela_l.get(office_id, (None, None))
+                    try:
+                        result = search_service.create_and_run_search(
+                            date_from=df.strftime("%Y-%m-%dT%H:%M:%SZ") if df else None,
+                            date_to=dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None,
+                            responsible_office_id=internal_to_external.get(office_id, office_id),
+                            auto_classify=False,
+                            requested_by="scheduler-contingencia",
+                            prefetched_publications=publicacoes,
+                        )
+                        achados = int(
+                            result.get("total_new", 0) or result.get("total_found", 0) or 0
+                        )
+                        total_found += achados
+                        self._record_attempt_success(office_id, df, dt, achados, automation_id)
+                        recuperados.append(office_id)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Contingência: escritório %s seguiu falhando.", office_id,
+                        )
+                for office_id in recuperados:
+                    failed.remove(office_id)
+                    ok.append(office_id)
+                contingencia_txt = (
+                    f"relatório #{conting.get('report_id')} recuperou "
+                    f"{len(recuperados)} de {len(recuperados) + len(failed)} escritório(s)"
+                )
+                logger.warning(
+                    "CONTINGÊNCIA ATIVA (legado): %s escritório(s) recuperados pelo "
+                    "relatório #%s.", len(recuperados), conting.get("report_id"),
+                )
+                if not failed:
+                    self._alertar_contingencia(conting, "API do L1 falhou por escritório")
+            else:
+                contingencia_txt = f"não resolveu ({conting.get('motivo')})"
+
+        if failed:
+            self._alertar_captura_falhou(
+                failed=failed, ok=ok,
+                erro="A busca pela API do Legal One falhou nesses escritórios.",
+                contingencia=contingencia_txt,
+                run_id=run_id,
+            )
+
         return {
             "records_found": total_found,
             "offices_ok": ok,
             "offices_failed": failed,
             "offices_skipped": skipped,
         }
+
+    # ── Alertas da captura ────────────────────────────────────────────
+    # Best-effort: e-mail que falha não pode derrubar a rodada.
+
+    def _alertar_captura_falhou(
+        self, *, failed, ok, erro, janela=None, contingencia=None, run_id=None,
+    ) -> None:
+        try:
+            from app.services.publication_capture_alerts import alertar_falha_captura
+
+            alertar_falha_captura(
+                escritorios_falha=list(failed),
+                escritorios_ok=list(ok),
+                erro=erro,
+                janela=janela,
+                contingencia=contingencia,
+                run_id=run_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao disparar o alerta da captura (ignorado).")
+
+    def _alertar_contingencia(self, conting: dict, erro_api: str) -> None:
+        try:
+            from app.services.publication_capture_alerts import (
+                alertar_contingencia_ativada,
+            )
+
+            alertar_contingencia_ativada(
+                total_publicacoes=conting.get("total", 0),
+                processos=conting.get("processos", 0),
+                report_id=conting.get("report_id"),
+                janela=f"{conting.get('data_inicio')} a {conting.get('data_fim')}",
+                erro_api=erro_api,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao disparar o alerta de contingência (ignorado).")
 
     def _execute_classify(self, office_ids: List[int], run_id: Optional[int] = None) -> Dict[str, Any]:
         """

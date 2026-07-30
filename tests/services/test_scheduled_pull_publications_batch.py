@@ -75,6 +75,20 @@ def _stub_create_and_run_search(*, total_new_per_call=1):
     return stub, calls
 
 
+def _patch_alertas(monkeypatch):
+    """Captura os alertas em vez de mandar e-mail. Devolve (falhas, contingencias)."""
+    falhas, contingencias = [], []
+    monkeypatch.setattr(
+        "app.services.publication_capture_alerts.alertar_falha_captura",
+        lambda **kw: falhas.append(kw),
+    )
+    monkeypatch.setattr(
+        "app.services.publication_capture_alerts.alertar_contingencia_ativada",
+        lambda **kw: contingencias.append(kw),
+    )
+    return falhas, contingencias
+
+
 def _patch_contingencia(monkeypatch, resultado=None):
     """Neutraliza (ou encena) a contingencia por relatorio do L1.
 
@@ -425,6 +439,166 @@ def test_contingencia_desligada_mantem_o_comportamento_antigo(monkeypatch):
         assert chamadas == [], "chave desligada nao pode acionar o relatorio"
         assert len(calls) == 0
         assert sorted(result["offices_failed"]) == sorted(office_ids)
+    finally:
+        db.close()
+        engine.dispose()
+
+
+# ── Modo legado: e o que roda em PRODUCAO ──────────────────────────────
+# PUBLICATION_SCHEDULER_BATCH_MODE=false no Coolify. Contingencia e alerta
+# enganchados so no batch ficariam instalados no corredor errado.
+
+def _legado(monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "publication_scheduler_batch_mode", False)
+
+
+def test_legado_contingencia_recupera_os_escritorios_que_falharam(monkeypatch):
+    """API do L1 fora + relatorio OK = a captura acontece pelo caminho legado."""
+    _patch_l1_client_init(monkeypatch)
+    _legado(monkeypatch)
+    falhas, contingencias = _patch_alertas(monkeypatch)
+    engine, db = _make_session()
+    try:
+        office_ids = _seed_offices(db, n=3)
+        publicacoes = [{"id": -1, "relationships": [{"linkType": "Litigation", "linkId": 1}]}]
+        _patch_contingencia(monkeypatch, resultado={
+            "ok": True, "publicacoes": publicacoes, "report_id": 13432,
+            "total": 1, "processos": 1,
+            "data_inicio": "29/07/2026", "data_fim": "30/07/2026",
+        })
+
+        chamadas = []
+
+        def _stub(self, **kw):
+            chamadas.append(kw)
+            # A 1a passada (sem prefetched) falha; a da contingencia funciona.
+            if kw.get("prefetched_publications") is None:
+                raise RuntimeError("L1 502")
+            return {"total_new": 5}
+
+        monkeypatch.setattr(
+            "app.services.publication_search_service.PublicationSearchService.create_and_run_search",
+            _stub,
+        )
+
+        svc = ScheduledAutomationService(db)
+        r = svc._execute_pull_publications(
+            office_ids=office_ids, automation_id=None, run_id=None,
+        )
+
+        # 3 tentativas diretas + 3 pela contingencia
+        assert len(chamadas) == 6
+        assert sum(1 for c in chamadas if c.get("prefetched_publications")) == 3
+        assert r["offices_failed"] == []
+        assert sorted(r["offices_ok"]) == sorted(office_ids)
+        assert r["records_found"] == 15
+        # Nada foi perdido: alerta de FALHA nao vai; o de contingencia vai.
+        assert falhas == []
+        assert len(contingencias) == 1
+        assert contingencias[0]["report_id"] == 13432
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_legado_avisa_UMA_vez_quando_nem_a_contingencia_resolve(monkeypatch):
+    """O buraco de 30/07: 13 escritorios caidos e ninguem avisado.
+
+    Agora avisa — e UMA vez por rodada, nao uma por escritorio.
+    """
+    _patch_l1_client_init(monkeypatch)
+    _legado(monkeypatch)
+    falhas, contingencias = _patch_alertas(monkeypatch)
+    engine, db = _make_session()
+    try:
+        office_ids = _seed_offices(db, n=13)
+        _patch_contingencia(monkeypatch, resultado={"ok": False, "motivo": "relatorio_nao_criado"})
+
+        def _stub(self, **kw):
+            raise RuntimeError("L1 502")
+
+        monkeypatch.setattr(
+            "app.services.publication_search_service.PublicationSearchService.create_and_run_search",
+            _stub,
+        )
+
+        svc = ScheduledAutomationService(db)
+        r = svc._execute_pull_publications(
+            office_ids=office_ids, automation_id=None, run_id=None,
+        )
+
+        assert len(r["offices_failed"]) == 13
+        assert len(falhas) == 1, "um alerta por RODADA, nao 13"
+        assert len(falhas[0]["escritorios_falha"]) == 13
+        assert falhas[0]["escritorios_ok"] == []
+        assert "relatorio_nao_criado" in (falhas[0]["contingencia"] or "")
+        assert contingencias == []
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_legado_falha_parcial_avisa_com_os_dois_numeros(monkeypatch):
+    """Parte capturou: o alerta precisa dizer quantos de quantos."""
+    _patch_l1_client_init(monkeypatch)
+    _legado(monkeypatch)
+    falhas, _ = _patch_alertas(monkeypatch)
+    _patch_contingencia(monkeypatch, resultado={"ok": False, "motivo": "x"})
+    engine, db = _make_session()
+    try:
+        office_ids = _seed_offices(db, n=3)
+        vistos = []
+
+        def _stub(self, **kw):
+            vistos.append(kw)
+            if kw.get("prefetched_publications") is None and len(vistos) == 1:
+                raise RuntimeError("so o primeiro falha")
+            return {"total_new": 1}
+
+        monkeypatch.setattr(
+            "app.services.publication_search_service.PublicationSearchService.create_and_run_search",
+            _stub,
+        )
+
+        svc = ScheduledAutomationService(db)
+        r = svc._execute_pull_publications(
+            office_ids=office_ids, automation_id=None, run_id=None,
+        )
+
+        assert len(r["offices_failed"]) == 1
+        assert len(r["offices_ok"]) == 2
+        assert len(falhas) == 1
+        assert len(falhas[0]["escritorios_falha"]) == 1
+        assert len(falhas[0]["escritorios_ok"]) == 2
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_legado_rodada_sem_falha_nao_alerta_ninguem(monkeypatch):
+    """Alerta so quando ha o que alertar."""
+    _patch_l1_client_init(monkeypatch)
+    _legado(monkeypatch)
+    falhas, contingencias = _patch_alertas(monkeypatch)
+    chamou = _patch_contingencia(monkeypatch, resultado={"ok": True, "publicacoes": []})
+    engine, db = _make_session()
+    try:
+        office_ids = _seed_offices(db, n=3)
+        stub, calls = _stub_create_and_run_search(total_new_per_call=2)
+        monkeypatch.setattr(
+            "app.services.publication_search_service.PublicationSearchService.create_and_run_search",
+            stub,
+        )
+
+        svc = ScheduledAutomationService(db)
+        r = svc._execute_pull_publications(
+            office_ids=office_ids, automation_id=None, run_id=None,
+        )
+
+        assert r["offices_failed"] == []
+        assert falhas == [] and contingencias == []
+        assert chamou == [], "sem falha, nem toca no relatorio"
     finally:
         db.close()
         engine.dispose()
