@@ -1,6 +1,7 @@
 import { PropsWithChildren, useMemo, useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import {
+  Archive,
   Building2,
   CalendarClock,
   ChevronDown,
@@ -152,6 +153,12 @@ export default function Layout({ children }: PropsWithChildren) {
       title: "Classificador",
       items: [
         { to: "/classificador", icon: ScanSearch, label: "Diagnostico de Carteira", requirePermission: 'canUsePrazosIniciais' },
+      ],
+    },
+    {
+      title: "Encerramentos",
+      items: [
+        { to: "/encerramentos-legalone", icon: Archive, label: "Encerramentos no Legal One", requirePermission: 'isAdmin' },
       ],
     },
     {

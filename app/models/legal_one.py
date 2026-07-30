@@ -132,3 +132,26 @@ class SavedFilter(Base):
 
     # Relationships
     user = relationship("LegalOneUser", back_populates="saved_filters")
+
+
+class EncerramentoL1Intake(Base):
+    """Rastro de cada encerramento pedido pelo Sistema de Encerramentos.
+
+    Alimenta o menu "Encerramentos" da UI: o que foi encerrado no Legal One
+    via integracao, por quem e com qual desfecho (ok | ja_encerrado |
+    nao_encontrado | conflito | erro_l1)."""
+
+    __tablename__ = "encerramentos_l1_intake"
+
+    id = Column(Integer, primary_key=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    numero_cnj = Column(String(40), nullable=False, index=True)
+    lawsuit_id = Column(Integer, nullable=True)
+    status = Column(String(20), nullable=False, index=True)
+    data_encerramento = Column(String(10), nullable=True)
+    motivo_encerramento = Column(Text, nullable=True)
+    operador_nome = Column(String(200), nullable=True)
+    operador_email = Column(String(200), nullable=True)
+    justificativa = Column(Text, nullable=True)
+    origem = Column(String(50), nullable=True)
+    detalhe = Column(Text, nullable=True)

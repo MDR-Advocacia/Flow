@@ -979,6 +979,57 @@ class LegalOneApiClient:
         response = self._request_with_retry("GET", url, params=params)
         return response.json()
 
+    def close_lawsuit(
+        self,
+        lawsuit_id: int,
+        closing_date: str,
+        closing_reason: str,
+    ) -> Dict[str, Any]:
+        """
+        Encerra o processo no Legal One via API oficial.
+
+        Mapeamento confirmado na entidade Lawsuit (validado lendo um processo
+        encerrado manualmente pela UI):
+          closed=True          <-> IsEncerrado do form
+          closingDate          <-> DataEncerramento (ISO yyyy-mm-dd)
+          closingReason        <-> MotivoEncerramento (convencao MDR:
+                                   NOME COMPLETO - dd/mm/aaaa hh:mm)
+
+        Nao altera o responsavel da pasta nem os campos de resultado
+        (result/resultType/resultReason/datas) — estes seguem preenchidos
+        pela equipe no L1, como no fluxo manual.
+
+        Tenta /Lawsuits e cai pro /Litigations (mesmo padrao dos
+        Participants: o id pode pertencer a qualquer uma das entities).
+        Levanta HTTPError se o L1 recusar em ambas.
+        """
+        payload = {
+            "closed": True,
+            "closingDate": closing_date,
+            "closingReason": closing_reason,
+        }
+        last_error: Optional[Exception] = None
+        for base_entity in ("/Lawsuits", "/Litigations"):
+            url = f"{self.base_url}{base_entity}/{lawsuit_id}"
+            self.logger.info(
+                "Encerrando processo %s via PATCH %s (closingDate=%s).",
+                lawsuit_id, base_entity, closing_date,
+            )
+            try:
+                self._request_with_retry("PATCH", url, json=payload)
+                return {"lawsuit_id": lawsuit_id, "entity": base_entity, **payload}
+            except requests.exceptions.HTTPError as exc:
+                status_code = exc.response.status_code if exc.response is not None else 0
+                body = exc.response.text[:400] if exc.response is not None else ""
+                self.logger.warning(
+                    "PATCH %s/%s falhou (%s): %s",
+                    base_entity, lawsuit_id, status_code, body,
+                )
+                last_error = exc
+                if status_code != 404:
+                    break  # erro real (validacao/permissao): nao adianta trocar a entity
+        raise last_error  # type: ignore[misc]
+
     def get_lawsuit_responsible_user(self, lawsuit_id: int) -> Optional[Dict[str, Any]]:
         """
         Busca o responsável principal (participante com isResponsible=True)
