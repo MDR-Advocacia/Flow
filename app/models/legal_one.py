@@ -1,5 +1,5 @@
 from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, Text, DateTime, JSON
-from sqlalchemy.dialects.postgresql import JSONB
+from app.db.types import jsonb
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -88,8 +88,8 @@ class LegalOneUser(Base):
     # CACHE do resultado, escrito só por app/services/permissoes.py.
     cargo_id = Column(Integer, ForeignKey("flow_cargo.id", ondelete="SET NULL"),
                       nullable=True, index=True)
-    modulos_extra = Column(JSONB, nullable=True)
-    equipes_extra = Column(JSONB, nullable=True)
+    modulos_extra = Column(jsonb(), nullable=True)
+    equipes_extra = Column(jsonb(), nullable=True)
 
     # Relationships
     squad_members = relationship("SquadMember", back_populates="user")
@@ -106,10 +106,10 @@ class FlowCargo(Base):
     id = Column(Integer, primary_key=True)
     nome = Column(String(80), nullable=False, unique=True)
     descricao = Column(String(200), nullable=True)
-    modulos = Column(JSONB, nullable=False, server_default="{}")
+    modulos = Column(jsonb(), nullable=False, server_default="{}")
     # nenhuma | lista | todas | supervisionadas
     equipes_modo = Column(String(20), nullable=False, server_default="nenhuma")
-    equipes = Column(JSONB, nullable=False, server_default="[]")
+    equipes = Column(jsonb(), nullable=False, server_default="[]")
     ativo = Column(Boolean, nullable=False, server_default="true")
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 

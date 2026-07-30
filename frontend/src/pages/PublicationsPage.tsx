@@ -28,6 +28,7 @@ import {
   EyeOff,
   ExternalLink,
   FileDown,
+  FileSpreadsheet,
   Filter,
   Layers,
   Link2,
@@ -44,6 +45,7 @@ import {
   Settings,
   ThumbsDown,
   TrendingUp,
+  Upload,
   UserCircle2,
   XCircle,
 } from "lucide-react";
@@ -700,6 +702,13 @@ const SubtypePicker = ({ value, parentType, taskTypes, onChange }: SubtypePicker
 const PublicationsPage = () => {
   const { toast } = useToast();
 
+  // Importacao por planilha (fallback manual)
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importPreview, setImportPreview] = useState<any>(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+
   const [offices, setOffices] = useState<Office[]>([]);
   const [taskTypes, setTaskTypes] = useState<TaskType[]>([]);
   const [appUsers, setAppUsers] = useState<AppUser[]>([]);
@@ -1310,6 +1319,69 @@ const PublicationsPage = () => {
       setError(err.message);
     } finally {
       setIsSearching(false);
+    }
+  };
+
+  // ── Fallback manual: planilha exportada do Legal One ────────────────
+  //
+  // Terceira camada de captura, atras da API do L1 e do DJEN. Como nao
+  // depende de rede nenhuma, e o caminho que continua funcionando com tudo
+  // fora do ar. O arquivo passa por uma previa (backend so le e devolve o
+  // resumo) e so grava quando o operador confirma.
+
+  const handleImportFile = async (file: File | null) => {
+    setImportFile(file);
+    setImportPreview(null);
+    setImportError(null);
+    if (!file) return;
+    setImportBusy(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await apiFetch(`${API}/import-spreadsheet/preview`, {
+        method: "POST",
+        body: form,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Nao foi possivel ler a planilha");
+      setImportPreview(data);
+    } catch (err: any) {
+      setImportError(err.message);
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const handleImportConfirm = async () => {
+    if (!importFile) return;
+    setImportBusy(true);
+    setImportError(null);
+    try {
+      const form = new FormData();
+      form.append("file", importFile);
+      form.append("auto_classify", "true");
+      const res = await apiFetch(`${API}/import-spreadsheet`, {
+        method: "POST",
+        body: form,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Erro ao importar a planilha");
+      toast({
+        title: "Importacao iniciada",
+        description: data.message || "Acompanhe o progresso no historico de buscas.",
+      });
+      setImportOpen(false);
+      setImportFile(null);
+      setImportPreview(null);
+      // Mesmo escalonamento do disparo de busca: a importacao roda em
+      // background e vai preenchendo o historico.
+      [3000, 8000, 15000, 30000].forEach((delay) => {
+        setTimeout(() => { loadSearches(); loadStats(); }, delay);
+      });
+    } catch (err: any) {
+      setImportError(err.message);
+    } finally {
+      setImportBusy(false);
     }
   };
 
@@ -2687,6 +2759,163 @@ const PublicationsPage = () => {
         </SheetContent>
       </Sheet>
 
+      {/* Importacao por planilha — fallback manual de captura */}
+      <Dialog
+        open={importOpen}
+        onOpenChange={(open) => {
+          setImportOpen(open);
+          if (!open) { setImportFile(null); setImportPreview(null); setImportError(null); }
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FileSpreadsheet className="h-5 w-5" />
+              Importar publicacoes por planilha
+            </DialogTitle>
+            <DialogDescription>
+              Ultimo recurso de captura, para quando a busca automatica no Legal
+              One falha. Exporte as publicacoes na tela do Legal One e suba o
+              arquivo aqui.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <Alert>
+              <AlertCircle className="h-4 w-4" />
+              <AlertTitle>A planilha precisa da coluna "Id"</AlertTitle>
+              <AlertDescription className="text-xs">
+                E o identificador do processo no Legal One, e o que garante que a
+                publicacao entre na pasta certa. Sem ela a importacao e recusada.
+                Publicacoes que ja entraram pela busca automatica sao descartadas
+                como duplicata — pode subir sem medo de duplicar.
+              </AlertDescription>
+            </Alert>
+
+            <div className="grid gap-1.5">
+              <Label htmlFor="importFile">Arquivo (.xlsx)</Label>
+              <Input
+                id="importFile"
+                type="file"
+                accept=".xlsx,.xlsm"
+                disabled={importBusy}
+                onChange={(e) => handleImportFile(e.target.files?.[0] ?? null)}
+              />
+            </div>
+
+            {importBusy && !importPreview && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Conferindo a planilha...
+              </div>
+            )}
+
+            {importError && (
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertTitle>Nao deu para importar</AlertTitle>
+                <AlertDescription className="text-xs">{importError}</AlertDescription>
+              </Alert>
+            )}
+
+            {importPreview && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-4 gap-2">
+                  <div className="rounded-lg border p-2">
+                    <p className="text-xs text-muted-foreground">Publicacoes</p>
+                    <p className="text-xl font-bold text-emerald-600">
+                      {importPreview.total_validas}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border p-2">
+                    <p className="text-xs text-muted-foreground">Processos</p>
+                    <p className="text-xl font-bold">{importPreview.processos_distintos}</p>
+                  </div>
+                  <div className="rounded-lg border p-2">
+                    <p className="text-xs text-muted-foreground">Ignoradas</p>
+                    <p className="text-xl font-bold text-amber-600">
+                      {importPreview.total_ignoradas}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border p-2">
+                    <p className="text-xs text-muted-foreground">Periodo</p>
+                    <p className="text-xs font-medium mt-1">
+                      {importPreview.data_inicial}
+                      {importPreview.data_final !== importPreview.data_inicial
+                        ? " a " + importPreview.data_final : ""}
+                    </p>
+                  </div>
+                </div>
+
+                {importPreview.escritorios_nao_encontrados?.length > 0 && (
+                  <Alert>
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertTitle className="text-sm">
+                      Escritorio nao reconhecido ({importPreview.escritorios_nao_encontrados.length})
+                    </AlertTitle>
+                    <AlertDescription className="text-xs">
+                      As publicacoes entram assim mesmo — o processo ja esta
+                      identificado pelo Id e o Legal One preenche o escritorio
+                      depois. {importPreview.escritorios_nao_encontrados.join("; ")}
+                    </AlertDescription>
+                  </Alert>
+                )}
+
+                <div>
+                  <p className="text-xs font-medium mb-1">Por escritorio</p>
+                  <ScrollArea className="h-[120px] rounded-md border">
+                    <div className="p-2 space-y-1">
+                      {Object.entries(importPreview.por_escritorio || {}).map(
+                        ([nome, qtd]) => (
+                          <div key={nome} className="flex justify-between text-xs">
+                            <span className="truncate pr-2">{nome}</span>
+                            <span className="font-medium tabular-nums">{qtd as number}</span>
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  </ScrollArea>
+                </div>
+
+                {importPreview.ignoradas?.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium mb-1">
+                      Linhas ignoradas (primeiras {importPreview.ignoradas.length})
+                    </p>
+                    <ScrollArea className="h-[80px] rounded-md border">
+                      <div className="p-2 space-y-1">
+                        {importPreview.ignoradas.map((ig: any) => (
+                          <div key={ig.linha} className="text-xs text-muted-foreground">
+                            linha {ig.linha}: {ig.motivo}
+                          </div>
+                        ))}
+                      </div>
+                    </ScrollArea>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setImportOpen(false)} disabled={importBusy}>
+              Cancelar
+            </Button>
+            <Button
+              onClick={handleImportConfirm}
+              disabled={importBusy || !importPreview || !importPreview.total_validas}
+            >
+              {importBusy
+                ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                : <Upload className="mr-2 h-4 w-4" />}
+              {importPreview
+                ? "Importar " + importPreview.total_validas + " publicacoes"
+                : "Importar"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Search Panel */}
       <Card>
         <CardHeader>
@@ -2751,6 +2980,16 @@ const PublicationsPage = () => {
             <Button onClick={handleSearch} disabled={isSearching || !dateFrom} className="self-end">
               {isSearching ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Search className="mr-2 h-4 w-4" />}
               Buscar
+            </Button>
+            {/* Fallback manual: usado quando a API do L1 nao responde. */}
+            <Button
+              variant="outline"
+              onClick={() => setImportOpen(true)}
+              className="self-end"
+              title="Importar publicacoes de uma planilha exportada do Legal One"
+            >
+              <Upload className="mr-2 h-4 w-4" />
+              Importar planilha
             </Button>
           </div>
           {/* Painel de índice só faz sentido com 1 escritório. Pra

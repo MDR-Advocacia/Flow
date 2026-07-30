@@ -22,7 +22,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from app.db.types import jsonb
 from sqlalchemy.sql import func
 
 from app.db.session import Base
@@ -147,7 +147,7 @@ class PerfCancelJob(Base):
     cancelled = Column(Integer, nullable=False, server_default="0")
     preservadas = Column(Integer, nullable=False, server_default="0")  # já encerradas/canceladas
     falhas = Column(Integer, nullable=False, server_default="0")
-    erros = Column(JSONB, nullable=True)
+    erros = Column(jsonb(), nullable=True)
     iniciado_em = Column(DateTime(timezone=True), server_default=func.now())
     terminado_em = Column(DateTime(timezone=True), nullable=True)
 
@@ -184,7 +184,7 @@ class PerfCancelMassaLog(Base):
     cancelled = Column(Integer, nullable=False, server_default="0")
     preservadas = Column(Integer, nullable=False, server_default="0")
     falhas = Column(Integer, nullable=False, server_default="0")
-    detalhe = Column(JSONB, nullable=True)
+    detalhe = Column(jsonb(), nullable=True)
 
 
 class PerfRelatorio(Base):
@@ -227,7 +227,7 @@ class BalanceadorLog(Base):
     total_movimentos = Column(Integer, nullable=False, server_default="0")
     total_tarefas = Column(Integer, nullable=False, server_default="0")
     origem = Column(String, nullable=False, server_default="mock")
-    detalhe = Column(JSONB, nullable=True)  # lista de movimentos (from/to/subtipo/qtd/tasks)
+    detalhe = Column(jsonb(), nullable=True)  # lista de movimentos (from/to/subtipo/qtd/tasks)
     criado_em = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -278,7 +278,7 @@ class BalanceadorReatribuirJob(Base):
     reatribuidas = Column(Integer, nullable=False, server_default="0")
     workflow_bloqueadas = Column(Integer, nullable=False, server_default="0")
     falhas = Column(Integer, nullable=False, server_default="0")
-    detalhe = Column(JSONB, nullable=True)  # lista por tarefa: {task_id, to_id, to_nome, reason, http}
+    detalhe = Column(jsonb(), nullable=True)  # lista por tarefa: {task_id, to_id, to_nome, reason, http}
     criado_por_id = Column(Integer, nullable=True)
     criado_por_nome = Column(String, nullable=True)
     iniciado_em = Column(DateTime(timezone=True), server_default=func.now())
