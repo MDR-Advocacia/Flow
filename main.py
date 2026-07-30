@@ -28,6 +28,7 @@ from app.api.v1.endpoints import (
     distribuidos_bb,
     ged_legalone,
     offices,
+    encerramentos,
     onerequest,
     performance,
     prazos_iniciais,
@@ -497,6 +498,9 @@ app.include_router(prazos_iniciais.intake_router, prefix="/api/v1")
 # Intake do OneRequest (motor RPA externo): auth via header
 # X-Onerequest-Api-Key, SEM JWT. Recebe números/detalhes das DMIs do BB.
 app.include_router(onerequest.intake_router, prefix="/api/v1")
+# Intake do Sistema de Encerramentos: auth via header X-Encerramentos-Api-Key,
+# SEM JWT. Encerra o processo no Legal One quando encerrado la.
+app.include_router(encerramentos.intake_router, prefix="/api/v1")
 # UI do operador OneRequest (tratamento + agendar): JWT + permissão onerequest.
 app.include_router(
     onerequest.router, prefix="/api/v1", tags=["OneRequest"], dependencies=protected_dependencies
