@@ -117,6 +117,22 @@ class Settings(BaseSettings):
     # se voltar a falhar, setar False no Coolify pra rollback rápido.
     publication_scheduler_batch_mode: bool = True
 
+    # Contingência de captura: se a busca pela API do L1 falhar, manda o
+    # próprio L1 GERAR o relatório de publicações e importa o arquivo. Cobre o
+    # caso em que a API cai mas o site segue de pé (foi o de 30/07/2026).
+    #
+    # Ligado por padrão: se dependesse de variável setada à mão, o esquecimento
+    # só apareceria na madrugada em que a contingência fosse necessária.
+    #
+    # ATENÇÃO em teste: isso aciona o SITE do Legal One e gera um relatório de
+    # verdade. Teste que simula queda do L1 PRECISA mockar
+    # `capturar_publicacoes` — senão a suíte fica lenta e passa a depender do L1
+    # estar no ar pra passar (a suíte gerou o relatório #13435 assim).
+    publication_report_fallback_enabled: bool = True
+    # Janela D-1 → D0 por data de CADASTRO do andamento (mesma semântica do
+    # /Updates: pega o que entrou no L1, não o que foi publicado).
+    publication_report_fallback_dias_atras: int = 1
+
     # Classifier Engine
     anthropic_api_key: str | None = None
     classifier_model: str = "claude-haiku-4-5-20251001"

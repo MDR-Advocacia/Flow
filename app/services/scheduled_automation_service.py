@@ -687,30 +687,82 @@ class ScheduledAutomationService:
                     len(publications), union_from, union_to, total_active,
                 )
             except Exception as exc:  # noqa: BLE001
-                # L1 caiu — todos os offices ativos viram FALHA nesta rodada.
-                # Logamos UMA stack trace; cada office só recebe o resumo.
+                # A API do L1 caiu. Antes de dar a rodada por perdida, tenta a
+                # CONTINGÊNCIA: mandar o próprio L1 gerar o relatório de
+                # publicações e importar o arquivo.
+                #
+                # Cobre o modo de falha real de 30/07/2026, em que o /Updates
+                # respondia 502 mas o site do L1 estava no ar — as 13 buscas do
+                # dia morreram e a captura só voltou porque o operador extraiu o
+                # relatório na mão.
                 logger.exception(
-                    "Falha no fetch L1 batch: marcando %s escritórios como falha.",
-                    total_active,
+                    "Falha no fetch L1 batch (%s escritórios ativos).", total_active,
                 )
                 err_msg = f"L1 batch fetch failed: {exc}"
-                for office_id, df, dt in active:
-                    self._record_attempt_failure(office_id, df, dt, err_msg, automation_id)
-                    failed.append(office_id)
-                if run_id is not None:
-                    self._update_progress(
-                        run_id,
-                        phase="pull_publications",
-                        current=total_active,
-                        total=total_active,
-                        message=f"Falha L1 fetch — {total_active} escritórios marcados como falha",
-                    )
-                return {
-                    "records_found": 0,
-                    "offices_ok": ok,
-                    "offices_failed": failed,
-                    "offices_skipped": skipped,
-                }
+
+                publications = None
+                if _settings.publication_report_fallback_enabled:
+                    if run_id is not None:
+                        self._update_progress(
+                            run_id,
+                            phase="pull_publications",
+                            current=0,
+                            total=total_active,
+                            message="API do L1 falhou — gerando relatório de contingência...",
+                        )
+                    try:
+                        from app.services.publication_l1_report_fallback import (
+                            capturar_publicacoes,
+                        )
+
+                        conting = capturar_publicacoes(
+                            self.db,
+                            dias_atras=_settings.publication_report_fallback_dias_atras,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Contingência por relatório falhou.")
+                        conting = {"ok": False, "motivo": "excecao"}
+
+                    if conting.get("ok"):
+                        publications = conting["publicacoes"]
+                        logger.warning(
+                            "CONTINGÊNCIA ATIVA: a API do L1 falhou e a captura "
+                            "veio do relatório #%s (%s publicações de %s processos, "
+                            "janela %s a %s).",
+                            conting.get("report_id"), conting.get("total"),
+                            conting.get("processos"), conting.get("data_inicio"),
+                            conting.get("data_fim"),
+                        )
+                        err_msg = None
+                    else:
+                        logger.error(
+                            "Contingência por relatório não resolveu (%s). "
+                            "A rodada segue como falha.",
+                            conting.get("motivo"),
+                        )
+                        err_msg = (
+                            f"{err_msg} | contingencia: {conting.get('motivo')}"
+                        )
+
+                if publications is None:
+                    # Nem a API nem a contingência trouxeram nada.
+                    for office_id, df, dt in active:
+                        self._record_attempt_failure(office_id, df, dt, err_msg, automation_id)
+                        failed.append(office_id)
+                    if run_id is not None:
+                        self._update_progress(
+                            run_id,
+                            phase="pull_publications",
+                            current=total_active,
+                            total=total_active,
+                            message=f"Falha L1 fetch — {total_active} escritórios marcados como falha",
+                        )
+                    return {
+                        "records_found": 0,
+                        "offices_ok": ok,
+                        "offices_failed": failed,
+                        "offices_skipped": skipped,
+                    }
 
             # Fan-out: cada office processa o subset que é dele.
             for idx, (office_id, date_from, date_to) in enumerate(active, start=1):

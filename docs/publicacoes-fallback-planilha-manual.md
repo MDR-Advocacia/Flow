@@ -12,8 +12,57 @@ manual:
 2. **DJEN/Comunica** — contingência automática (trabalho do Codex, parado em
    `feat/djen-fallback-codex`, ainda **não** na main). Depende de proxy
    brasileiro: `DJEN_PROXY=socks5h://206.42.43.192:45123`, o mesmo do Lake.
-3. **Planilha do L1 (este documento)** — o operador exporta as publicações na
-   tela do Legal One e sobe o arquivo no módulo de Publicações.
+3. **Planilha do L1 (este documento)** — em duas formas:
+   - **automática** (`publication_l1_report_fallback.py`): quando a busca
+     agendada falha, o Flow manda o próprio L1 gerar o relatório e importa
+     sozinho. É o caminho normal — o operador não faz nada;
+   - **manual**: o operador exporta na tela do Legal One e sobe o arquivo.
+     Continua existindo para quando nem isso funcionar.
+
+## A contingência automática
+
+Acionada no ponto exato em que a rodada agendada dava tudo por perdido
+(`scheduled_automation_service._execute_pull_publications`, no `except` do fetch
+batch). Antes: todos os escritórios viravam falha. Agora: tenta o relatório e,
+se vier, o fan-out segue normal — cada escritório processa o subset dele, como
+se a API tivesse respondido.
+
+Fluxo, levantado do HAR de uma geração real:
+
+```
+GET  /processos/GenericReport/?id=789        abre o modelo salvo
+POST /processos/GenericReport                dispara (302) e cria o relatório
+POST /shared/ReportShared/DocumentIsLoaded   polling: 7=buscando, 8=gerando, 1=PRONTO
+GET  /shared/ReportShared/GetFile/{id}       302 → blob assinado → .xlsx
+```
+
+Janela sempre **D-1 → D0**, por data de **cadastro do andamento** — mesma
+semântica do `/Updates`: pega o que ENTROU no L1 na janela, não o que foi
+publicado. Por isso uma janela de 2 dias traz publicação de mais de um mês
+atrás, e é assim que tem que ser: publicação que o tribunal solta com atraso
+não pode se perder.
+
+**Por que o corpo do POST é um arquivo versionado** (`data/publicacoes_report_form.txt`)
+e não montado lendo a página: dos 917 campos, **144 não existem no HTML** — são
+injetados por JavaScript no submit, e entre eles estão os filtros e as 120
+entradas de `Columns[...]`, **inclusive a coluna `Id`**. Remontar isso na mão
+quebraria em produção, de madrugada, provavelmente em silêncio — gerando um
+relatório sem a coluna que identifica o processo.
+
+O guarda contra isso é o próprio importador: relatório sem `Id` é recusado com
+motivo e a contingência devolve `ok=False`. Melhor não capturar do que capturar
+na pasta errada.
+
+Chave de desligamento: `PUBLICATION_REPORT_FALLBACK_ENABLED` (default `true`).
+
+**Teste que simula queda do L1 PRECISA mockar `capturar_publicacoes`** — senão a
+suíte vai no site do Legal One e gera relatório de verdade (foi assim que saiu o
+relatório #13435 em 30/07/2026). O helper `_patch_contingencia` em
+`tests/services/test_scheduled_pull_publications_batch.py` existe pra isso.
+
+Validado contra o L1 real em 30/07/2026: relatório #13432 gerado em **16
+segundos**, arquivo idêntico ao que o operador extraiu à mão — 1.238 linhas,
+1.238 válidas, 0 ignoradas, todos os escritórios reconhecidos.
 
 A camada 3 é a única que **não depende de rede nenhuma** — nem da API do L1,
 nem do CNJ, nem de proxy. É o caminho que continua funcionando com tudo fora
