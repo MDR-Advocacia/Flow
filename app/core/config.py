@@ -304,6 +304,12 @@ class Settings(BaseSettings):
     # (rotação sem downtime). Vazio = endpoint de intake desativado.
     onerequest_intake_api_key: str | None = None
 
+    # ── Intake Encerramentos (Sistema de Encerramentos MDR) ───────────
+    # Chave(s) que autenticam o Sistema de Encerramentos no endpoint
+    # /api/v1/legalone/encerramento (encerrar processo no Legal One).
+    # Aceita múltiplas separadas por vírgula. Vazio = endpoint desativado.
+    encerramentos_intake_api_key: str | None = None
+
     # ── OneRequest: alerta "vence hoje" via Teams (Microsoft Graph) ────
     # Liga o botão "Enviar no Teams". A DM sai NO NOME da operadora logada,
     # via Graph delegado (MSAL no front + token repassado ao backend). Default
@@ -550,6 +556,12 @@ class Settings(BaseSettings):
     def onerequest_intake_api_keys(self) -> set[str]:
         """Chaves válidas pro intake do OneRequest (motor RPA externo, rotação)."""
         raw = self.onerequest_intake_api_key or ""
+        return {key.strip() for key in raw.split(",") if key.strip()}
+
+    @property
+    def encerramentos_intake_api_keys(self) -> set[str]:
+        """Chaves válidas pro intake do Sistema de Encerramentos (rotação)."""
+        raw = self.encerramentos_intake_api_key or ""
         return {key.strip() for key in raw.split(",") if key.strip()}
 
 
