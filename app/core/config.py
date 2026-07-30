@@ -132,10 +132,15 @@ class Settings(BaseSettings):
     # Janela D-1 → D0 por data de CADASTRO do andamento (mesma semântica do
     # /Updates: pega o que entrou no L1, não o que foi publicado).
     publication_report_fallback_dias_atras: int = 1
-    # Destinatários do alerta da captura (vírgula separa). Sem isso, cai no
+    # Destinatários do alerta da captura (vírgula separa). Sem valor, cai no
     # EMAIL_TO. Em 30/07/2026 a rodada falhou nos 13 escritórios e ninguém foi
     # avisado — a captura simplesmente nunca chamava alerta.
-    publication_alert_email: str | None = None
+    #
+    # Vai com o MESMO default no código dos outros alertas da casa
+    # (classificacao_alert_email, distribuidos_bb_alert_email): alerta que só
+    # funciona depois de alguém lembrar de setar variável é alerta que não
+    # existe. Sobrescrevível por PUBLICATION_ALERT_EMAIL no Coolify.
+    publication_alert_email: str | None = "ti@mdradvocacia.com,jonilsonvilela@mdradvocacia.com"
 
     # Classifier Engine
     anthropic_api_key: str | None = None
