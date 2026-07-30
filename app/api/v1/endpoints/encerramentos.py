@@ -92,6 +92,29 @@ class EncerramentoPayload(BaseModel):
     justificativa: Optional[str] = None
 
 
+def _campos_faltando(body: str) -> str:
+    """Extrai os nomes de campo do erro de validação do L1, em formato legível.
+
+    O L1 devolve o nome interno do custom field
+    (ex.: `numeroDoCliente_ProcessoEntitySchema_p3687_o`); aqui fica só a
+    parte útil pra operação saber o que preencher no cadastro.
+    """
+    import json as _json
+    import re as _re
+
+    try:
+        detalhes = _json.loads(body).get("error", {}).get("details", [])
+    except Exception:
+        return ""
+    nomes = []
+    for d in detalhes:
+        alvo = str(d.get("target") or "").split("_")[0]
+        if alvo:
+            # camelCase -> "Camel Case"
+            nomes.append(_re.sub(r"(?<!^)(?=[A-Z])", " ", alvo).strip().capitalize())
+    return ", ".join(dict.fromkeys(nomes))
+
+
 def _registrar(
     db: Session,
     payload: EncerramentoPayload,
@@ -181,8 +204,24 @@ def encerrar_processo_legalone(
             closing_reason=payload.motivo_encerramento,
         )
     except requests.exceptions.HTTPError as exc:
-        body = exc.response.text[:300] if exc.response is not None else str(exc)
+        body = exc.response.text[:600] if exc.response is not None else str(exc)
+        codigo = exc.response.status_code if exc.response is not None else 0
         logger.error("L1 recusou o encerramento do lawsuit %s: %s", lawsuit_id, body)
+
+        # Validação do L1 (400) = pendência de CADASTRO no processo, não falha
+        # transitória: repetir dá o mesmo erro. Devolve 409 pra origem marcar
+        # DIVERGENTE (ação humana) em vez de ERRO com retry em loop.
+        # Caso típico: campos customizados obrigatórios vazios no L1
+        # (ex.: "numeroDoCliente" / NPJ e "dataDeTerceirizacaoRecebimento").
+        if codigo == 400:
+            faltando = _campos_faltando(body)
+            detalhe = (
+                "Legal One recusou por validação de cadastro"
+                + (f" — campo(s) obrigatório(s) sem preenchimento no L1: {faltando}." if faltando else f": {body}")
+            )
+            _registrar(db, payload, "conflito", lawsuit_id, detalhe)
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detalhe) from exc
+
         _registrar(db, payload, "erro_l1", lawsuit_id, body)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
