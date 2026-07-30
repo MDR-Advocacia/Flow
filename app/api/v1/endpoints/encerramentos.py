@@ -31,7 +31,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.core.auth import get_current_user
+from app.core.auth import require_permission
 from app.core.config import settings
 from app.core.dependencies import get_api_client, get_db
 from app.models.legal_one import EncerramentoL1Intake, LegalOneUser
@@ -246,17 +246,12 @@ def listar_encerramentos(
     status_filtro: Optional[str] = Query(default=None, alias="status"),
     q: Optional[str] = Query(default=None, description="Busca por CNJ ou operador"),
     db: Session = Depends(get_db),
-    current_user: LegalOneUser = Depends(get_current_user),
+    current_user: LegalOneUser = Depends(require_permission("encerramentos")),
 ):
     """Listagem paginada (regra da casa) do rastro de encerramentos.
 
-    Restrito a admin — visão de gestão do que a integração está fazendo."""
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Apenas administradores podem ver os encerramentos.",
-        )
-
+    Acesso pela permissão de módulo `can_use_encerramentos` (admins bypassam),
+    no mesmo padrão de Publicações / Prazos Iniciais / OneRequest."""
     query = db.query(EncerramentoL1Intake)
     if status_filtro:
         query = query.filter(EncerramentoL1Intake.status == status_filtro)

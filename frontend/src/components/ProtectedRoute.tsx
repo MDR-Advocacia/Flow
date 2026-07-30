@@ -16,6 +16,7 @@ const ProtectedRoute = () => {
     canUsePublications,
     canUsePrazosIniciais,
     canUseOnerequest,
+    canUseEncerramentos,
     isAdmin,
   } = useAuth();
   const { pathname } = useLocation();
@@ -60,6 +61,13 @@ const ProtectedRoute = () => {
           variant: 'destructive',
         });
         setPermissionDenied(true);
+      } else if (pathname.startsWith('/encerramentos-legalone') && !canUseEncerramentos && !isAdmin) {
+        toast({
+          title: 'Acesso Negado',
+          description: 'Você não tem permissão para acessar o módulo Encerramentos.',
+          variant: 'destructive',
+        });
+        setPermissionDenied(true);
       } else if (pathname.startsWith('/admin') && !isAdmin) {
         toast({
           title: 'Acesso Negado',
@@ -71,7 +79,7 @@ const ProtectedRoute = () => {
         setPermissionDenied(false);
       }
     }
-  }, [pathname, isLoading, isAuthenticated, canScheduleBatch, canUsePublications, canUsePrazosIniciais, canUseOnerequest, isAdmin, toast]);
+  }, [pathname, isLoading, isAuthenticated, canScheduleBatch, canUsePublications, canUsePrazosIniciais, canUseOnerequest, canUseEncerramentos, isAdmin, toast]);
 
   // Se ainda estivermos verificando a autenticação (ex: ao recarregar a página),
   // mostramos um indicador de carregamento.
@@ -92,7 +100,8 @@ const ProtectedRoute = () => {
     !canScheduleBatch &&
     !canUsePublications &&
     !canUsePrazosIniciais &&
-    !canUseOnerequest
+    !canUseOnerequest &&
+    !canUseEncerramentos
   ) {
     return <WelcomeScreen />;
   }

@@ -429,6 +429,7 @@ class UserUpdateRequest(BaseModel):
     can_use_publications: Optional[bool] = None
     can_use_prazos_iniciais: Optional[bool] = None
     can_use_onerequest: Optional[bool] = None
+    can_use_encerramentos: Optional[bool] = None
     notify_onerequest_errors: Optional[bool] = None
     can_use_minha_equipe: Optional[bool] = None
     minha_equipe_equipes: Optional[list] = None
@@ -445,6 +446,7 @@ class UserResponseSchema(BaseModel):
     can_use_publications: bool
     can_use_prazos_iniciais: bool = False
     can_use_onerequest: bool = False
+    can_use_encerramentos: bool = False
     notify_onerequest_errors: bool = False
     default_office_id: Optional[int] = None
 
@@ -483,6 +485,7 @@ def list_users(
             "can_use_publications": u.can_use_publications,
             "can_use_prazos_iniciais": getattr(u, "can_use_prazos_iniciais", False),
             "can_use_onerequest": getattr(u, "can_use_onerequest", False),
+            "can_use_encerramentos": getattr(u, "can_use_encerramentos", False),
             "can_use_minha_equipe": getattr(u, "can_use_minha_equipe", False),
             "minha_equipe_equipes": _equipes_to_list(u),
             "can_manage_distribuidos_bb": getattr(u, "can_manage_distribuidos_bb", False),
@@ -531,6 +534,7 @@ def update_user(
         "can_use_publications": payload.can_use_publications,
         "can_use_prazos_iniciais": payload.can_use_prazos_iniciais,
         "can_use_onerequest": payload.can_use_onerequest,
+        "can_use_encerramentos": payload.can_use_encerramentos,
         "can_use_minha_equipe": payload.can_use_minha_equipe,
         "can_manage_distribuidos_bb": payload.can_manage_distribuidos_bb,
         "notify_onerequest_errors": payload.notify_onerequest_errors,
@@ -554,6 +558,7 @@ def update_user(
         "can_use_publications": user.can_use_publications,
         "can_use_prazos_iniciais": getattr(user, "can_use_prazos_iniciais", False),
         "can_use_onerequest": getattr(user, "can_use_onerequest", False),
+        "can_use_encerramentos": getattr(user, "can_use_encerramentos", False),
         "can_use_minha_equipe": getattr(user, "can_use_minha_equipe", False),
         "minha_equipe_equipes": _equipes_to_list(user),
         "can_manage_distribuidos_bb": getattr(user, "can_manage_distribuidos_bb", False),
@@ -1100,6 +1105,7 @@ class MeResponseSchema(BaseModel):
     can_use_publications: bool
     can_use_prazos_iniciais: bool = False
     can_use_onerequest: bool = False
+    can_use_encerramentos: bool = False
     can_use_minha_equipe: bool = False
     minha_equipe_equipes: list = []
     can_manage_distribuidos_bb: bool = False
@@ -1125,6 +1131,7 @@ def get_current_user_info(
         "can_use_publications": current_user.can_use_publications,
         "can_use_prazos_iniciais": getattr(current_user, "can_use_prazos_iniciais", False),
         "can_use_onerequest": getattr(current_user, "can_use_onerequest", False),
+        "can_use_encerramentos": getattr(current_user, "can_use_encerramentos", False),
         "can_use_minha_equipe": getattr(current_user, "can_use_minha_equipe", False),
         "minha_equipe_equipes": _equipes_to_list(current_user),
         "can_manage_distribuidos_bb": getattr(current_user, "can_manage_distribuidos_bb", False),

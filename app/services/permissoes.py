@@ -39,6 +39,7 @@ MODULOS: list[dict] = [
     {"key": "can_use_publications", "label": "Publicações", "abbr": "Pub"},
     {"key": "can_use_prazos_iniciais", "label": "Prazos Processuais", "abbr": "PI"},
     {"key": "can_use_onerequest", "label": "OneRequest", "abbr": "OR"},
+    {"key": "can_use_encerramentos", "label": "Encerramentos", "abbr": "Enc"},
     {"key": "can_use_minha_equipe", "label": "Minha Equipe", "abbr": "ME"},
     {"key": "can_manage_distribuidos_bb", "label": "Cadastro de Processo", "abbr": "CP"},
     {"key": "notify_onerequest_errors", "label": "Notificação OneRequest", "abbr": "Notif"},

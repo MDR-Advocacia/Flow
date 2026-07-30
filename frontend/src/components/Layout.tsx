@@ -41,7 +41,7 @@ import {
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "./ui/sheet";
 import { DunaFlowMark } from "./DunaFlowMark";
 
-type Permission = 'canScheduleBatch' | 'canUsePublications' | 'canUsePrazosIniciais' | 'canUseOnerequest' | 'canUseMinhaEquipe' | 'canManageDistribuidosBB' | 'isAdmin';
+type Permission = 'canScheduleBatch' | 'canUsePublications' | 'canUsePrazosIniciais' | 'canUseOnerequest' | 'canUseEncerramentos' | 'canUseMinhaEquipe' | 'canManageDistribuidosBB' | 'isAdmin';
 
 interface NavItem {
   to: string;
@@ -70,6 +70,7 @@ export default function Layout({ children }: PropsWithChildren) {
     canUsePublications,
     canUsePrazosIniciais,
     canUseOnerequest,
+    canUseEncerramentos,
     canUseMinhaEquipe,
     minhaEquipeEquipes,
     canManageDistribuidosBB,
@@ -108,6 +109,7 @@ export default function Layout({ children }: PropsWithChildren) {
     // Admin vê o item mesmo sem a flag explícita (bypass alinhado com o backend).
     if (perm === 'canUsePrazosIniciais') return canUsePrazosIniciais || isAdmin;
     if (perm === 'canUseOnerequest') return canUseOnerequest || isAdmin;
+    if (perm === 'canUseEncerramentos') return canUseEncerramentos || isAdmin;
     if (perm === 'canUseMinhaEquipe') return canUseMinhaEquipe || isAdmin;
     if (perm === 'canManageDistribuidosBB') return canManageDistribuidosBB || isAdmin;
     if (perm === 'isAdmin') return isAdmin;
@@ -158,7 +160,7 @@ export default function Layout({ children }: PropsWithChildren) {
     {
       title: "Encerramentos",
       items: [
-        { to: "/encerramentos-legalone", icon: Archive, label: "Encerramentos no Legal One", requirePermission: 'isAdmin' },
+        { to: "/encerramentos-legalone", icon: Archive, label: "Encerramentos no Legal One", requirePermission: 'canUseEncerramentos' },
       ],
     },
     {
@@ -203,7 +205,7 @@ export default function Layout({ children }: PropsWithChildren) {
       .filter((sec) => (sec.subgroups ? sec.subgroups.length > 0 : (sec.items?.length ?? 0) > 0));
     // `teams` entra nas deps: o catálogo chega DEPOIS do primeiro paint (fetch)
     // e sem isto o menu ficaria congelado no fallback embutido.
-  }, [canScheduleBatch, canUsePublications, canUsePrazosIniciais, canUseOnerequest, canUseMinhaEquipe, minhaEquipeEquipes, isAdmin, teams]);
+  }, [canScheduleBatch, canUsePublications, canUsePrazosIniciais, canUseOnerequest, canUseEncerramentos, canUseMinhaEquipe, minhaEquipeEquipes, isAdmin, teams]);
 
   const handleLogout = () => {
     logout();
