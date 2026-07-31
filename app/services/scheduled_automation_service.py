@@ -701,7 +701,7 @@ class ScheduledAutomationService:
                 err_msg = f"L1 batch fetch failed: {exc}"
 
                 publications = None
-                if _settings.publication_report_fallback_enabled:
+                if True:  # o encadeamento decide quais camadas estão ligadas
                     if run_id is not None:
                         self._update_progress(
                             run_id,
@@ -710,18 +710,7 @@ class ScheduledAutomationService:
                             total=total_active,
                             message="API do L1 falhou — gerando relatório de contingência...",
                         )
-                    try:
-                        from app.services.publication_l1_report_fallback import (
-                            capturar_publicacoes,
-                        )
-
-                        conting = capturar_publicacoes(
-                            self.db,
-                            dias_atras=_settings.publication_report_fallback_dias_atras,
-                        )
-                    except Exception:  # noqa: BLE001
-                        logger.exception("Contingência por relatório falhou.")
-                        conting = {"ok": False, "motivo": "excecao"}
+                    conting = self._contingencia(failed_count=total_active)
 
                     if conting.get("ok"):
                         publications = conting["publicacoes"]
@@ -877,20 +866,9 @@ class ScheduledAutomationService:
         # falha de madrugada. Enganchar só no batch deixaria a rede de proteção
         # instalada no corredor errado.
         contingencia_txt = None
-        if failed and _settings.publication_report_fallback_enabled:
+        if failed:
             janela_l = {o: (df, dt) for o, df, dt in active}
-            try:
-                from app.services.publication_l1_report_fallback import (
-                    capturar_publicacoes,
-                )
-
-                conting = capturar_publicacoes(
-                    self.db,
-                    dias_atras=_settings.publication_report_fallback_dias_atras,
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception("Contingência por relatório falhou (modo legado).")
-                conting = {"ok": False, "motivo": "excecao"}
+            conting = self._contingencia(failed_count=len(failed))
 
             if conting.get("ok"):
                 publicacoes = conting["publicacoes"]
@@ -920,12 +898,12 @@ class ScheduledAutomationService:
                     failed.remove(office_id)
                     ok.append(office_id)
                 contingencia_txt = (
-                    f"relatório #{conting.get('report_id')} recuperou "
-                    f"{len(recuperados)} de {len(recuperados) + len(failed)} escritório(s)"
+                    f"{conting.get('origem')} recuperou {len(recuperados)} de "
+                    f"{len(recuperados) + len(failed)} escritório(s)"
                 )
                 logger.warning(
-                    "CONTINGÊNCIA ATIVA (legado): %s escritório(s) recuperados pelo "
-                    "relatório #%s.", len(recuperados), conting.get("report_id"),
+                    "CONTINGÊNCIA ATIVA (legado, %s): %s escritório(s) recuperados.",
+                    conting.get("origem"), len(recuperados),
                 )
                 if not failed:
                     self._alertar_contingencia(conting, "API do L1 falhou por escritório")
@@ -946,6 +924,61 @@ class ScheduledAutomationService:
             "offices_failed": failed,
             "offices_skipped": skipped,
         }
+
+    # ── Contingências da captura, em ordem ────────────────────────────
+
+    def _contingencia(self, *, failed_count: int) -> dict:
+        """Tenta as contingências na ordem, e para na primeira que resolver.
+
+            1. Relatório gerado no L1 Web  — cobre "API fora, site de pé", que
+               é o modo de falha mais comum (foi o de 30 e 31/07/2026);
+            2. DJEN/Comunica               — última rede, não depende do L1
+               para buscar. Fica desligada por padrão (contingência oculta).
+
+        Devolve o mesmo formato das duas, mais `origem`, pra quem chama tratar
+        as camadas do mesmo jeito.
+        """
+        from app.core.config import settings as _s
+
+        motivos: list[str] = []
+
+        if _s.publication_report_fallback_enabled:
+            try:
+                from app.services.publication_l1_report_fallback import (
+                    capturar_publicacoes as _por_relatorio,
+                )
+
+                r = _por_relatorio(
+                    self.db, dias_atras=_s.publication_report_fallback_dias_atras,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Contingência por relatório falhou.")
+                r = {"ok": False, "motivo": "excecao"}
+            if r.get("ok"):
+                return {**r, "origem": f"relatório #{r.get('report_id')}"}
+            motivos.append(f"relatorio={r.get('motivo')}")
+
+        if _s.djen_enabled:
+            logger.warning(
+                "Relatório não resolveu (%s escritórios em falha) — caindo pro DJEN.",
+                failed_count,
+            )
+            try:
+                from app.services.djen_publication_fallback import (
+                    capturar_publicacoes as _por_djen,
+                )
+
+                d = _por_djen(
+                    self.db, dias_atras=_s.publication_report_fallback_dias_atras,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Contingência pelo DJEN falhou.")
+                d = {"ok": False, "motivo": "excecao"}
+            if d.get("ok"):
+                return {**d, "origem": "DJEN", "report_id": None}
+            motivos.append(f"djen={d.get('motivo')}")
+
+        return {"ok": False, "motivo": " · ".join(motivos) or "nenhuma_camada_ligada"}
 
     # ── Alertas da captura ────────────────────────────────────────────
     # Best-effort: e-mail que falha não pode derrubar a rodada.
