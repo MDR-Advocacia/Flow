@@ -57,6 +57,7 @@ def create_access_token(
     can_use_publications: bool = True,
     can_use_prazos_iniciais: bool = False,
     can_use_onerequest: bool = False,
+    can_use_encerramentos: bool = False,
     can_manage_distribuidos_bb: bool = False,
     must_change_password: bool = False,
     expires_delta: Optional[timedelta] = None
@@ -72,6 +73,7 @@ def create_access_token(
         "can_use_publications": can_use_publications,
         "can_use_prazos_iniciais": can_use_prazos_iniciais,
         "can_use_onerequest": can_use_onerequest,
+        "can_use_encerramentos": can_use_encerramentos,
         "can_manage_distribuidos_bb": can_manage_distribuidos_bb,
         "must_change_password": must_change_password,
     })
@@ -107,7 +109,7 @@ def get_current_user(
 def require_permission(
     permission: Literal[
         "schedule_batch", "publications", "prazos_iniciais", "onerequest",
-        "manage_distribuidos_bb",
+        "manage_distribuidos_bb", "encerramentos",
     ],
 ):
     """
@@ -141,6 +143,12 @@ def require_permission(
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Usuário não tem permissão para usar o OneRequest.",
+                )
+        elif permission == "encerramentos":
+            if not getattr(current_user, "can_use_encerramentos", False):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Usuário não tem permissão para usar o módulo Encerramentos.",
                 )
         elif permission == "manage_distribuidos_bb":
             if not getattr(current_user, "can_manage_distribuidos_bb", False):

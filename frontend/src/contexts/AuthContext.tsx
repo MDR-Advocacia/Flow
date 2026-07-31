@@ -12,6 +12,7 @@ interface User {
   can_use_publications?: boolean;
   can_use_prazos_iniciais?: boolean;
   can_use_onerequest?: boolean;
+  can_use_encerramentos?: boolean;
   can_use_minha_equipe?: boolean;
   minha_equipe_equipes?: string[];
   can_manage_distribuidos_bb?: boolean;
@@ -26,6 +27,7 @@ interface TokenData {
   can_use_publications: boolean;
   can_use_prazos_iniciais?: boolean;
   can_use_onerequest?: boolean;
+  can_use_encerramentos?: boolean;
   can_manage_distribuidos_bb?: boolean;
   must_change_password: boolean;
   exp: number;
@@ -44,6 +46,7 @@ interface AuthContextType {
   canUsePublications: boolean;
   canUsePrazosIniciais: boolean;
   canUseOnerequest: boolean;
+  canUseEncerramentos: boolean;
   canUseMinhaEquipe: boolean;
   minhaEquipeEquipes: string[];
   canManageDistribuidosBB: boolean;
@@ -216,6 +219,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       user?.can_use_prazos_iniciais ?? tokenData?.can_use_prazos_iniciais ?? false,
     canUseOnerequest:
       user?.can_use_onerequest ?? tokenData?.can_use_onerequest ?? false,
+    canUseEncerramentos:
+      user?.can_use_encerramentos ?? tokenData?.can_use_encerramentos ?? false,
     canUseMinhaEquipe: user?.can_use_minha_equipe ?? false,
     minhaEquipeEquipes: user?.minha_equipe_equipes ?? [],
     canManageDistribuidosBB:

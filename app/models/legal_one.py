@@ -72,6 +72,7 @@ class LegalOneUser(Base):
     can_use_prazos_iniciais = Column(Boolean, default=False, nullable=False)
     notify_onerequest_errors = Column(Boolean, default=False, nullable=False)
     can_use_onerequest = Column(Boolean, default=False, server_default="false", nullable=False)
+    can_use_encerramentos = Column(Boolean, default=False, server_default="false", nullable=False)
     # Minha Equipe: libera o menu + CSV das equipes que o usuário pode ver (ex.: "bb-reu").
     can_use_minha_equipe = Column(Boolean, default=False, server_default="false", nullable=False)
     minha_equipe_equipes = Column(String, nullable=True)
