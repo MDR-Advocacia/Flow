@@ -330,14 +330,24 @@ const UsersAndPermissions = () => {
                                     </TableCell>
                                     <TableCell>
                                         {(() => {
-                                            const get = (k: string) => !!(user as unknown as Record<string, boolean>)[k];
+                                            // Admin bypassa todos os gates no backend e o recálculo do RBAC
+                                            // pula admins de propósito (as colunas can_use_* dele ficam
+                                            // congeladas). Ler as colunas aqui mostrava um recorte antigo e o
+                                            // checkbox "não pegava" — exibimos o acesso EFETIVO (total) e
+                                            // travamos a edição.
+                                            const ehAdmin = (user as unknown as { role?: string }).role === "admin";
+                                            const get = (k: string) => ehAdmin || !!(user as unknown as Record<string, boolean>)[k];
                                             const ativas = PERMISSOES.filter((p) => get(p.key));
                                             return (
                                                 <DropdownMenu>
                                                     <DropdownMenuTrigger asChild>
                                                         <Button variant="outline" size="sm" className="h-8 gap-1.5">
                                                             <span className="flex flex-wrap items-center gap-1">
-                                                                {ativas.length === 0 ? (
+                                                                {ehAdmin ? (
+                                                                    <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                                                                        Total (admin)
+                                                                    </span>
+                                                                ) : ativas.length === 0 ? (
                                                                     <span className="text-xs text-muted-foreground">Nenhuma</span>
                                                                 ) : (
                                                                     ativas.map((p) => (
@@ -361,13 +371,18 @@ const UsersAndPermissions = () => {
                                                         className="max-h-[min(70vh,var(--radix-dropdown-menu-content-available-height))] w-56 overflow-y-auto"
                                                     >
                                                         <DropdownMenuLabel>Permissões de acesso</DropdownMenuLabel>
+                                                        {ehAdmin && (
+                                                            <div className="px-2 pb-1.5 text-[11px] leading-snug text-muted-foreground">
+                                                                Administrador tem acesso total — os módulos não são editáveis aqui.
+                                                            </div>
+                                                        )}
                                                         <DropdownMenuSeparator />
                                                         {PERMISSOES.map((p) => (
                                                             <DropdownMenuCheckboxItem
                                                                 key={p.key}
                                                                 checked={get(p.key)}
                                                                 onSelect={(e) => e.preventDefault()}
-                                                                disabled={updateUserMutation.isPending}
+                                                                disabled={updateUserMutation.isPending || ehAdmin}
                                                                 onCheckedChange={(c) =>
                                                                     updateUserMutation.mutate({
                                                                         userId: user.id,
@@ -387,9 +402,9 @@ const UsersAndPermissions = () => {
                                                             return (
                                                                 <DropdownMenuCheckboxItem
                                                                     key={eq.key}
-                                                                    checked={equipes.includes(eq.key)}
+                                                                    checked={ehAdmin || equipes.includes(eq.key)}
                                                                     onSelect={(e) => e.preventDefault()}
-                                                                    disabled={updateUserMutation.isPending || !get("can_use_minha_equipe")}
+                                                                    disabled={updateUserMutation.isPending || ehAdmin || !get("can_use_minha_equipe")}
                                                                     className="pl-7"
                                                                     onCheckedChange={(c) => {
                                                                         const next = c
