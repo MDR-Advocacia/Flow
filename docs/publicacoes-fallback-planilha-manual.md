@@ -1,4 +1,9 @@
-# Publicações — 3º fallback: upload manual da planilha do L1
+# Publicações — captura por planilha do Legal One (detalhe técnico)
+
+> **Runbook operacional em [publicacoes-contingencias.md](publicacoes-contingencias.md)** —
+> lá estão as variáveis de ambiente para ativar cada camada, os alertas e como
+> conferir a madrugada. Este documento é o detalhe de COMO a planilha vira
+> publicação.
 
 **Status:** IMPLANTADO em 30/07/2026. Sem migration — não precisou de coluna
 nova no banco.
