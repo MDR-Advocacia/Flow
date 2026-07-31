@@ -218,6 +218,22 @@ def definir_modulos(db: Session, user: Any, valores: dict) -> dict:
         else:
             extra[k] = bool(v)
     user.modulos_extra = extra or None
+
+    # Admin: `aplicar` pula o recálculo de propósito (bypass total + o bug de
+    # 29/07 em que o recálculo sobrescrevia as equipes deixadas à mão), então
+    # o clique do checkbox nunca chegava na coluna e o tique não aparecia na
+    # tela. Aqui gravamos direto SÓ as colunas que o admin acabou de tocar —
+    # o checkbox reflete o clique como em qualquer usuário, sem recalcular
+    # nada além disso (equipes e demais colunas ficam como estão).
+    if (getattr(user, "role", "user") or "user") == "admin":
+        diffs: dict = {}
+        for k, v in (valores or {}).items():
+            if k in MODULO_KEYS and bool(getattr(user, k, False)) != bool(v):
+                diffs[k] = (bool(getattr(user, k, False)), bool(v))
+                setattr(user, k, bool(v))
+        db.commit()
+        return {"mudou": bool(diffs), "diffs": diffs, "admin_direto": True}
+
     return aplicar(db, user)
 
 
