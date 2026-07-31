@@ -142,6 +142,26 @@ class Settings(BaseSettings):
     # existe. Sobrescrevível por PUBLICATION_ALERT_EMAIL no Coolify.
     publication_alert_email: str | None = "ti@mdradvocacia.com,jonilsonvilela@mdradvocacia.com"
 
+    # ── Terceira contingência: DJEN/Comunica ──────────────────────────
+    # Última rede da captura, acionada só depois que a API do L1 E o relatório
+    # do L1 Web falharam. Fica DESLIGADA por padrão: é contingência oculta, e
+    # sem o proxy brasileiro a Comunica responde 403 de qualquer jeito.
+    djen_enabled: bool = False
+    comunica_base_url: str = "https://comunicaapi.pje.jus.br"
+    comunica_timeout_seconds: int = 30
+    djen_default_meio: str = "D"
+    # OABs do escritório no formato "numero:UF", vírgula separa.
+    djen_oabs: str = "5553:RN"
+    # Saída brasileira obrigatória — a Comunica bloqueia IP de datacenter fora
+    # do país. Mesmo MikroTik usado pelo Lake e pelo OneLog.
+    djen_proxy: str | None = None
+    djen_request_delay_seconds: float = 3.1
+    djen_max_pages: int = 200
+    # Ignora publicação de processo que a base não conhece. A consulta por OAB
+    # traz um superconjunto da carteira (192 de 1.017 em 31/07/2026), e o
+    # /Updates do L1 — a fonte primária — também não as traria.
+    djen_somente_carteira: bool = True
+
     # Classifier Engine
     anthropic_api_key: str | None = None
     classifier_model: str = "claude-haiku-4-5-20251001"

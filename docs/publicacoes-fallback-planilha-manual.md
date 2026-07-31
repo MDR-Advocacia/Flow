@@ -9,9 +9,16 @@ A captura de publicações tem três camadas, da mais automática para a mais
 manual:
 
 1. **Legal One `/Updates`** — fonte primária.
-2. **DJEN/Comunica** — contingência automática (trabalho do Codex, parado em
-   `feat/djen-fallback-codex`, ainda **não** na main). Depende de proxy
-   brasileiro: `DJEN_PROXY=socks5h://206.42.43.192:45123`, o mesmo do Lake.
+2. **DJEN/Comunica** — contingência OCULTA, a última rede
+   (`djen_publication_fallback.py`). Só entra depois que a API E o relatório
+   falharam. DESLIGADA por padrão (`DJEN_ENABLED=false`) e exige
+   `DJEN_PROXY=socks5h://206.42.43.192:45123` — a Comunica responde 403 pro IP
+   da AWS. Cliente HTTP portado do trabalho do Codex; resolução da pasta é
+   offline (a dele dependia do relatório do L1, o que anularia o propósito da
+   camada). CNJ ambíguo entra SEM vínculo em vez de ser chutado numa pasta, e
+   publicação de processo fora da carteira é ignorada (a consulta por OAB traz
+   superconjunto: 192 de 1.017 na medição de 31/07/2026). Validado contra a
+   Comunica real: 1.017 comunicações em 19s, 798 vinculadas.
 3. **Planilha do L1 (este documento)** — em duas formas:
    - **automática** (`publication_l1_report_fallback.py`): quando a busca
      agendada falha, o Flow manda o próprio L1 gerar o relatório e importa
