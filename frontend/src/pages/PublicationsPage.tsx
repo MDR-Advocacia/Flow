@@ -4507,6 +4507,9 @@ const PublicationsPage = () => {
                     <Label className="text-sm font-semibold flex items-center gap-1.5">
                       <Calendar className="h-4 w-4 text-muted-foreground" />
                       Tarefas no Legal One
+                      <span className="font-normal text-[10px] text-muted-foreground">
+                        · lido do L1 agora · o #id é o mesmo da coluna Id de lá
+                      </span>
                     </Label>
                     {recentTasks?.truncated && (
                       <span className="text-[10px] text-amber-700">
@@ -4558,6 +4561,26 @@ const PublicationsPage = () => {
                                     <span className="rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-semibold text-amber-900">
                                       {t.status_label}
                                     </span>
+                                    {/* O Id é a MESMA coluna que a grade de
+                                        Compromissos e Tarefas do L1 mostra —
+                                        é por ele que o operador casa as duas
+                                        telas sem precisar comparar descrição.
+                                        Em 03/08/2026 uma operadora passou o dia
+                                        achando que os agendamentos não tinham
+                                        criado tarefa: a tarefa existia (id
+                                        415212), mas a aba do L1 estava velha e
+                                        não havia como cruzar. */}
+                                    {t.task_id && (
+                                      <a
+                                        href={t.l1_url || undefined}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        title="Abrir esta tarefa no Legal One"
+                                        className="rounded bg-amber-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-900 ring-1 ring-amber-300 hover:bg-amber-200"
+                                      >
+                                        #{t.task_id}
+                                      </a>
+                                    )}
                                     {t.subtype_name && (
                                       <span className="text-amber-900 font-medium">
                                         {t.subtype_name}
@@ -4610,6 +4633,17 @@ const PublicationsPage = () => {
                                     <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
                                       {t.status_label}
                                     </span>
+                                    {t.task_id && (
+                                      <a
+                                        href={t.l1_url || undefined}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        title="Abrir esta tarefa no Legal One"
+                                        className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground ring-1 ring-border hover:bg-accent"
+                                      >
+                                        #{t.task_id}
+                                      </a>
+                                    )}
                                     {t.subtype_name && (
                                       <span className="font-medium">{t.subtype_name}</span>
                                     )}
