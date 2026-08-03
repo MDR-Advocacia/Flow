@@ -186,3 +186,88 @@ def test_falha_ao_registrar_nunca_derruba_o_cadastro(db):
     rel = {"descartadas": [{"id": 1, "cnj": CNJ, "motivo": "erro"}]}
     db.close()  # sessão inutilizável de propósito
     assert registrar_descartes(db, rel, planilha_id=57) == 0
+
+
+# ── Pasta avulsa: duplicata entre CLIENTES é legítima ──────────────────
+# O mesmo CNJ pode ter pasta do BB e do Banco Master — clientes diferentes no
+# mesmo processo. A dedup do import do L1 é tenant-wide e derrubava a segunda,
+# que e' justamente a que o modal "Pasta avulsa" existe pra criar.
+
+CNJ_MASTER = "0800251-98.2026.8.14.0004"
+DIGITOS_MASTER = "08002519820268140004"
+
+
+def _avulso(db, cnj=CNJ_MASTER, path="MDR Advocacia / Área operacional / Banco Master / Réu"):
+    p = BbProcesso(
+        cnj=cnj, fingerprint=f"avulso:cnj:{DIGITOS_MASTER}", escritorio_path=path,
+        planilha_status=POOL_PENDENTE_CADASTRO, status="DISTRIBUIDO",
+    )
+    db.add(p)
+    db.commit()
+    return p
+
+
+def _mock_l1(monkeypatch, *, mesmo=None, outros=None, explode=False):
+    from app.services.distribuidos_bb import cadastro_l1
+
+    monkeypatch.setattr(
+        "app.services.legal_one_client.LegalOneApiClient", lambda *a, **k: object(),
+    )
+    monkeypatch.setattr(cadastro_l1, "resolver_office_por_path", lambda c, p: 61)
+
+    def _verificar(client, cnj, office_id):
+        if explode:
+            raise RuntimeError("L1 fora")
+        return {
+            "duplicado": bool(mesmo),
+            "no_mesmo_escritorio": mesmo or [],
+            "em_outros_escritorios": outros or [],
+        }
+
+    monkeypatch.setattr(cadastro_l1, "verificar_duplicado", _verificar)
+
+
+def test_pasta_de_outro_cliente_libera_o_cnj(db, monkeypatch):
+    """Existe a pasta do BB; a do Master precisa nascer mesmo assim."""
+    from app.services.distribuidos_bb.avulso_service import _liberar_dup_de_outro_cliente
+
+    p = _avulso(db)
+    _mock_l1(monkeypatch, outros=[{"id": 67274, "folder": "Proc - 0062000", "office": 23}])
+    assert _liberar_dup_de_outro_cliente(db, p) == {DIGITOS_MASTER}
+
+
+def test_pasta_no_MESMO_escritorio_aborta(db, monkeypatch):
+    """Duas pastas do mesmo cliente no mesmo escritório é erro de operação."""
+    from app.services.distribuidos_bb.avulso_service import _liberar_dup_de_outro_cliente
+
+    p = _avulso(db)
+    _mock_l1(monkeypatch, mesmo=[{"id": 99, "folder": "Proc - 0099999", "office": 61}])
+    with pytest.raises(ValueError) as exc:
+        _liberar_dup_de_outro_cliente(db, p)
+    assert "Proc - 0099999" in str(exc.value)
+
+
+def test_sem_duplicata_nao_libera_nada(db, monkeypatch):
+    from app.services.distribuidos_bb.avulso_service import _liberar_dup_de_outro_cliente
+
+    p = _avulso(db)
+    _mock_l1(monkeypatch)
+    assert _liberar_dup_de_outro_cliente(db, p) == set()
+
+
+def test_l1_fora_nao_libera_as_cegas(db, monkeypatch):
+    """Melhor não liberar do que liberar sem saber o que existe lá."""
+    from app.services.distribuidos_bb.avulso_service import _liberar_dup_de_outro_cliente
+
+    p = _avulso(db)
+    _mock_l1(monkeypatch, explode=True)
+    assert _liberar_dup_de_outro_cliente(db, p) == set()
+
+
+def test_processo_sem_cnj_nao_consulta_o_l1(db):
+    from app.services.distribuidos_bb.avulso_service import _liberar_dup_de_outro_cliente
+
+    p = BbProcesso(cnj=None, fingerprint="avulso:x", planilha_status=POOL_PENDENTE_CADASTRO,
+                   status="DISTRIBUIDO")
+    db.add(p); db.commit()
+    assert _liberar_dup_de_outro_cliente(db, p) == set()

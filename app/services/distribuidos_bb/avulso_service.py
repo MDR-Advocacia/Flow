@@ -191,6 +191,57 @@ def criar_pasta_avulsa(db: Session, dados: dict[str, Any], *, user_id: Optional[
     return proc
 
 
+def _liberar_dup_de_outro_cliente(db: Session, proc: BbProcesso) -> set:
+    """CNJ a liberar na dedup tenant-wide do import do L1.
+
+    Devolve `{digitos}` quando já existe pasta do CNJ em OUTRO escritório (outro
+    cliente) e NENHUMA no escritório escolhido — o caso do mesmo processo com
+    dois clientes nossos (BB × Banco Master × Ativos).
+
+    Devolve vazio quando não há duplicata nenhuma (não precisa liberar) ou
+    quando a consulta ao L1 falha (melhor não liberar do que liberar às cegas).
+
+    Levanta se já existir pasta no MESMO escritório: aí seria pasta gêmea.
+    """
+    from app.services.distribuidos_bb import cadastro_l1
+
+    digitos = norm.apenas_digitos(proc.cnj or "") or ""
+    if len(digitos) != 20:
+        return set()
+    try:
+        from app.services.legal_one_client import LegalOneApiClient
+
+        client = LegalOneApiClient()
+        office_id = cadastro_l1.resolver_office_por_path(client, proc.escritorio_path)
+        res = cadastro_l1.verificar_duplicado(client, proc.cnj, office_id)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Pasta avulsa: não deu pra checar duplicata no L1 (processo %s) — "
+            "seguindo SEM liberar.", proc.id,
+        )
+        return set()
+
+    if res.get("no_mesmo_escritorio"):
+        pastas = ", ".join(
+            str(x.get("folder") or x.get("id")) for x in res["no_mesmo_escritorio"]
+        )
+        raise ValueError(
+            f"Já existe pasta desse CNJ no escritório {proc.escritorio_path}: "
+            f"{pastas}. Não vou criar uma segunda pasta no mesmo escritório."
+        )
+
+    outros = res.get("em_outros_escritorios") or []
+    if outros:
+        logger.info(
+            "Pasta avulsa: CNJ %s já tem pasta em outro escritório (%s) — "
+            "liberado na dedup do import (cliente diferente).",
+            proc.cnj,
+            ", ".join(str(x.get("folder") or x.get("id")) for x in outros),
+        )
+        return {digitos}
+    return set()
+
+
 def cadastrar_imediato(db: Session, proc: BbProcesso) -> dict[str, Any]:
     """Fluxo imediato da avulsa: planilha só desta pasta → import no L1.
 
@@ -205,7 +256,26 @@ def cadastrar_imediato(db: Session, proc: BbProcesso) -> dict[str, Any]:
         if planilha is None:
             return {"cadastrado": False, "erro": "Planilha não foi gerada (processo sem responsável?)."}
         db.commit()
-        rel = cadastrar_planilha(bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False)
+
+        # ── Duplicata entre CLIENTES é legítima ───────────────────────
+        # O mesmo CNJ pode ter pasta do BB E do Banco Master: são clientes
+        # diferentes no mesmo processo, e o escritório representa os dois.
+        # A dedup do import do L1 é TENANT-WIDE, então ele acusa `duplicated`
+        # e a linha era descartada — a pasta do 2º cliente NUNCA nascia.
+        #
+        # O fluxo da coleta já resolve isso com `cnjs_liberados`; a avulsa
+        # (o modal "Pasta avulsa") não passava nada e ficava travada — que é
+        # justamente o caminho usado pra cadastrar o cliente adicional.
+        #
+        # A liberação NÃO é cega: só entra depois de confirmar que não existe
+        # pasta no MESMO escritório. Se existir, aborta — pasta gêmea no mesmo
+        # escritório é erro de operação, não caso legítimo.
+        liberados = _liberar_dup_de_outro_cliente(db, proc)
+
+        rel = cadastrar_planilha(
+            bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False,
+            cnjs_liberados=liberados,
+        )
         from app.services.distribuidos_bb.cadastro_descartes import registrar_descartes
 
         registrar_descartes(db, rel, planilha_id=planilha.id)
