@@ -297,6 +297,9 @@ def _cadastrar_lote(db: Session, lote_id: int, processo_ids: list[int]) -> None:
     db.commit()
 
     rel = cadastrar_planilha(bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False)
+    from app.services.distribuidos_bb.cadastro_descartes import registrar_descartes
+
+    registrar_descartes(db, rel, planilha_id=planilha.id)
     planilha.subido_legalone = True
     planilha.subido_em = datetime.now(timezone.utc)
     db.commit()

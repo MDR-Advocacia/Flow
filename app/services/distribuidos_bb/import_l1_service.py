@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -303,32 +304,102 @@ def _digitos_cnj(s: Optional[str]) -> str:
     return _re.sub(r"\D", "", s or "")
 
 
-def _linhas_novas(rows: list[dict], cnjs_liberados: Optional[set] = None) -> list[dict]:
-    """Linhas a cadastrar = sem erro real, descartando SÓ as duplicatas COM CNJ.
+# Erros que o L1 devolve por congestionamento da PRÓPRIA infraestrutura dele
+# (Azure Service Bus), não por problema no dado. A mensagem oficial diz
+# textualmente "Please wait 10 seconds and try again" — ou seja, é retentável.
+#
+# Caso real 31/07/2026: das 15 linhas da planilha 57, 14 entraram e UMA pegou a
+# janela de throttling (`ServiceBusy`, código 50002). Ela foi descartada como se
+# fosse erro de validação, o processo ficou "Pendente cadastro" para sempre e
+# ninguém soube o motivo — a coluna `erro` ficou NULL. Reenviada à mão em
+# 03/08, o L1 aceitou na hora e criou a pasta: o dado sempre esteve certo.
+_ERRO_TRANSITORIO = re.compile(
+    r"throttl|ServiceBusy|ServerBusy|\b50002\b|temporarily unavailable"
+    r"|timed?\s?out|\b503\b",
+    re.IGNORECASE,
+)
 
-    A flag `duplicated` do L1 só é confiável quando há CNJ. Em BB Autor/pré-judicial
-    (SEM CNJ) o L1 acusa "duplicado" comparando apenas o nome do autor — falso
-    positivo que o fluxo manual ignora e cadastra assim mesmo. Então: dup COM CNJ =
-    duplicata real (fora); dup SEM CNJ = falso positivo (entra).
 
-    `cnjs_liberados` (dígitos): CNJs que o CALLER garante não terem pasta do MESMO
-    cliente (a trava pré-planilha `_marcar_ja_existentes_no_l1` já vinculou/excluiu
-    esses casos). A dedup do import do L1 é TENANT-WIDE — o mesmo CNJ pode existir
-    legitimamente pra outro cliente (BB×Master×Ativos, caso real 2026-07-24: CNJ do
-    BB descartado por dup de pasta do Master). Linha dup COM CNJ liberado → ENTRA
-    (o save aceita linha duplicated, validado em prod)."""
+def _mensagem_de_erro(row: dict) -> str:
+    """Junta o que o L1 reportou de errado nessa linha, em texto único."""
+    partes: list[str] = []
+    for e in (row.get("errors") or []):
+        if isinstance(e, dict):
+            m = str(e.get("message") or "").strip()
+            if m:
+                partes.append(m)
+        elif e:
+            partes.append(str(e))
+    msg = str(row.get("errorMessage") or "").strip()
+    if msg:
+        partes.append(msg)
+    return " | ".join(partes)
+
+
+def classificar_linha(row: dict, liberados: set) -> tuple[bool, str]:
+    """Decide se a linha vai pro cadastro. Devolve (cadastrar, motivo).
+
+    `motivo` só é preenchido quando a linha NÃO vai — é o que o operador precisa
+    ver na tela em vez de um "Pendente cadastro" mudo.
+    """
+    erro = _mensagem_de_erro(row)
+    if erro:
+        if _ERRO_TRANSITORIO.search(erro):
+            # Congestionamento do L1, não problema do dado: reenviar resolve.
+            # Validado em produção — o save aceitou a linha com esse erro.
+            return True, ""
+        return False, f"O Legal One recusou a linha: {erro[:400]}"
+
+    tem_cnj = bool((row.get("identifierNumber") or "").strip())
+    if row.get("duplicated") and tem_cnj:
+        if _digitos_cnj(row.get("identifierNumber")) in liberados:
+            return True, ""  # dup de OUTRO cliente — cadastra mesmo assim
+        return False, (
+            "O Legal One apontou pasta já existente para esse CNJ "
+            "(duplicata no tenant)."
+        )
+    return True, ""
+
+
+def _linhas_novas(
+    rows: list[dict], cnjs_liberados: Optional[set] = None,
+) -> tuple[list[dict], list[dict]]:
+    """Separa o que vai pro cadastro do que fica de fora, COM o motivo.
+
+    Devolve `(novas, descartadas)`. Cada descartada é
+    `{"id", "cnj", "motivo"}` — o caller grava isso no processo, senão a linha
+    some sem explicação (foi o que aconteceu em 31/07/2026).
+
+    Regras:
+
+    - **erro transitório** (throttling do L1) → ENTRA. É retentável e o save
+      aceita, validado em produção;
+    - **erro real** → fora, com o texto do L1 no motivo;
+    - **duplicata COM CNJ** → fora, salvo se o CNJ estiver em `cnjs_liberados`.
+
+    A flag `duplicated` do L1 só é confiável quando há CNJ. Em BB
+    Autor/pré-judicial (SEM CNJ) o L1 acusa "duplicado" comparando apenas o nome
+    do autor — falso positivo que o fluxo manual ignora e cadastra assim mesmo.
+
+    `cnjs_liberados` (dígitos): CNJs que o CALLER garante não terem pasta do
+    MESMO cliente. A dedup do import do L1 é TENANT-WIDE — o mesmo CNJ pode
+    existir legitimamente pra outro cliente (BB×Master×Ativos, caso real
+    2026-07-24: CNJ do BB descartado por dup de pasta do Master).
+    """
     liberados = cnjs_liberados or set()
-    out = []
+    novas: list[dict] = []
+    descartadas: list[dict] = []
     for x in rows:
-        if x.get("errors") or x.get("errorMessage"):
-            continue  # erro real sempre fora
-        tem_cnj = bool((x.get("identifierNumber") or "").strip())
-        if x.get("duplicated") and tem_cnj:
-            if _digitos_cnj(x.get("identifierNumber")) in liberados:
-                out.append(x)  # dup de OUTRO cliente — cadastra mesmo assim
-            continue
-        out.append(x)
-    return out
+        cadastrar, motivo = classificar_linha(x, liberados)
+        if cadastrar:
+            novas.append(x)
+        else:
+            descartadas.append({
+                "id": x.get("id"),
+                "cnj": (x.get("identifierNumber") or "").strip() or None,
+                "motivo": motivo,
+            })
+    return novas, descartadas
 
 
 def _is_unauthorized(exc: Exception) -> bool:
@@ -417,16 +488,30 @@ def _cadastrar_once(conteudo, file_name, *, firm_id, dry_run, poll_max_s, tok,
 
     # Só as linhas DESTA planilha (id não estava no baseline) e cadastráveis.
     desta_planilha = [r for r in _listar_staging(sess, h) if r.get("id") not in baseline_ids]
-    novos = _linhas_novas(desta_planilha, cnjs_liberados)
+    novos, descartadas = _linhas_novas(desta_planilha, cnjs_liberados)
     novos_ids = [x["id"] for x in novos]
     resgatadas = sum(
         1 for x in novos
         if x.get("duplicated") and (x.get("identifierNumber") or "").strip()
     )
+    # Linhas que entraram APESAR de erro — throttling do L1. Contadas à parte
+    # pra dar visibilidade: se esse número crescer, o L1 está congestionado.
+    retentadas = sum(1 for x in novos if _mensagem_de_erro(x))
     rel["novos"] = len(novos_ids)
     rel["resgatadas_dup_outro_cliente"] = resgatadas
+    rel["retentadas_erro_transitorio"] = retentadas
+    # O caller grava esses motivos nos processos — sem isso a linha some sem
+    # explicação e o operador fica com "Pendente cadastro" mudo.
+    rel["descartadas"] = descartadas
     rel["passos"].append({"passo": "match_novos", "ok": True, "novos": len(novos_ids),
-                          "resgatadas_dup": resgatadas})
+                          "resgatadas_dup": resgatadas,
+                          "retentadas_transitorio": retentadas,
+                          "descartadas": len(descartadas)})
+    if retentadas:
+        logger.warning(
+            "Import L1: %s linha(s) entraram apesar de erro TRANSITÓRIO do L1 "
+            "(throttling). Antes elas eram descartadas em silêncio.", retentadas,
+        )
 
     if dry_run:
         rel["resultado"] = f"DRY_RUN — {len(novos_ids)} linha(s) nova(s) prontas (nada criado)."

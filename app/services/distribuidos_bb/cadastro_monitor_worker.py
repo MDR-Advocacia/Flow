@@ -282,6 +282,11 @@ def retentar_planilhas_orfas(db) -> None:
                 bytes(pl.conteudo), pl.nome_arquivo, dry_run=False,
                 cnjs_liberados=cnjs_liberados_da_planilha(db, pl.id),
             )
+            from app.services.distribuidos_bb.cadastro_descartes import (
+                registrar_descartes,
+            )
+
+            registrar_descartes(db, rel, planilha_id=pl.id)
             pl.subido_legalone = True
             pl.subido_em = datetime.now(timezone.utc)
             registrar_evento(

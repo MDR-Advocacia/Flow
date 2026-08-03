@@ -206,6 +206,9 @@ def cadastrar_imediato(db: Session, proc: BbProcesso) -> dict[str, Any]:
             return {"cadastrado": False, "erro": "Planilha não foi gerada (processo sem responsável?)."}
         db.commit()
         rel = cadastrar_planilha(bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False)
+        from app.services.distribuidos_bb.cadastro_descartes import registrar_descartes
+
+        registrar_descartes(db, rel, planilha_id=planilha.id)
         planilha.subido_legalone = True
         planilha.subido_em = datetime.now(timezone.utc)
         registrar_evento(

@@ -300,6 +300,12 @@ def _auto_cadastrar(db: Session, run: BbRun) -> None:
         cnjs_liberados=cnjs_liberados_da_planilha(db, planilha.id),
     )
     novos = rel.get("novos", 0)
+    # Linha recusada pelo L1 NÃO pode sumir: grava o motivo no processo, senão
+    # ele fica "Pendente cadastro" mudo (caso 0801099-88.2026.8.14.0003 em
+    # 31/07/2026, descoberto só porque o operador reparou na tela).
+    from app.services.distribuidos_bb.cadastro_descartes import registrar_descartes
+
+    registrar_descartes(db, rel, run_id=run.id, planilha_id=planilha.id)
     # O robô subiu a planilha → marca como subida (não fica pendente na tela).
     planilha.subido_legalone = True
     planilha.subido_em = datetime.now(timezone.utc)
