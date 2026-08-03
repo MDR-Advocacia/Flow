@@ -64,3 +64,34 @@ export async function listarEncerramentosL1(params: {
   if (params.q) qs.set("q", params.q);
   return json(await apiFetch(`${BASE}/encerramentos?${qs.toString()}`));
 }
+
+export async function exportarEncerramentosExcel(params: {
+  status?: string;
+  q?: string;
+}): Promise<void> {
+  const qs = new URLSearchParams();
+  if (params.status) qs.set("status", params.status);
+  if (params.q) qs.set("q", params.q);
+  const res = await apiFetch(`${BASE}/encerramentos/export?${qs.toString()}`);
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      detail = (await res.json())?.detail || detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download =
+    res.headers
+      .get("Content-Disposition")
+      ?.match(/filename="?([^"]+)"?/)?.[1] || "encerramentos-legalone.xlsx";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}

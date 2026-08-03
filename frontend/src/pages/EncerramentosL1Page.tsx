@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   listarEncerramentosL1,
+  exportarEncerramentosExcel,
   EncerramentoL1Item,
   EncerramentoStatus,
 } from "@/services/encerramentos";
@@ -19,7 +20,13 @@ import { Input } from "@/components/ui/input";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { Archive, ChevronLeft, ChevronRight, Loader2, Search } from "lucide-react";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
+import { useToast } from "@/hooks/use-toast";
+import {
+  Archive, ChevronLeft, ChevronRight, Copy, Download, Loader2, Search,
+} from "lucide-react";
 
 const STATUS_LABELS: Record<EncerramentoStatus, string> = {
   ok: "Encerrado",
@@ -52,6 +59,9 @@ export default function EncerramentosL1Page() {
   const [statusFiltro, setStatusFiltro] = useState<string>("");
   const [busca, setBusca] = useState("");
   const [buscaDebounced, setBuscaDebounced] = useState("");
+  const [detalhe, setDetalhe] = useState<EncerramentoL1Item | null>(null);
+  const [exportando, setExportando] = useState(false);
+  const { toast } = useToast();
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -87,6 +97,42 @@ export default function EncerramentosL1Page() {
       })),
     [contadores],
   );
+
+  async function handleExportar() {
+    setExportando(true);
+    try {
+      await exportarEncerramentosExcel({
+        status: statusFiltro || undefined,
+        q: buscaDebounced || undefined,
+      });
+      toast({ title: "Exportação concluída", description: "A planilha foi baixada." });
+    } catch (e) {
+      toast({
+        title: "Erro ao exportar",
+        description: e instanceof Error ? e.message : "Não foi possível gerar a planilha.",
+        variant: "destructive",
+      });
+    } finally {
+      setExportando(false);
+    }
+  }
+
+  function copiarDetalhe(i: EncerramentoL1Item) {
+    const texto = [
+      `CNJ: ${i.numero_cnj}`,
+      `Lawsuit (L1): ${i.lawsuit_id ?? "-"}`,
+      `Desfecho: ${STATUS_LABELS[i.status] ?? i.status}`,
+      `Data do encerramento: ${i.data_encerramento ?? "-"}`,
+      `Motivo (L1): ${i.motivo_encerramento ?? "-"}`,
+      `Operador: ${i.operador_nome ?? "-"} (${i.operador_email ?? "-"})`,
+      `Justificativa: ${i.justificativa ?? "-"}`,
+      `Recebido em: ${formatDateTime(i.created_at)}`,
+      "",
+      `Detalhe: ${i.detalhe ?? "-"}`,
+    ].join("\n");
+    navigator.clipboard.writeText(texto);
+    toast({ title: "Copiado", description: "Detalhes na área de transferência." });
+  }
 
   return (
     <div className="space-y-4 p-1">
@@ -134,6 +180,16 @@ export default function EncerramentosL1Page() {
                 className="pl-9"
               />
             </div>
+            <Button
+              variant="outline"
+              onClick={handleExportar}
+              disabled={exportando || total === 0}
+              className="gap-1.5"
+              title="Baixa um .xlsx com os encerramentos do recorte atual"
+            >
+              {exportando ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              Exportar Excel
+            </Button>
             <Select
               value={String(pageSize)}
               onValueChange={(v) => {
@@ -189,7 +245,12 @@ export default function EncerramentosL1Page() {
                 </TableHeader>
                 <TableBody>
                   {items.map((i) => (
-                    <TableRow key={i.id}>
+                    <TableRow
+                      key={i.id}
+                      onClick={() => setDetalhe(i)}
+                      className="cursor-pointer hover:bg-muted/50"
+                      title="Clique para ver os detalhes"
+                    >
                       <TableCell className="whitespace-nowrap text-xs">
                         {formatDateTime(i.created_at)}
                       </TableCell>
@@ -262,6 +323,75 @@ export default function EncerramentosL1Page() {
           )}
         </CardContent>
       </Card>
+      {/* Detalhes: o desfecho completo, para orientar a correção do cadastro no L1 */}
+      <Dialog open={!!detalhe} onOpenChange={(o) => !o && setDetalhe(null)}>
+        <DialogContent className="max-w-2xl">
+          {detalhe && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-base">{detalhe.numero_cnj}</span>
+                  <Badge
+                    variant="outline"
+                    className={`text-[10px] ${STATUS_BADGES[detalhe.status] ?? ""}`}
+                  >
+                    {STATUS_LABELS[detalhe.status] ?? detalhe.status}
+                  </Badge>
+                </DialogTitle>
+              </DialogHeader>
+
+              <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+                <div>
+                  <div className="text-xs text-muted-foreground">Lawsuit (L1)</div>
+                  <div className="font-mono">{detalhe.lawsuit_id ?? "-"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted-foreground">Recebido em</div>
+                  <div>{formatDateTime(detalhe.created_at)}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted-foreground">Data do encerramento</div>
+                  <div>
+                    {detalhe.data_encerramento
+                      ? detalhe.data_encerramento.split("-").reverse().join("/")
+                      : "-"}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-muted-foreground">Operador</div>
+                  <div>{detalhe.operador_nome ?? "-"}</div>
+                </div>
+                <div className="col-span-2">
+                  <div className="text-xs text-muted-foreground">Motivo gravado no Legal One</div>
+                  <div>{detalhe.motivo_encerramento ?? "-"}</div>
+                </div>
+                <div className="col-span-2">
+                  <div className="text-xs text-muted-foreground">Justificativa do encerramento</div>
+                  <div>{detalhe.justificativa ?? "-"}</div>
+                </div>
+              </div>
+
+              {detalhe.detalhe && (
+                <div className="mt-1">
+                  <div className="mb-1 text-xs font-medium text-muted-foreground">
+                    Retorno do Legal One
+                  </div>
+                  <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/40 p-3 text-xs">
+                    {detalhe.detalhe}
+                  </pre>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-1">
+                <Button variant="outline" size="sm" className="gap-1.5" onClick={() => copiarDetalhe(detalhe)}>
+                  <Copy className="h-3.5 w-3.5" /> Copiar detalhes
+                </Button>
+                <Button size="sm" onClick={() => setDetalhe(null)}>Fechar</Button>
+              </div>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

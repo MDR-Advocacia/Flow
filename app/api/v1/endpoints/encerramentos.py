@@ -42,6 +42,29 @@ logger = logging.getLogger(__name__)
 intake_router = APIRouter(prefix="/legalone", tags=["Encerramentos (Intake)"])
 router = APIRouter(prefix="/legalone", tags=["Encerramentos"])
 
+# Rotulos exibidos na UI e no Excel (mesma fonte, sem divergir)
+STATUS_LABELS = {
+    "ok": "Encerrado",
+    "ja_encerrado": "Já estava encerrado",
+    "nao_encontrado": "CNJ não encontrado",
+    "conflito": "Conflito",
+    "erro_l1": "Erro no Legal One",
+}
+
+
+def _filtrar(query, status_filtro: Optional[str], q: Optional[str]):
+    """Filtros compartilhados por listagem e exportação — o Excel tem que
+    sair exatamente com o recorte que a tela está mostrando."""
+    if status_filtro:
+        query = query.filter(EncerramentoL1Intake.status == status_filtro)
+    if q:
+        like = f"%{q.strip()}%"
+        query = query.filter(
+            EncerramentoL1Intake.numero_cnj.ilike(like)
+            | EncerramentoL1Intake.operador_nome.ilike(like)
+        )
+    return query
+
 
 def _validate_intake_api_key(
     x_encerramentos_api_key: Optional[str] = Header(
@@ -252,15 +275,7 @@ def listar_encerramentos(
 
     Acesso pela permissão de módulo `can_use_encerramentos` (admins bypassam),
     no mesmo padrão de Publicações / Prazos Iniciais / OneRequest."""
-    query = db.query(EncerramentoL1Intake)
-    if status_filtro:
-        query = query.filter(EncerramentoL1Intake.status == status_filtro)
-    if q:
-        like = f"%{q.strip()}%"
-        query = query.filter(
-            EncerramentoL1Intake.numero_cnj.ilike(like)
-            | EncerramentoL1Intake.operador_nome.ilike(like)
-        )
+    query = _filtrar(db.query(EncerramentoL1Intake), status_filtro, q)
 
     total = query.count()
     itens = (
@@ -271,13 +286,7 @@ def listar_encerramentos(
     )
 
     # Contadores por status (do recorte de busca, ignorando o filtro de status)
-    base = db.query(EncerramentoL1Intake)
-    if q:
-        like = f"%{q.strip()}%"
-        base = base.filter(
-            EncerramentoL1Intake.numero_cnj.ilike(like)
-            | EncerramentoL1Intake.operador_nome.ilike(like)
-        )
+    base = _filtrar(db.query(EncerramentoL1Intake), None, q)
     contadores = {s: 0 for s in ("ok", "ja_encerrado", "nao_encontrado", "conflito", "erro_l1")}
     from sqlalchemy import func as safunc
 
@@ -309,3 +318,63 @@ def listar_encerramentos(
         "page_size": page_size,
         "contadores": contadores,
     }
+
+
+@router.get("/encerramentos/export", summary="Exporta os encerramentos filtrados em Excel (xlsx)")
+def exportar_encerramentos(
+    status_filtro: Optional[str] = Query(default=None, alias="status"),
+    q: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(require_permission("encerramentos")),
+):
+    """Excel com os MESMOS filtros da listagem — insumo pra corrigir o
+    cadastro no L1 e reprocessar. Sem paginação: sai tudo do recorte."""
+    from datetime import datetime as _dt
+    from io import BytesIO
+
+    from fastapi import Response
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    itens = _filtrar(db.query(EncerramentoL1Intake), status_filtro, q).order_by(
+        EncerramentoL1Intake.created_at.desc()
+    ).all()
+
+    colunas = [
+        ("Recebido em", 18, lambda i: i.created_at.strftime("%d/%m/%Y %H:%M") if i.created_at else ""),
+        ("CNJ", 26, lambda i: i.numero_cnj),
+        ("Lawsuit (L1)", 12, lambda i: i.lawsuit_id),
+        ("Desfecho", 22, lambda i: STATUS_LABELS.get(i.status, i.status)),
+        ("Dt. Encerramento", 16, lambda i: i.data_encerramento or ""),
+        ("Motivo (L1)", 42, lambda i: i.motivo_encerramento or ""),
+        ("Operador", 30, lambda i: i.operador_nome or ""),
+        ("E-mail", 30, lambda i: i.operador_email or ""),
+        ("Justificativa", 45, lambda i: i.justificativa or ""),
+        ("Origem", 14, lambda i: i.origem or ""),
+        ("Detalhe / motivo da recusa", 90, lambda i: i.detalhe or ""),
+    ]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Encerramentos L1"
+    head_font = Font(bold=True, color="FFFFFF")
+    head_fill = PatternFill("solid", fgColor="1F4E79")
+    for col, (titulo, largura, _g) in enumerate(colunas, start=1):
+        cell = ws.cell(row=1, column=col, value=titulo)
+        cell.font = head_font
+        cell.fill = head_fill
+        ws.column_dimensions[get_column_letter(col)].width = largura
+    for row, item in enumerate(itens, start=2):
+        for col, (_t, _w, getter) in enumerate(colunas, start=1):
+            ws.cell(row=row, column=col, value=getter(item))
+    ws.freeze_panes = "A2"
+
+    buf = BytesIO()
+    wb.save(buf)
+    nome = f"encerramentos-legalone-{_dt.now().strftime('%Y%m%d-%H%M')}.xlsx"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{nome}"'},
+    )
