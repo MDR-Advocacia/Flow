@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.api.v1.endpoints.balanceador import _ZUMBI_APOS_MINUTOS, _recuperar_zumbis
+from app.api.v1.endpoints.balanceador import _SEM_PROGRESSO_MINUTOS, _recuperar_zumbis
 from app.db.session import Base
 from app.models.performance import BalanceadorReatribuirJob
 
@@ -31,12 +31,20 @@ def db():
 
 
 def _job(db, *, minutos_atras, status="running", team="bb-reu",
-         total=58, reatribuidas=0, wf=0, falhas=0, jid=None):
+         total=58, reatribuidas=0, wf=0, falhas=0, jid=None,
+         iniciado_min=None):
+    """`minutos_atras` = há quanto tempo o job parou de progredir.
+
+    `iniciado_min` permite simular execução LONGA que segue viva — o caso que o
+    critério antigo (tempo desde o início) matava injustamente.
+    """
+    agora = datetime.now(timezone.utc)
     j = BalanceadorReatribuirJob(
-        id=jid or f"job{minutos_atras}{status}{total}",
+        id=jid or f"job{minutos_atras}{status}{total}{iniciado_min or 0}",
         team=team, status=status, total=total, feito=total,
         reatribuidas=reatribuidas, workflow_bloqueadas=wf, falhas=falhas,
-        iniciado_em=datetime.now(timezone.utc) - timedelta(minutes=minutos_atras),
+        iniciado_em=agora - timedelta(minutes=iniciado_min or minutos_atras),
+        atualizado_em=agora - timedelta(minutes=minutos_atras),
     )
     db.add(j)
     db.commit()
@@ -61,9 +69,9 @@ def test_o_que_ficou_sem_desfecho_vai_pro_bucket_manual(db):
     assert j.reatribuidas == 19, "o que deu certo continua contando como certo"
 
 
-def test_execucao_recente_nao_e_tocada(db):
-    """A de 04/08 seguia progredindo aos 46 min — não pode ser morta."""
-    j = _job(db, minutos_atras=_ZUMBI_APOS_MINUTOS - 30, total=541)
+def test_execucao_progredindo_agora_nao_e_tocada(db):
+    """Commitou há 2 min: está viva."""
+    j = _job(db, minutos_atras=2, iniciado_min=46, total=541)
     assert _recuperar_zumbis(db, "bb-reu") == 0
     db.refresh(j)
     assert j.status == "running"
@@ -102,3 +110,32 @@ def test_falha_no_recuperador_nao_derruba_a_listagem(db):
     """A tela tem que abrir mesmo se a limpeza quebrar."""
     db.close()
     assert _recuperar_zumbis(db, "bb-reu") == 0
+
+
+def test_execucao_longa_mas_viva_nao_e_morta(db):
+    """O erro do critério antigo: matava pelo tempo desde o início.
+
+    Uma redistribuição de 541 tarefas leva ~68 min no throttle real. Se ela
+    segue commitando progresso, está viva — não importa há quanto tempo começou.
+    """
+    j = _job(db, minutos_atras=1, iniciado_min=200, total=541)
+    assert _recuperar_zumbis(db, "bb-reu") == 0
+    db.refresh(j)
+    assert j.status == "running"
+
+
+def test_execucao_recem_iniciada_que_ja_morreu_e_pega_rapido(db):
+    """E o outro lado: morreu aos 5 min, não precisa esperar 2h pra sumir."""
+    j = _job(db, minutos_atras=_SEM_PROGRESSO_MINUTOS + 5, iniciado_min=25, total=541)
+    assert _recuperar_zumbis(db, "bb-reu") == 1
+    db.refresh(j)
+    assert j.status == "done"
+
+
+def test_linha_antiga_sem_atualizado_em_cai_no_inicio(db):
+    """Linha anterior à perf013: o início é o melhor sinal disponível."""
+    j = _job(db, minutos_atras=1, total=10)
+    j.atualizado_em = None
+    j.iniciado_em = datetime.now(timezone.utc) - timedelta(hours=6)
+    db.commit()
+    assert _recuperar_zumbis(db, "bb-reu") == 1

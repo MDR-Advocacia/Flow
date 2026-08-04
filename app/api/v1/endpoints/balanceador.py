@@ -198,11 +198,18 @@ _REASON_LABELS = {
 }
 
 
-# Um job vivo commita progresso a cada tarefa. Passado esse tempo sem NENHUM
-# avanço, quem o executava morreu (worker reciclado, container reiniciado) e
-# ninguém vai terminá-lo. Duas horas é folga larga: a maior execução real levou
-# ~20 min (193 tarefas), e a de 541 do dia 04/08 seguia progredindo aos 46 min.
-_ZUMBI_APOS_MINUTOS = 120
+# Tempo SEM PROGRESSO que caracteriza execução morta. O job commita a cada
+# tarefa, então `atualizado_em` anda de ~8 em ~8 segundos enquanto ele vive;
+# parar de andar significa que quem o executava morreu (worker reciclado,
+# container reiniciado) e ninguém vai terminá-lo.
+#
+# 15 min dá folga larga pro pior caso conhecido — retry de rate limit do L1
+# (429 com Retry-After de até 1 min, 4 tentativas) — sem deixar a tela mentindo
+# por horas. O critério ANTERIOR era tempo desde o INÍCIO, e errava dos dois
+# lados: em 04/08/2026 a execução do Bruno morreu às 08:30 e seguiu "Em
+# andamento · 100%" até o corte de 2h, enquanto uma execução legítima de 541
+# tarefas (~68 min no throttle real) corria risco de ser morta injustamente.
+_SEM_PROGRESSO_MINUTOS = 15
 
 
 def _recuperar_zumbis(db, team: str) -> int:
@@ -218,17 +225,25 @@ def _recuperar_zumbis(db, team: str) -> int:
     import logging
     from datetime import datetime, timedelta, timezone
 
+    from sqlalchemy import func
+
     from app.models.performance import BalanceadorReatribuirJob
 
     log = logging.getLogger("balanceador.zumbis")
     try:
-        corte = datetime.now(timezone.utc) - timedelta(minutes=_ZUMBI_APOS_MINUTOS)
+        corte = datetime.now(timezone.utc) - timedelta(minutes=_SEM_PROGRESSO_MINUTOS)
+        # `atualizado_em` só é NULL em linha anterior à perf013 que nunca foi
+        # atualizada; nesse caso o início é o melhor sinal disponível.
+        ultimo_sinal = func.coalesce(
+            BalanceadorReatribuirJob.atualizado_em,
+            BalanceadorReatribuirJob.iniciado_em,
+        )
         presos = (
             db.query(BalanceadorReatribuirJob)
             .filter(
                 BalanceadorReatribuirJob.team == team,
                 BalanceadorReatribuirJob.status.in_(("running", "aborting")),
-                BalanceadorReatribuirJob.iniciado_em < corte,
+                ultimo_sinal < corte,
             )
             .all()
         )
@@ -247,9 +262,9 @@ def _recuperar_zumbis(db, team: str) -> int:
             j.terminado_em = datetime.now(timezone.utc)
             n += 1
             log.warning(
-                "Execução %s (%s) estava presa desde %s — encerrada como "
-                "interrompida (%s tarefa[s] sem conclusão).",
-                j.id, team, j.iniciado_em, restante,
+                "Execução %s (%s) parou de progredir em %s (iniciada %s) — "
+                "encerrada como interrompida (%s tarefa[s] sem conclusão).",
+                j.id, team, j.atualizado_em or j.iniciado_em, j.iniciado_em, restante,
             )
         if n:
             db.commit()

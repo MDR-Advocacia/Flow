@@ -283,6 +283,12 @@ class BalanceadorReatribuirJob(Base):
     criado_por_nome = Column(String, nullable=True)
     iniciado_em = Column(DateTime(timezone=True), server_default=func.now())
     terminado_em = Column(DateTime(timezone=True), nullable=True)
+    # Tocado a CADA commit de progresso (o job commita por tarefa). É o que
+    # distingue "rodando devagar" de "morta" — sem isto a detecção de zumbi
+    # usava tempo desde o INÍCIO, que erra dos dois lados (migration perf013).
+    atualizado_em = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(),
+    )
 
 
 # ── Reagendamentos (adiamentos de prazo) — bracket 07h/19h ──────────────────
