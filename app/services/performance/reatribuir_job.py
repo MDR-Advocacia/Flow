@@ -184,14 +184,23 @@ def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
                     para_id=cid, para_text=para_text,
                 )
             postados.extend(itens)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # A MENSAGEM do L1 tem que sobreviver. Até 04/08/2026 só o
+            # `reason` era gravado, e o motivo do 400 morria no log: quando o
+            # operador foi olhar as 619 recusas de 31/07 e 02/08, o campo `erro`
+            # estava vazio em todas e o log já tinha rotacionado — não deu pra
+            # saber por que o Legal One recusou. Sem isto, o próximo diagnóstico
+            # começa do zero de novo.
+            msg = str(exc) or exc.__class__.__name__
             logger.exception(
-                "POST web de reatribuição falhou (grupo exec=%s resp=%s -> %s, %s tarefas)",
-                exec_de, resp_de, cid, len(tids),
+                "POST web de reatribuição falhou (grupo exec=%s resp=%s -> %s, %s tarefas): %s",
+                exec_de, resp_de, cid, len(tids), msg,
             )
             for it in itens:
                 job.workflow_bloqueadas = (job.workflow_bloqueadas or 0) + 1
                 detalhe[it["idx"]]["reason"] = "web_erro"
+                detalhe[it["idx"]]["erro"] = msg[:600]
+            job.detalhe = list(detalhe)
             db.commit()
 
     # Verificação assíncrona: o L1 enfileira a troca; confere via API.
@@ -221,6 +230,10 @@ def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
     for it in pendentes:  # o web não refletiu — fica no bucket manual
         job.workflow_bloqueadas = (job.workflow_bloqueadas or 0) + 1
         detalhe[it["idx"]]["reason"] = "web_nao_refletiu"
+        detalhe[it["idx"]]["erro"] = (
+            "O POST web foi aceito, mas depois de 2 conferências o Legal One "
+            "ainda mostrava o envolvido antigo."
+        )
     job.detalhe = list(detalhe)
     db.commit()
 

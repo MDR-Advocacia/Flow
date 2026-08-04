@@ -198,6 +198,71 @@ _REASON_LABELS = {
 }
 
 
+# Um job vivo commita progresso a cada tarefa. Passado esse tempo sem NENHUM
+# avanço, quem o executava morreu (worker reciclado, container reiniciado) e
+# ninguém vai terminá-lo. Duas horas é folga larga: a maior execução real levou
+# ~20 min (193 tarefas), e a de 541 do dia 04/08 seguia progredindo aos 46 min.
+_ZUMBI_APOS_MINUTOS = 120
+
+
+def _recuperar_zumbis(db, team: str) -> int:
+    """Encerra o job 'running' que parou de progredir.
+
+    Sem isto ele fica "Em andamento" para sempre na tela — o de 31/07 08:00
+    ficou assim por QUATRO DIAS, com 58/58 e 39 tarefas presas em
+    `web_pendente`, poluindo a lista e escondendo o estado real.
+
+    Best-effort: nunca levanta pro caller (a listagem tem que abrir de todo
+    jeito).
+    """
+    import logging
+    from datetime import datetime, timedelta, timezone
+
+    from app.models.performance import BalanceadorReatribuirJob
+
+    log = logging.getLogger("balanceador.zumbis")
+    try:
+        corte = datetime.now(timezone.utc) - timedelta(minutes=_ZUMBI_APOS_MINUTOS)
+        presos = (
+            db.query(BalanceadorReatribuirJob)
+            .filter(
+                BalanceadorReatribuirJob.team == team,
+                BalanceadorReatribuirJob.status.in_(("running", "aborting")),
+                BalanceadorReatribuirJob.iniciado_em < corte,
+            )
+            .all()
+        )
+        n = 0
+        for j in presos:
+            # O que ficou sem desfecho NÃO foi reatribuído — vai pro bucket
+            # manual, pra não inflar o número de sucesso.
+            restante = max(
+                0,
+                (j.total or 0) - (j.reatribuidas or 0)
+                - (j.workflow_bloqueadas or 0) - (j.falhas or 0),
+            )
+            if restante:
+                j.workflow_bloqueadas = (j.workflow_bloqueadas or 0) + restante
+            j.status = "done"
+            j.terminado_em = datetime.now(timezone.utc)
+            n += 1
+            log.warning(
+                "Execução %s (%s) estava presa desde %s — encerrada como "
+                "interrompida (%s tarefa[s] sem conclusão).",
+                j.id, team, j.iniciado_em, restante,
+            )
+        if n:
+            db.commit()
+        return n
+    except Exception:  # noqa: BLE001
+        log.exception("Falha ao recuperar execuções presas (ignorado).")
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
+
+
 @router.get(
     "/reatribuir/jobs",
     summary="Execuções de reatribuição do time (em andamento + histórico, paginado)",
@@ -210,6 +275,10 @@ def reatribuir_jobs(
     db: Session = Depends(get_db),
 ):
     from app.models.performance import BalanceadorReatribuirJob
+
+    # Mesma ideia do recover_zombies do Tratamento Web: limpa ANTES de listar,
+    # pra tela nunca mostrar "Em andamento" de algo que morreu.
+    _recuperar_zumbis(db, team)
 
     base = db.query(BalanceadorReatribuirJob).filter(BalanceadorReatribuirJob.team == team)
     total = base.count()
