@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
@@ -97,6 +98,37 @@ class _CancelHttpError(Exception):
 # cookie morto -> 403 em massa).
 _SESSION_CACHE_PATH = Path("/app/data/legacy_task_http_session.json")
 _SESSION_LOCK_PATH = Path("/app/data/legacy_task_http_session.lock")
+
+# ── Guarda-corpos da sessão web (incidente de 04/08/2026) ──────────────
+#
+# O login via Node custa ~1 min. Naquele dia, um erro NÃO TRATADO no JS deixou
+# o subprocess vivo e pendurado por MAIS DE UMA HORA — e como o subprocess não
+# tinha timeout, o worker ficou preso segurando o filelock. Todo caller
+# seguinte estourava os 120s de espera e falhava com "web_erro": 335 tarefas
+# numa única execução do Balanceador, e o mesmo padrão explica as 619 recusas
+# em bloco de 31/07 e 02/08. A requisição nem chegava ao Legal One.
+#
+# Três defesas, em camadas:
+#   1. o subprocess de login tem TETO (_LOGIN_TIMEOUT_S) e o grupo de
+#      processos é morto no estouro — o lock NUNCA fica preso indefinidamente;
+#   2. login que falhou deixa um marcador com cooldown: os próximos callers
+#      falham RÁPIDO e explicando, em vez de cada um tentar o próprio login
+#      de 1-3 min em série segurando o lock (tempestade serializada);
+#   3. a espera do lock (_LOCK_TIMEOUT_S) é maior que o teto do login, pra
+#      um caller não desistir no meio de um login legítimo de outro worker.
+_LOGIN_TIMEOUT_S = 180
+_LOCK_TIMEOUT_S = 240
+_LOGIN_FAILURE_COOLDOWN_S = 120
+_LOGIN_FAILURE_MARKER = _SESSION_LOCK_PATH.with_name(
+    "legacy_task_http_login_failure.json"
+)
+
+
+class SessionIndisponivelError(RuntimeError):
+    """A sessão web do L1 não pôde ser obtida (login falhou/travou ou lock
+    ocupado). Subclasse de RuntimeError pra não quebrar quem captura amplo;
+    quem quiser tratar diferente (ex.: abortar o lote em vez de tarefa a
+    tarefa) captura esta."""
 
 
 class LegacyTaskHttpCancellationService:
@@ -206,7 +238,19 @@ class LegacyTaskHttpCancellationService:
         if cached:
             return cached
 
-        lock = FileLock(str(_SESSION_LOCK_PATH), timeout=120)
+        # Falha de login recente? Falha RAPIDO em vez de tentar o proprio
+        # login: durante uma janela de SSO fora do ar, N callers tentando em
+        # serie (1-3 min cada, segurando o lock) e' exatamente a tempestade
+        # que derrubou o Balanceador em 04/08/2026.
+        recente = self._read_login_failure_marker()
+        if recente is not None:
+            idade, erro = recente
+            raise SessionIndisponivelError(
+                f"Login web do L1 falhou ha {int(idade)}s (cooldown de "
+                f"{_LOGIN_FAILURE_COOLDOWN_S}s antes de tentar de novo): {erro}"
+            )
+
+        lock = FileLock(str(_SESSION_LOCK_PATH), timeout=_LOCK_TIMEOUT_S)
         try:
             with lock:
                 # Re-check apos o lock: outro worker pode ter logado e
@@ -214,19 +258,69 @@ class LegacyTaskHttpCancellationService:
                 cached = self._read_session_file()
                 if cached:
                     return cached
+                recente = self._read_login_failure_marker()
+                if recente is not None:
+                    idade, erro = recente
+                    raise SessionIndisponivelError(
+                        f"Login web do L1 falhou ha {int(idade)}s (cooldown): {erro}"
+                    )
 
-                # Login efetivo. Custa ~1 min (subprocess Node + SSO L1).
-                # Outros workers que chegarem aqui durante esse minuto
-                # ficam parados no `with lock` esperando.
-                cookies = self._login_via_node()
+                # Login efetivo. Custa ~1 min (subprocess Node + SSO L1),
+                # com teto duro de _LOGIN_TIMEOUT_S. Outros workers ficam
+                # parados no `with lock` esperando (a espera e' maior que o
+                # teto, entao ninguem desiste no meio de um login legitimo).
+                try:
+                    cookies = self._login_via_node()
+                except Exception as exc:  # noqa: BLE001
+                    self._write_login_failure_marker(str(exc))
+                    raise SessionIndisponivelError(
+                        f"Login web do L1 falhou: {exc}"
+                    ) from exc
+                self._clear_login_failure_marker()
                 self._write_session_file(cookies)
                 return cookies
         except FileLockTimeout as exc:
-            raise RuntimeError(
-                "Timeout (>120s) esperando o lock de login do legacy_task_http. "
-                "Outro worker pode estar travado no Playwright — "
-                "verifique os run_dirs em /app/output/playwright/legalone/."
+            raise SessionIndisponivelError(
+                f"Timeout (>{_LOCK_TIMEOUT_S}s) esperando o lock de login do "
+                "legacy_task_http. Outro worker esta' logando (ou travado) — "
+                "com o teto de login em vigor o lock se liberta sozinho; "
+                "verifique os run_dirs em /app/output/playwright/legalone/ "
+                "se persistir."
             ) from exc
+
+    # ── Marcador de falha de login (cooldown anti-tempestade) ─────────
+
+    def _read_login_failure_marker(self):
+        """(idade_em_segundos, erro) se houve falha dentro do cooldown; None
+        caso contrario (sem marcador, vencido ou ilegivel)."""
+        try:
+            data = json.loads(_LOGIN_FAILURE_MARKER.read_text(encoding="utf-8"))
+            at = datetime.fromisoformat(data["at"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        idade = (self._utcnow() - at).total_seconds()
+        if idade >= _LOGIN_FAILURE_COOLDOWN_S:
+            return None
+        return idade, str(data.get("erro") or "?")[:300]
+
+    def _write_login_failure_marker(self, erro: str) -> None:
+        try:
+            _LOGIN_FAILURE_MARKER.parent.mkdir(parents=True, exist_ok=True)
+            _LOGIN_FAILURE_MARKER.write_text(
+                json.dumps(
+                    {"at": self._utcnow().isoformat(), "erro": erro[:1000]},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            logger.warning("Nao consegui gravar o marcador de falha de login.")
+
+    def _clear_login_failure_marker(self) -> None:
+        try:
+            _LOGIN_FAILURE_MARKER.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _invalidate_session(self) -> None:
         """Apaga o cache de cookies (forca proximo _ensure_session a relogar)."""
@@ -282,16 +376,46 @@ class LegacyTaskHttpCancellationService:
             "legacy_task_http.login.start run_dir=%s",
             run_dir.name,
         )
+        # Popen + wait(timeout) em vez de subprocess.run: o run sem timeout
+        # foi o que segurou o filelock por 1h+ em 04/08/2026 (erro nao tratado
+        # no JS deixou o node vivo e pendurado). `start_new_session` poe o
+        # node num process group proprio, pra o kill do estouro levar junto
+        # os chrome que o Playwright dispara.
+        popen_kwargs: dict = {}
+        if os.name == "posix":
+            popen_kwargs["start_new_session"] = True
         with log_path.open("ab") as stdout, err_log_path.open("ab") as stderr:
-            completed = subprocess.run(  # noqa: S603
+            proc = subprocess.Popen(  # noqa: S603
                 command,
                 cwd=str(runner_script.parent),
                 env=env,
                 stdout=stdout,
                 stderr=stderr,
                 creationflags=creation_flags,
-                check=False,
+                **popen_kwargs,
             )
+            try:
+                proc.wait(timeout=_LOGIN_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                logger.error(
+                    "legacy_task_http.login.timeout run_dir=%s (> %ss) — "
+                    "matando o grupo de processos.",
+                    run_dir.name, _LOGIN_TIMEOUT_S,
+                )
+                try:
+                    if os.name == "posix":
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    else:  # pragma: no cover - so' em dev Windows
+                        proc.kill()
+                except OSError:
+                    proc.kill()
+                proc.wait(timeout=10)
+                raise RuntimeError(
+                    f"Login Playwright excedeu {_LOGIN_TIMEOUT_S}s e foi morto "
+                    f"(run_dir={run_dir.name}). Sem esse teto, o processo "
+                    "pendurado segurava o lock de sessao indefinidamente."
+                )
+        completed = proc
 
         if completed.returncode != 0 or not output_path.exists():
             err_preview = ""

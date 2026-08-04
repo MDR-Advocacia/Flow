@@ -139,6 +139,7 @@ def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
     from app.services.performance.balanceador import _users
     from app.services.prazos_iniciais.legacy_task_http_cancellation_service import (
         LegacyTaskHttpCancellationService,
+        SessionIndisponivelError,
     )
 
     svc = LegacyTaskHttpCancellationService(client=c)
@@ -149,7 +150,8 @@ def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
         grupos[(it["exec_de"], it["resp_de"], it["cid"])].append(it)
 
     postados: list = []
-    for (exec_de, resp_de, cid), itens in grupos.items():
+    pares = list(grupos.items())
+    for gi, ((exec_de, resp_de, cid), itens) in enumerate(pares):
         if _abortado(db, job.id):
             break
         tids = [it["task_id"] for it in itens]
@@ -184,6 +186,31 @@ def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
                     para_id=cid, para_text=para_text,
                 )
             postados.extend(itens)
+        except SessionIndisponivelError as exc:
+            # Sem sessão web não adianta insistir grupo a grupo: cada tentativa
+            # custaria minutos de espera de lock pra falhar igual — foi assim
+            # que uma execução de 491 tarefas rastejou por horas em 04/08/2026.
+            # Marca este grupo E todos os restantes de uma vez, com o motivo,
+            # e encerra a fase web.
+            msg = str(exc)[:600]
+            logger.error(
+                "Sessão web indisponível — abortando a fase web com %s grupo(s) "
+                "restantes: %s", len(pares) - gi, msg,
+            )
+            for it in itens:
+                job.workflow_bloqueadas = (job.workflow_bloqueadas or 0) + 1
+                detalhe[it["idx"]]["reason"] = "web_erro"
+                detalhe[it["idx"]]["erro"] = msg
+            for _, itens_rest in pares[gi + 1:]:
+                for it in itens_rest:
+                    job.workflow_bloqueadas = (job.workflow_bloqueadas or 0) + 1
+                    detalhe[it["idx"]]["reason"] = "web_erro"
+                    detalhe[it["idx"]]["erro"] = (
+                        f"Sessão web indisponível — lote interrompido sem tentar. {msg}"
+                    )
+            job.detalhe = list(detalhe)
+            db.commit()
+            return
         except Exception as exc:  # noqa: BLE001
             # A MENSAGEM do L1 tem que sobreviver. Até 04/08/2026 só o
             # `reason` era gravado, e o motivo do 400 morria no log: quando o
