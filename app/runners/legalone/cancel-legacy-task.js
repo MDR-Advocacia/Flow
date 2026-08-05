@@ -300,7 +300,20 @@ async function createLoggedInSession(loginConfig) {
   });
 
   const page = await context.newPage();
-  await login(page, loginConfig);
+  // Se `login` estoura, o `return` abaixo nunca acontece e quem chamou fica
+  // com `session = null` — o `finally { closeSession(session) }` dele nao
+  // fecha NADA e este browser vira orfao. Chromium aberto segura o event
+  // loop do node pra sempre: o processo nao morre, so' e' morto no teto de
+  // 180s do chamador, e ate' la' o lock da sessao web fica preso.
+  // Aconteceu em 05/08/2026 08:44 — a propria pagina de login da novajus
+  // devolveu erro de servidor ("Index was outside the bounds of the array"),
+  // o login jogou "Authentication flow did not finish" e o node pendurou.
+  try {
+    await login(page, loginConfig);
+  } catch (error) {
+    await browser.close().catch(() => {});
+    throw error;
+  }
   return { browser, context, page };
 }
 
@@ -826,6 +839,18 @@ async function main() {
   await closeSession(session);
 }
 
+// `process.exitCode` so' vale quando o event loop drena. Qualquer handle
+// vazado (chromium, socket, timer) mantem o node vivo indefinidamente com o
+// codigo de saida ja' definido — foi assim que o login pendurado segurou o
+// lock por 1h+ em 04/08/2026. Este watchdog e' `unref`ado: nao atrasa saida
+// limpa nenhuma, so' dispara se o processo ainda estiver de pe' depois do
+// prazo, e ai' sai a forca com o codigo que ja' estava setado.
+const EXIT_WATCHDOG_MS = 5000;
+
+function armarWatchdogDeSaida() {
+  setTimeout(() => process.exit(), EXIT_WATCHDOG_MS).unref();
+}
+
 main().catch((error) => {
   console.error(error);
   try {
@@ -841,4 +866,4 @@ main().catch((error) => {
     console.error('Failed to persist runner failure state:', persistError);
   }
   process.exitCode = 1;
-});
+}).finally(armarWatchdogDeSaida);
