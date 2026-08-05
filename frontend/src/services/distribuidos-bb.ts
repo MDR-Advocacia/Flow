@@ -69,7 +69,7 @@ export interface DashboardData {
   por_posicao?: { posicao: string; total: number }[];
   por_responsavel?: { responsavel: string; total: number }[];
   por_estado?: { uf: string; total: number }[];
-  por_data?: { data: string; total: number }[];
+  por_data?: { data: string; total: number; clientes?: Record<string, number> }[];
   ultima_passagem?: { data: string | null; capturados: number; status: string } | null;
   por_cliente?: { cliente: string; total: number }[];
 }

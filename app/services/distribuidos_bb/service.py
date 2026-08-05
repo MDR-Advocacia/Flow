@@ -189,16 +189,30 @@ class DistribuidosBBService:
             [{"uf": uf, "total": t} for uf, t in uf_counter.items()],
             key=lambda x: -x["total"],
         )
-        # Distribuição por data de captura (created_at) — timeline.
-        por_data = [
-            {"data": str(d), "total": int(q)}
-            for d, q in (
-                self.db.query(func.date(BbProcesso.created_at), func.count(BbProcesso.id))
-                .group_by(func.date(BbProcesso.created_at))
-                .order_by(func.date(BbProcesso.created_at))
-                .all()
+        # Distribuição por data de captura (created_at) — timeline, com a
+        # quebra POR CLIENTE por dia embutida. O frontend filtra client-side
+        # clicando nos chips do "Por cliente": uma resposta só serve o gráfico
+        # total e qualquer recorte, sem round-trip por clique. `total` continua
+        # existindo pra compatibilidade.
+        por_data_map: dict[str, dict] = {}
+        for d, cli, q in (
+            self.db.query(
+                func.date(BbProcesso.created_at),
+                BbProcesso.cliente,
+                func.count(BbProcesso.id),
             )
-        ]
+            .group_by(func.date(BbProcesso.created_at), BbProcesso.cliente)
+            .order_by(func.date(BbProcesso.created_at))
+            .all()
+        ):
+            linha = por_data_map.setdefault(
+                str(d), {"data": str(d), "total": 0, "clientes": {}}
+            )
+            linha["total"] += int(q)
+            linha["clientes"][cli or "BB"] = (
+                linha["clientes"].get(cli or "BB", 0) + int(q)
+            )
+        por_data = list(por_data_map.values())
         ultima_passagem = None
         if ultima_run is not None:
             ultima_passagem = {

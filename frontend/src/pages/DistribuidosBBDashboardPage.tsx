@@ -161,6 +161,16 @@ export default function DistribuidosBBDashboardPage() {
     }
   }, [toast]);
 
+  // Filtro do gráfico de capturas: clicar num chip do "Por cliente" recorta a
+  // série; clicar de novo (ou no chip ativo) volta ao total. Client-side — a
+  // resposta do dashboard já traz a quebra por cliente por dia.
+  const [clienteFiltro, setClienteFiltro] = useState<string | null>(null);
+
+  const labelCliente = (tag: string) =>
+    tag === "ATIVOS" ? "Ativos" : tag === "BB" ? "Banco do Brasil" : "Outros clientes";
+  const corCliente = (tag: string) =>
+    tag === "ATIVOS" ? "bg-violet-500" : tag === "BB" ? "bg-yellow-500" : "bg-slate-400";
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -369,13 +379,25 @@ export default function DistribuidosBBDashboardPage() {
           </CardHeader>
           <CardContent className="flex flex-wrap gap-3">
             {data.por_cliente.map((c) => (
-              <div key={c.cliente} className="flex items-center gap-2 rounded-md border bg-card px-3 py-2">
-                <span
-                  className={`h-2.5 w-2.5 rounded-full ${c.cliente === "ATIVOS" ? "bg-violet-500" : "bg-yellow-500"}`}
-                />
-                <span className="text-sm">{c.cliente === "ATIVOS" ? "Ativos" : "Banco do Brasil"}</span>
+              <button
+                key={c.cliente}
+                type="button"
+                onClick={() =>
+                  setClienteFiltro((atual) => (atual === c.cliente ? null : c.cliente))
+                }
+                title="Filtrar o gráfico de capturas por este cliente"
+                className={`flex items-center gap-2 rounded-md border bg-card px-3 py-2 transition-colors hover:bg-accent ${
+                  clienteFiltro === c.cliente
+                    ? "ring-2 ring-primary border-primary"
+                    : clienteFiltro
+                      ? "opacity-50"
+                      : ""
+                }`}
+              >
+                <span className={`h-2.5 w-2.5 rounded-full ${corCliente(c.cliente)}`} />
+                <span className="text-sm">{labelCliente(c.cliente)}</span>
                 <span className="text-base font-semibold">{c.total}</span>
-              </div>
+              </button>
             ))}
           </CardContent>
         </Card>
@@ -384,7 +406,21 @@ export default function DistribuidosBBDashboardPage() {
       {/* Distribuição por data (capturas) + última passagem */}
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0 pb-3">
-          <CardTitle className="text-base">Distribuição por data (capturas)</CardTitle>
+          <CardTitle className="text-base">
+            Distribuição por data (capturas)
+            {clienteFiltro && (
+              <span className="ml-2 text-sm font-normal text-muted-foreground">
+                · {labelCliente(clienteFiltro)} —{" "}
+                <button
+                  type="button"
+                  className="underline hover:text-foreground"
+                  onClick={() => setClienteFiltro(null)}
+                >
+                  limpar
+                </button>
+              </span>
+            )}
+          </CardTitle>
           {data?.ultima_passagem?.data && (
             <span className="rounded-md bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground">
               Última passagem:{" "}
@@ -399,7 +435,13 @@ export default function DistribuidosBBDashboardPage() {
           ) : (
             <div className="h-[210px]">
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={data!.por_data} margin={{ left: -14, right: 8, top: 6 }}>
+                <AreaChart
+                  data={(data!.por_data ?? []).map((d) => ({
+                    ...d,
+                    total: clienteFiltro ? (d.clientes?.[clienteFiltro] ?? 0) : d.total,
+                  }))}
+                  margin={{ left: -14, right: 8, top: 6 }}
+                >
                   <defs>
                     <linearGradient id="gData" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.35} />
