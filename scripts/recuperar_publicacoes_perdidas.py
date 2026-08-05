@@ -51,25 +51,38 @@ log = logging.getLogger("recuperar-publicacoes")
 ORIGEM = "OfficialJournalsCrawler"
 
 
-def _publicacoes_do_processo(client: LegalOneApiClient, lawsuit_id: int) -> list[dict]:
-    """Todas as publicações vinculadas a UMA pasta.
+def _publicacoes_do_processo(
+    client: LegalOneApiClient,
+    lawsuit_id: int,
+    desde: str,
+    somente_ultima: bool,
+) -> list[dict]:
+    """Publicações vinculadas a UMA pasta, da data de corte pra frente.
 
     `relationships/any` é filtrável em /Updates (testado em prod 05/08/2026;
     devolve 200 e o count bate com a tela). É o único jeito de olhar o passado
     de uma pasta específica — a busca normal é por janela de data.
+
+    No modo padrão (só a mais recente) o corte é feito PELO SERVIDOR, com
+    `$orderby=date desc&$top=1`: uma requisição por pasta, sem paginação. A
+    varredura completa derrubou o levantamento no 429 do L1, e trazer 30
+    publicações pra descartar 29 é desperdício puro.
     """
     filtro = (
         f"originType eq '{ORIGEM}' and "
-        f"relationships/any(r: r/linkId eq {int(lawsuit_id)})"
+        f"relationships/any(r: r/linkId eq {int(lawsuit_id)}) and "
+        f"date ge {desde}T00:00:00Z"
     )
+    base = f"{client.base_url}/Updates?$filter={quote(filtro, safe='')}&$expand=relationships"
+
+    if somente_ultima:
+        url = f"{base}&$orderby={quote('date desc', safe='')}&$top=1"
+        return client._request_with_retry("GET", url).json().get("value", [])
+
     itens: list[dict] = []
     skip = 0
     while True:
-        url = (
-            f"{client.base_url}/Updates?$filter={quote(filtro, safe='')}"
-            f"&$expand=relationships&$top=30&$skip={skip}"
-        )
-        resp = client._request_with_retry("GET", url)
+        resp = client._request_with_retry("GET", f"{base}&$top=30&$skip={skip}")
         pagina = resp.json().get("value", [])
         if not pagina:
             break
@@ -120,7 +133,9 @@ def main() -> int:
         vistas = 0
         for i, lid in enumerate(lawsuit_ids, 1):
             try:
-                pubs = _publicacoes_do_processo(client, lid)
+                pubs = _publicacoes_do_processo(
+                    client, lid, args.desde, somente_ultima=not args.todas
+                )
             except Exception as exc:
                 log.error("pasta %s: falha ao ler publicações: %s", lid, exc)
                 continue

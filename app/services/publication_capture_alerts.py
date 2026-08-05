@@ -150,3 +150,72 @@ def alertar_contingencia_ativada(
         logger.info("Alerta de contingência ativada enviado (relatório #%s).", report_id)
     except Exception:  # noqa: BLE001
         logger.exception("Falha ao enviar o alerta de contingência (ignorado).")
+
+
+def alertar_cobertura_furada(
+    *,
+    pastas_na_raiz: int,
+    escritorios_fora: Optional[Sequence[dict]] = None,
+    office_ids_varridos: Optional[Sequence[int]] = None,
+) -> None:
+    """Avisa que existe pasta ATIVA fora do perímetro varrido pela captura.
+
+    O terceiro tipo de falha, descoberto em 05/08/2026: não é a rodada que
+    quebra nem a API que cai — é a pasta que nunca entrou no mapa. Publicação
+    de processo no escritório raiz não é capturada e não vira descarte; ela
+    simplesmente não existe pro Flow. Os outros dois alertas vigiam a execução
+    e não pegam isso, porque a execução termina perfeita.
+    """
+    try:
+        from app.services.mail_service import send_failure_report
+
+        destinatarios = _destinatarios()
+        if not destinatarios:
+            logger.warning(
+                "Cobertura furada (%s pasta(s) na raiz) mas não há destinatário "
+                "configurado — alerta não enviado.", pastas_na_raiz,
+            )
+            return
+
+        motivo = (
+            f"{pastas_na_raiz} pasta(s) ATIVA(s) estão no escritório raiz "
+            f"(\"MDR Advocacia\"), ou seja, sem escritório responsável de "
+            f"verdade.\n\n"
+            "A busca de publicações filtra por escritório. Pasta na raiz não "
+            "entra em busca nenhuma: a publicação desses processos NÃO é "
+            "capturada e também NÃO aparece como descarte na auditoria — ela "
+            "não deixa rastro. O prazo corre sem ninguém ver.\n\n"
+            "O que fazer: preencher o escritório responsável dessas pastas no "
+            "Legal One. Para corrigir em lote, use "
+            "scripts/corrigir_escritorio_responsavel.py."
+        )
+        if office_ids_varridos:
+            motivo += (
+                f"\n\nEscritórios varridos hoje: "
+                f"{', '.join(str(o) for o in office_ids_varridos)}."
+            )
+        if escritorios_fora:
+            linhas = "\n".join(
+                f"  · {e['pastas']} pasta(s) — escritório {e['office_id']} ({e['path']})"
+                for e in escritorios_fora
+            )
+            motivo += (
+                "\n\nOutros escritórios fora da varredura (pode ser intencional, "
+                "mas confira se alguma dessas áreas deveria receber publicação):\n"
+                + linhas
+            )
+
+        send_failure_report(
+            failed_items=[{
+                "cnj": f"{pastas_na_raiz} pasta(s) sem escritório responsável",
+                "motivo": motivo,
+            }],
+            batch_source="Captura de Publicações (cobertura)",
+            recipients=destinatarios,
+            system_name="Flow",
+        )
+        logger.info(
+            "Alerta de cobertura enviado (%s pasta(s) na raiz).", pastas_na_raiz
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Falha ao enviar o alerta de cobertura (ignorado).")

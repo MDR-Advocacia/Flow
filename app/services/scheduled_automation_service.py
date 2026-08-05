@@ -918,12 +918,34 @@ class ScheduledAutomationService:
                 run_id=run_id,
             )
 
+        # Vigia do PERÍMETRO, não da execução: os dois alertas acima só sabem
+        # falar de escritório que foi varrido. Pasta parada no escritório raiz
+        # não é varrida por ninguém, então some sem gerar erro — foi assim que
+        # 654 pastas ficaram invisíveis até 05/08/2026, uma delas com prazo de
+        # réplica já decorrido. Roda depois da captura pra não atrasá-la.
+        self._verificar_cobertura(ok + failed + skipped)
+
         return {
             "records_found": total_found,
             "offices_ok": ok,
             "offices_failed": failed,
             "offices_skipped": skipped,
         }
+
+    def _verificar_cobertura(self, office_ids_varridos) -> None:
+        try:
+            from app.services.legal_one_client import LegalOneApiClient
+            from app.services.publication_office_coverage import (
+                alertar_se_houver_buraco,
+            )
+
+            # Client próprio: o serviço não guarda um, e a verificação é
+            # best-effort — não vale acoplar o construtor por causa dela.
+            alertar_se_houver_buraco(
+                self.db, LegalOneApiClient(), office_ids_varridos
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha na verificação de cobertura (ignorada).")
 
     # ── Contingências da captura, em ordem ────────────────────────────
 
