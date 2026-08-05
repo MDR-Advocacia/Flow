@@ -82,6 +82,41 @@ def _escritorio_atual(client: LegalOneApiClient, lawsuit_id: int) -> int | None:
     return None
 
 
+def _ressincronizar_indices(office_ids: list[int]) -> None:
+    """Refaz o índice escritório→processos dos destinos, de forma SÍNCRONA."""
+    try:
+        from app.db.session import SessionLocal
+        from app.services.office_lawsuit_index_service import (
+            OfficeLawsuitIndexService,
+            _run_sync_thread,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Índice não ressincronizado (import falhou): %s", exc)
+        return
+
+    db = SessionLocal()
+    try:
+        svc = OfficeLawsuitIndexService(db)
+        for oid in office_ids:
+            try:
+                estado = svc._get_or_create_state(int(oid))
+                estado.in_progress = True
+                estado.last_sync_status = "running"
+                db.commit()
+                # Chamada direta da função, não da thread: o script precisa
+                # terminar com o índice já correto.
+                _run_sync_thread(int(oid), "full")
+                db.expire_all()
+                log.info(
+                    "índice do escritório %s refeito: %s processo(s)",
+                    oid, len(svc.get_lawsuit_ids(int(oid))),
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.error("índice do escritório %s falhou: %s", oid, exc)
+    finally:
+        db.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--plano", required=True, help="JSON com lawsuit_id/office_id")
@@ -153,6 +188,15 @@ def main() -> int:
                 "pasta %s (id %s): esperado %s, L1 diz %s",
                 linha.get("pasta"), linha["lawsuit_id"], linha["office_id"], atual,
             )
+
+    # Sem isto a correção é meia correção. O pré-filtro da captura de
+    # publicações não olha o L1: olha o índice `office_lawsuit_index`, montado
+    # às 01h. Mover a pasta no L1 e não refazer o índice deixa ela invisível
+    # até o próximo full sync — ou seja, a rodada da madrugada seguinte perde
+    # exatamente as pastas que a gente acabou de consertar. E não adianta
+    # confiar no `ensure_sync`: ele dispara o full em BACKGROUND e o pré-filtro
+    # segue com o índice velho que já está na mesa.
+    _ressincronizar_indices(sorted(por_escritorio))
 
     log.info("=" * 60)
     log.info("enviados: %s de %s", enviados, len(plano))
