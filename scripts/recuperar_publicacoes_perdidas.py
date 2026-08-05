@@ -37,6 +37,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from collections import Counter
 from urllib.parse import quote
 
@@ -110,6 +111,13 @@ def main() -> int:
              "prazo vivo é a última; as anteriores só inflam a fila.",
     )
     ap.add_argument(
+        "--pausa", type=float, default=0.5,
+        help="segundos entre pastas. O 429 do L1 tem backoff escalonado (chega a "
+             "30s por batida), então esperar um pouco de propósito sai mais "
+             "barato que apanhar. A cota é do tenant inteiro: a captura diária e "
+             "os outros módulos disputam a mesma.",
+    )
+    ap.add_argument(
         "--classificar", action="store_true",
         help="dispara a classificação automática junto com a injeção",
     )
@@ -147,6 +155,8 @@ def main() -> int:
                 if p.get("id") in ja_temos:
                     continue
                 novas.append(dict(p, _lawsuit_id=lid, _data=data))
+            if args.pausa:
+                time.sleep(args.pausa)
             if i % 50 == 0:
                 log.info(
                     "  %s/%s pastas lidas — %s publicações vistas, %s novas no recorte",
