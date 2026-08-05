@@ -79,9 +79,60 @@ def _periodo_clause(dias: int) -> str:
     return ""
 
 
+def marcar_origem_publicacoes(
+    tarefas: list[dict], ids_publicacoes: set, apenas: bool = False,
+) -> list[dict]:
+    """Marca cada tarefa com `de_publicacoes` e, se `apenas`, recorta a lista.
+
+    Isolado do `live_pessoa` (que fala com o L1) pra ser testável: é a regra
+    que decide o que entra na redistribuição quando o supervisor liga o
+    recorte de origem.
+
+    O recorte age SÓ na seleção do que será movido — a carga por pessoa, que
+    define quem está sobrecarregado, continua sendo a fila inteira.
+    """
+    for t in tarefas:
+        t["de_publicacoes"] = int(t.get("l1_task_id") or 0) in ids_publicacoes
+    if apenas:
+        return [t for t in tarefas if t["de_publicacoes"]]
+    return tarefas
+
+
 class BalanceadorService:
     def __init__(self, db: Session):
         self.db = db
+
+    # Tarefas cuja origem é o módulo de Publicações. O vínculo é EXATO: todo
+    # agendamento feito por lá grava o id da tarefa criada no L1 em
+    # `publicacao_tarefa_audit.created_task_id`, que é o mesmo id do snapshot.
+    #
+    # Não dá pra inferir por SUBTIPO: medido em 05/08/2026, os subtipos mais
+    # "de Publicações" ficam entre 88% e 99% (nunca 100%), e há casos de 65% e
+    # 54% — filtrar por subtipo erraria de 5% a 45%.
+    _ORIGEM_PUB_JOIN = """
+        LEFT JOIN (
+            SELECT DISTINCT created_task_id
+              FROM publicacao_tarefa_audit
+             WHERE created_task_id IS NOT NULL
+        ) pub ON pub.created_task_id = t.l1_task_id
+    """
+
+    def origem_publicacoes_desde(self) -> str | None:
+        """Data do agendamento mais antigo registrado (ISO) — o LIMITE do recorte.
+
+        Tarefa criada por Publicações ANTES disso existe na fila e não aparece
+        no recorte: a auditoria não existia. A tela mostra essa data pro
+        supervisor não achar que "limpou tudo" quando limpou o que é visível.
+        """
+        row = self.db.execute(
+            text("SELECT min(created_at) AS desde FROM publicacao_tarefa_audit")
+        ).first()
+        if not row or not row.desde:
+            return None
+        # O driver devolve datetime no Postgres e str no SQLite — normaliza pra
+        # ISO curto (YYYY-MM-DD) nos dois casos.
+        desde = row.desde
+        return desde.date().isoformat() if hasattr(desde, "date") else str(desde)[:10]
 
     def diagnostico(self, team: str, inicio: str | None = None, fim: str | None = None) -> list[dict]:
         """Por colaborador do time: pendentes atrasadas / fatais hoje / futuras.
@@ -114,10 +165,23 @@ class BalanceadorService:
                   count(t.id) FILTER (WHERE {_PRAZO} = {_HOJE}) AS fatal_hoje,
                   count(t.id) FILTER (WHERE t.prazo_previsto IS NOT NULL AND {_PRAZO} > {_HOJE}) AS futuro,
                   count(t.id) FILTER (WHERE t.prazo_previsto IS NULL) AS sem_prazo,
-                  count(t.id) AS total
+                  count(t.id) AS total,
+                  -- Recorte de ORIGEM: quanto de cada balde veio de Publicações.
+                  -- É informativo — NUNCA substitui o número de carga, senão o
+                  -- supervisor decide "quem está cheio" olhando uma fatia.
+                  count(t.id) FILTER (
+                    WHERE pub.created_task_id IS NOT NULL
+                      AND t.prazo_previsto IS NOT NULL AND {_PRAZO} < {_HOJE}) AS atrasado_pub,
+                  count(t.id) FILTER (
+                    WHERE pub.created_task_id IS NOT NULL AND {_PRAZO} = {_HOJE}) AS fatal_hoje_pub,
+                  count(t.id) FILTER (
+                    WHERE pub.created_task_id IS NOT NULL
+                      AND t.prazo_previsto IS NOT NULL AND {_PRAZO} > {_HOJE}) AS futuro_pub,
+                  count(t.id) FILTER (WHERE pub.created_task_id IS NOT NULL) AS total_pub
                 FROM perf_pessoa p
                 LEFT JOIN perf_l1_tarefa t
                   ON t.pessoa_id = p.id AND t.status = 'Pendente'{janela}
+                {self._ORIGEM_PUB_JOIN}
                 WHERE p.equipe = :team AND p.ativo
                 GROUP BY p.id, p.nome, p.cargo, p.is_supervisor
                 ORDER BY p.is_supervisor DESC, atrasado DESC, futuro DESC, p.nome
@@ -130,6 +194,8 @@ class BalanceadorService:
                 "id": r.id, "nome": r.nome, "cargo": r.cargo, "is_supervisor": r.is_supervisor,
                 "atrasado": r.atrasado, "fatal_hoje": r.fatal_hoje, "futuro": r.futuro,
                 "sem_prazo": r.sem_prazo, "total": r.total,
+                "atrasado_pub": r.atrasado_pub, "fatal_hoje_pub": r.fatal_hoje_pub,
+                "futuro_pub": r.futuro_pub, "total_pub": r.total_pub,
             }
             for r in rows
         ]
@@ -366,6 +432,7 @@ class BalanceadorService:
         incluir_atrasadas: bool = True,
         inicio: str | None = None,
         fim: str | None = None,
+        apenas_publicacoes: bool = False,
     ) -> dict:
         """Pendentes NÃO iniciadas (statusId=0) da pessoa, AO VIVO do L1 (filtro
         por participante). Agrupa por subtipo (nome via catálogo local
@@ -505,6 +572,26 @@ class BalanceadorService:
         # de conclusão prevista mais antiga, independentemente da origem.
         tarefas.sort(key=lambda t: (t.get("prazo") is None, t.get("prazo") or ""))
 
+        # ── Origem Publicações ────────────────────────────────────────
+        # Marca CADA tarefa (o modal mostra o selo) e, com
+        # `apenas_publicacoes`, recorta a seleção. O recorte age SÓ aqui — na
+        # hora de escolher o que mover. A carga por pessoa, que define quem
+        # está sobrecarregado, continua sendo a fila inteira.
+        ids_vivos = [int(t["l1_task_id"]) for t in tarefas if t.get("l1_task_id")]
+        de_pub: set = set()
+        if ids_vivos:
+            de_pub = {
+                int(r.created_task_id)
+                for r in self.db.execute(
+                    text(
+                        "SELECT DISTINCT created_task_id FROM publicacao_tarefa_audit "
+                        "WHERE created_task_id = ANY(:ids)"
+                    ),
+                    {"ids": ids_vivos},
+                ).fetchall()
+            }
+        tarefas = marcar_origem_publicacoes(tarefas, de_pub, apenas_publicacoes)
+
         agg = defaultdict(lambda: {"total": 0, "atrasado": 0, "fatal_hoje": 0})
         for t in tarefas:
             a = agg[t["subtipo"]]
@@ -518,4 +605,6 @@ class BalanceadorService:
             "pessoa_id": pessoa_id, "nome": p.nome, "resolvido": True,
             "total_real": total_real, "carregadas": len(tarefas), "capado": capado,
             "subtipos": subtipos, "tarefas": tarefas,
+            "de_publicacoes": sum(1 for t in tarefas if t.get("de_publicacoes")),
+            "apenas_publicacoes": bool(apenas_publicacoes),
         }

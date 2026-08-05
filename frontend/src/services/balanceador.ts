@@ -30,6 +30,13 @@ export interface Colaborador {
   futuro: number;
   sem_prazo: number;
   total: number;
+  /** Recorte de ORIGEM: quanto de cada balde veio do módulo de Publicações.
+   *  É informativo — a carga que define "quem está sobrecarregado" continua
+   *  sendo o número cheio (atrasado/fatal_hoje/futuro/total). */
+  atrasado_pub: number;
+  fatal_hoje_pub: number;
+  futuro_pub: number;
+  total_pub: number;
 }
 
 export interface MatrizItem {
@@ -119,6 +126,9 @@ export interface FaixaData {
   /** Puxar TAMBÉM as vencidas (prazo < hoje), além da faixa. Default: não —
    *  com o calendário fixo, a faixa escolhida é o recorte exato. */
   incluirAtrasadas?: boolean;
+  /** Recorta a seleção às tarefas originadas no módulo de Publicações.
+   *  Age SÓ na escolha do que mover — a tabela de carga não muda. */
+  apenasPublicacoes?: boolean;
 }
 
 export async function getLivePessoa(
@@ -132,6 +142,7 @@ export async function getLivePessoa(
     qs.set("inicio", faixa.inicio);
     qs.set("fim", faixa.fim);
     qs.set("incluir_atrasadas", String(!!faixa.incluirAtrasadas));
+    if (faixa.apenasPublicacoes) qs.set("apenas_publicacoes", "true");
   } else {
     qs.set("dias", String(dias));
     qs.set("incluir_atrasadas", "true");
@@ -144,8 +155,26 @@ export async function getDiagnostico(
 ): Promise<Colaborador[]> {
   const qs = new URLSearchParams({ team });
   if (faixa) { qs.set("inicio", faixa.inicio); qs.set("fim", faixa.fim); }
-  const r = await json<{ colaboradores: Colaborador[] }>(await apiFetch(`${BASE}/diagnostico?${qs.toString()}`));
+  const r = await json<{ colaboradores: Colaborador[]; publicacoes_desde?: string | null }>(
+    await apiFetch(`${BASE}/diagnostico?${qs.toString()}`),
+  );
+  // `publicacoes_desde` viaja junto no array (propriedade não-enumerável seria
+  // perdida no map do React) — quem quiser lê via getDiagnosticoCompleto.
   return r.colaboradores;
+}
+
+/** Igual ao getDiagnostico, mas devolve também o LIMITE do recorte de origem:
+ *  a data do agendamento mais antigo registrado. Tarefa de Publicações
+ *  anterior a isso existe na fila e não aparece no recorte. */
+export async function getDiagnosticoCompleto(
+  team: string, faixa?: { inicio: string; fim: string } | null,
+): Promise<{ colaboradores: Colaborador[]; publicacoes_desde: string | null }> {
+  const qs = new URLSearchParams({ team });
+  if (faixa) { qs.set("inicio", faixa.inicio); qs.set("fim", faixa.fim); }
+  const r = await json<{ colaboradores: Colaborador[]; publicacoes_desde?: string | null }>(
+    await apiFetch(`${BASE}/diagnostico?${qs.toString()}`),
+  );
+  return { colaboradores: r.colaboradores, publicacoes_desde: r.publicacoes_desde ?? null };
 }
 
 export async function getMatriz(team: string, pessoaIds: number[], dias: number): Promise<MatrizItem[]> {

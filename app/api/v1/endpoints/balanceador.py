@@ -31,7 +31,13 @@ def diagnostico(
     fim: str | None = Query(None, description="filtro da tabela: conclusão prevista <= (YYYY-MM-DD)"),
     db: Session = Depends(get_db),
 ):
-    return {"colaboradores": BalanceadorService(db).diagnostico(team, inicio=inicio, fim=fim)}
+    svc = BalanceadorService(db)
+    return {
+        "colaboradores": svc.diagnostico(team, inicio=inicio, fim=fim),
+        # Limite do recorte de origem: agendamento mais antigo registrado. A
+        # tela avisa que tarefa de Publicações anterior a isso é invisível.
+        "publicacoes_desde": svc.origem_publicacoes_desde(),
+    }
 
 
 @router.get("/redistribuir", summary="Matriz subtipo × colaborador dos escolhidos", dependencies=[_team])
@@ -72,10 +78,14 @@ def live_pessoa(
     ),
     inicio: str | None = Query(None, description="faixa exata: data de conclusão prevista inicial (YYYY-MM-DD)"),
     fim: str | None = Query(None, description="faixa exata: data de conclusão prevista final (YYYY-MM-DD)"),
+    apenas_publicacoes: bool = Query(
+        False, description="recorta a seleção às tarefas originadas no módulo de Publicações"
+    ),
     db: Session = Depends(get_db),
 ):
     return BalanceadorService(db).live_pessoa(
         team, pessoa_id, dias, incluir_atrasadas, inicio=inicio, fim=fim,
+        apenas_publicacoes=apenas_publicacoes,
     )
 
 
