@@ -67,6 +67,12 @@ logger = logging.getLogger(__name__)
 
 
 CANCEL_ENDPOINT_PATH = "/processos/CompromissoTarefa/ModalEnvolvimentoEmLote"
+# Alteracao em lote de campos da PASTA (nao da tarefa). Mesma familia de modal
+# do ModalEnvolvimentoEmLote, outro controller. CampoId identifica o campo a
+# alterar; 10 = "Escritorio responsavel" (capturado do HAR da tela de processos
+# em 05/08/2026). Assincrono: Success=true significa "enfileirado", nao "feito".
+PROCESSOS_LOTE_ENDPOINT_PATH = "/processos/Processos/ModalAlterarEmLote"
+CAMPO_ID_ESCRITORIO_RESPONSAVEL = 10
 
 # 9 campos minimos validados como suficientes pelo Teste 2.4 (2026-05-07).
 # `parentId` e' decorativo (Teste 2.3); 0 evita expor um id real por engano.
@@ -749,6 +755,116 @@ class LegacyTaskHttpCancellationService:
             )
             return {"ok": True, "count": len(task_ids), "raw": payload}
         raise _CancelHttpError("loop de retry HTTP (reassign) esgotado", category="runner_error")
+
+    def post_alterar_escritorio_responsavel(
+        self,
+        *,
+        lawsuit_ids: list[int],
+        office_id: int,
+        office_text: str = "",
+    ) -> dict[str, Any]:
+        """Troca o ESCRITORIO RESPONSAVEL de um lote de pastas de processo.
+
+        Endpoint web (`ModalAlterarEmLote`) porque o PATCH REST de pasta esbarra
+        na trava de tenant — mesma razao do Arquivar/Ativar. Payload capturado
+        do HAR de 05/08/2026, onde a operacao trocou uma pasta na mao.
+
+        SEGURANCA: `SelectAll=false` + `SelectedIds` explicitos. So' as pastas
+        listadas mudam; nao existe caminho onde o filtro da tela vaze pro lote.
+        Mesmo contrato que o `post_reassign` ja usa em producao pra tarefas.
+
+        Assincrono: 200 com Success=true quer dizer "alteracao iniciada". A
+        confirmacao real vem de reler `responsibleOfficeId` na API depois.
+        """
+        if not lawsuit_ids:
+            return {"ok": True, "count": 0, "raw": None}
+        url = f"{self._web_base_url()}{PROCESSOS_LOTE_ENDPOINT_PATH}"
+        headers = {"X-Requested-With": "XMLHttpRequest", "Accept": "*/*"}
+        # Os campos vazios NAO sao decorativos: o modal posta o formulario
+        # inteiro e o binder do lado do L1 le' cada um. Campo ausente ja' deu
+        # 200 com Success=false em outros modais da casa.
+        body_base: list[tuple[str, str]] = [
+            ("RequirirNegociacaoDeHonorarioPreenchida", "False"),
+            ("ShowJustificationModal", "False"),
+            ("CampoText", "Escritório responsável"),
+            ("CampoId", str(CAMPO_ID_ESCRITORIO_RESPONSAVEL)),
+            ("NegociacaoText", ""), ("NegociacaoId", ""),
+            ("ResponsavelText", ""), ("ResponsavelId", ""),
+            ("StatusText", ""), ("StatusId", ""),
+            ("TituloText", ""),
+            ("OriginOfficeText", ""), ("OriginOfficeId", ""),
+            ("ResponsibleOfficeText", office_text or ""),
+            ("ResponsibleOfficeId", str(int(office_id))),
+            ("DischargeDate", ""),
+            ("PhaseText", ""), ("PhaseId", ""),
+            ("NatureText", ""), ("NatureId", ""),
+            ("ClosingDate", ""), ("DecisionDate", ""), ("ResultDate", ""),
+            ("ReasonForClosing", ""), ("Value", ""), ("Id", ""),
+            ("selectionViewModel[SelectAll]", "false"),
+            ("selectionViewModel[SelectFirsts]", "false"),
+            ("selectionViewModel[UseStringIds]", "false"),
+            ("selectionViewModel[UnselectedIds]", ""),
+        ]
+        for attempt in range(2):
+            cookies = self._ensure_session()
+            body = list(body_base)
+            for lid in lawsuit_ids:
+                body.append(("selectionViewModel[SelectedIds][]", str(int(lid))))
+            try:
+                response = self._http.post(
+                    url, data=body, cookies=cookies, headers=headers, timeout=60
+                )
+            except requests.exceptions.RequestException as exc:
+                raise _CancelHttpError(
+                    f"erro de rede no POST de escritorio: {exc}", category="timeout"
+                ) from exc
+            if self._is_session_invalid(response):
+                self._invalidate_session()
+                if attempt == 0:
+                    logger.info(
+                        "legacy_task_http.session_invalid: re-login (escritorio n=%s)",
+                        len(lawsuit_ids),
+                    )
+                    continue
+                raise _CancelHttpError(
+                    "sessao invalida persistente apos re-login (403)",
+                    category="auth_failure",
+                )
+            if response.status_code >= 500:
+                raise _CancelHttpError(
+                    f"L1 retornou {response.status_code}", category="timeout"
+                )
+            if response.status_code != 200:
+                raise _CancelHttpError(
+                    f"L1 retornou {response.status_code}: {(response.text or '')[:256]}",
+                    category="runner_error",
+                )
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise _CancelHttpError(
+                    f"resposta L1 nao e JSON: {(response.text or '')[:256]}",
+                    category="runner_error",
+                ) from exc
+            if not payload.get("Success"):
+                err = (
+                    payload.get("ErrorMessage")
+                    or payload.get("Message")
+                    or "Success=false"
+                )
+                raise _CancelHttpError(
+                    f"L1 rejeitou alteracao de escritorio: {err}",
+                    category="runner_error",
+                )
+            logger.info(
+                "legacy_task_http.post_escritorio_ok office=%s n=%s elapsed_ms=%s",
+                office_id, len(lawsuit_ids),
+                int(response.elapsed.total_seconds() * 1000),
+            )
+            return {"ok": True, "count": len(lawsuit_ids), "raw": payload}
+        raise _CancelHttpError(
+            "loop de retry HTTP (escritorio) esgotado", category="runner_error"
+        )
 
     # ── Interface publica (compat com LegacyTaskHelper (legacy_task_helpers)) ──
 
