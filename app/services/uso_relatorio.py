@@ -84,52 +84,104 @@ def _tabela_existe(db: Session, nome: str) -> bool:
     ).scalar())
 
 
-def _acoes_por_usuario(
-    db: Session, desde: date,
-) -> dict[int, dict[str, Any]]:
-    """Conta ações efetivas por usuário, varrendo os rastros de autoria.
+def _coletar_acoes(db: Session, desde: date) -> list[tuple]:
+    """Devolve (user_id, dia, tipo, n) de TODAS as fontes, numa consulta só.
 
-    Fonte que não existe no banco é PULADA em silêncio: o relatório roda em
-    instalações onde nem todo módulo foi criado, e uma tabela ausente não pode
-    derrubar a tela inteira do administrativo.
+    Uma query em vez de 19: a mesma coleta alimenta o total por pessoa, o
+    detalhe por tipo e a série do dashboard. Fazer três varreduras separadas
+    dos mesmos 19 rastros seria desperdício — e, pior, abriria espaço pros
+    três números discordarem entre si.
+
+    Só usuário ATIVO entra, porque é a mesma população da tabela do relatório.
+    Sem esse filtro o gráfico somava 11.222 ações e a tabela 11.220: duas
+    ações de gente desligada apareciam no total e em linha nenhuma — o tipo de
+    diferença que destrói a confiança no relatório inteiro.
     """
-    acumulado: dict[int, dict[str, Any]] = {}
-
+    partes: list[str] = []
     for tabela, col_id, col_email, col_data, rotulo in _FONTES:
         if not _tabela_existe(db, tabela):
             continue
-
-        # O join por e-mail cobre os módulos que não guardam o id. É seguro
-        # porque e-mail é único em legal_one_users.
         if col_id and col_email:
             ligacao = f"(t.{col_id} = u.id or lower(t.{col_email}) = lower(u.email))"
         elif col_id:
             ligacao = f"t.{col_id} = u.id"
         else:
             ligacao = f"lower(t.{col_email}) = lower(u.email)"
-
-        sql = text(f"""
-            select u.id as user_id, count(*) as n, max(t.{col_data}) as ultima
+        # O rótulo entra como literal no SQL — vem só da constante _FONTES
+        # acima, nunca de entrada do usuário.
+        partes.append(f"""
+            select u.id as user_id,
+                   (t.{col_data} at time zone 'America/Sao_Paulo')::date as dia,
+                   '{rotulo}' as tipo,
+                   count(*) as n
               from {tabela} t
               join legal_one_users u on {ligacao}
-             where t.{col_data} >= :desde
-             group by u.id
+             where t.{col_data} >= :desde and u.is_active
+             group by 1, 2
         """)
+
+    if not partes:
+        return []
+    try:
+        return list(db.execute(text(" union all ".join(partes)),
+                               {"desde": desde}).fetchall())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("uso: coleta de ações falhou (%s)", str(exc)[:200])
+        db.rollback()
+        return _coletar_acoes_uma_a_uma(db, desde)
+
+
+def _coletar_acoes_uma_a_uma(db: Session, desde: date) -> list[tuple]:
+    """Plano B: fonte a fonte, pulando a que quebrar.
+
+    A união é uma consulta só — se UMA tabela mudar de forma, o relatório
+    inteiro cai. Aqui o estrago fica contido na fonte problemática.
+    """
+    saida: list[tuple] = []
+    for tabela, col_id, col_email, col_data, rotulo in _FONTES:
+        if not _tabela_existe(db, tabela):
+            continue
+        if col_id and col_email:
+            ligacao = f"(t.{col_id} = u.id or lower(t.{col_email}) = lower(u.email))"
+        elif col_id:
+            ligacao = f"t.{col_id} = u.id"
+        else:
+            ligacao = f"lower(t.{col_email}) = lower(u.email)"
         try:
-            linhas = db.execute(sql, {"desde": desde}).fetchall()
+            saida += list(db.execute(text(f"""
+                select u.id, (t.{col_data} at time zone 'America/Sao_Paulo')::date,
+                       '{rotulo}', count(*)
+                  from {tabela} t join legal_one_users u on {ligacao}
+                 where t.{col_data} >= :desde and u.is_active group by 1, 2
+            """), {"desde": desde}).fetchall())
         except Exception as exc:  # noqa: BLE001
             logger.warning("uso: fonte %s ignorada (%s)", tabela, str(exc)[:120])
             db.rollback()
+    return saida
+
+
+def _ultima_acao_por_usuario(linhas: list[tuple]) -> dict[int, date]:
+    """Data da última ação de cada pessoa, SEM recorte de período."""
+    ultima: dict[int, date] = {}
+    for uid, dia, _tipo, _n in linhas:
+        if not dia:
             continue
+        atual = ultima.get(int(uid))
+        if atual is None or dia > atual:
+            ultima[int(uid)] = dia
+    return ultima
 
-        for uid, n, ultima in linhas:
-            reg = acumulado.setdefault(
-                int(uid), {"total": 0, "por_tipo": {}, "ultima": None})
-            reg["total"] += int(n)
-            reg["por_tipo"][rotulo] = reg["por_tipo"].get(rotulo, 0) + int(n)
-            if ultima and (reg["ultima"] is None or ultima > reg["ultima"]):
-                reg["ultima"] = ultima
 
+def _resumir_acoes(linhas: list[tuple]) -> dict[int, dict[str, Any]]:
+    """Agrupa a coleta por usuário: total, detalhe por tipo e última data."""
+    acumulado: dict[int, dict[str, Any]] = {}
+    for uid, dia, tipo, n in linhas:
+        reg = acumulado.setdefault(
+            int(uid), {"total": 0, "por_tipo": {}, "ultima": None})
+        reg["total"] += int(n)
+        reg["por_tipo"][tipo] = reg["por_tipo"].get(tipo, 0) + int(n)
+        if dia and (reg["ultima"] is None or dia > reg["ultima"]):
+            reg["ultima"] = dia
     return acumulado
 
 
@@ -160,6 +212,51 @@ def _navegacao_por_usuario(
     }
 
 
+def _como_instante(d) -> datetime:
+    """Uniformiza date/datetime ingênuo/datetime com fuso num instante UTC."""
+    if isinstance(d, datetime):
+        return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d
+    return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+
+
+def _serie_diaria(linhas: list[tuple], supervisores: set[int],
+                  desde: date, hoje: date) -> list[dict]:
+    """Série do dashboard: por dia, ações e QUANTAS PESSOAS distintas agiram.
+
+    Pessoas distintas é a métrica de adesão; volume de ações não é. Uma única
+    pessoa redistribuindo agenda cinquenta vezes produz um pico bonito e não
+    significa que o time adotou o sistema.
+    """
+    por_dia: dict[str, dict] = {}
+    for uid, dia, _tipo, n in linhas:
+        if not dia:
+            continue
+        chave = dia.isoformat()
+        reg = por_dia.setdefault(chave, {"acoes": 0, "pessoas": set(),
+                                         "supervisores": set()})
+        reg["acoes"] += int(n)
+        reg["pessoas"].add(int(uid))
+        if int(uid) in supervisores:
+            reg["supervisores"].add(int(uid))
+
+    # Dia sem movimento precisa aparecer como zero: buraco no eixo faria o
+    # gráfico "pular" o fim de semana e sugerir continuidade que não houve.
+    saida: list[dict] = []
+    d = desde
+    while d <= hoje:
+        chave = d.isoformat()
+        reg = por_dia.get(chave)
+        saida.append({
+            "dia": chave,
+            "rotulo": f"{d.day:02d}/{d.month:02d}",
+            "acoes": reg["acoes"] if reg else 0,
+            "pessoas": len(reg["pessoas"]) if reg else 0,
+            "supervisores": len(reg["supervisores"]) if reg else 0,
+        })
+        d += timedelta(days=1)
+    return saida
+
+
 def _situacao(ultimo_acesso: datetime | None, hoje: datetime) -> str:
     if ultimo_acesso is None:
         return "nunca entrou"
@@ -176,7 +273,18 @@ def gerar(db: Session, dias: int = 30, apenas_supervisores: bool = False) -> dic
     hoje = datetime.now(timezone.utc)
     desde = (hoje - timedelta(days=int(dias))).date()
 
-    acoes = _acoes_por_usuario(db, desde)
+    # Coleta LARGA e filtra estreito. "Último acesso" é fato de vida da
+    # pessoa, não do período: calculado dentro da janela, quem agiu há 45 dias
+    # aparecia como "nunca entrou" numa visão de 30 — que se lê como "nunca foi
+    # treinado" em vez de "parou de usar", e manda o administrativo cobrar a
+    # coisa errada. Uma consulta só: as linhas vêm agrupadas por dia/tipo, então
+    # dois anos cabem de sobra na memória.
+    desde_amplo = (hoje - timedelta(days=730)).date()
+    todas_acoes = _coletar_acoes(db, desde_amplo)
+    linhas_acoes = [l for l in todas_acoes if l[1] and l[1] >= desde]
+
+    acoes = _resumir_acoes(linhas_acoes)
+    ultima_acao_geral = _ultima_acao_por_usuario(todas_acoes)
     navegacao = _navegacao_por_usuario(db, desde)
 
     usuarios = db.execute(text("""
@@ -205,11 +313,11 @@ def gerar(db: Session, dias: int = 30, apenas_supervisores: bool = False) -> dic
         # navegação só existe do deploy pra cá, e ação só aparece pra quem
         # escreve.
         candidatos = [d for d in (last_sso, nav.get("ultima_navegacao"),
-                                  ac.get("ultima")) if d]
-        candidatos = [
-            d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d
-            for d in candidatos
-        ]
+                                  ultima_acao_geral.get(int(uid))) if d]
+        # A última ação vem como DATA (a coleta agrupa por dia); as outras vêm
+        # como instante. Sem normalizar, o max() compara tipos diferentes e
+        # estoura.
+        candidatos = [_como_instante(d) for d in candidatos]
         ultimo = max(candidatos) if candidatos else None
 
         # Só faz sentido cobrar quem tem o que usar: quem não tem nenhum
@@ -238,6 +346,34 @@ def gerar(db: Session, dias: int = 30, apenas_supervisores: bool = False) -> dic
     itens.sort(key=lambda i: (not i["supervisor"], i["ultimo_acesso"] or ""))
 
     supervisores = [i for i in itens if i["supervisor"]]
+    ids_sup = {i["user_id"] for i in supervisores}
+
+    # Gráficos e tabela precisam falar da MESMA população. Com "apenas
+    # supervisores" marcado, deixar a série contando a casa inteira punha
+    # 11.220 ações no gráfico e 302 na tabela logo abaixo — a tela se
+    # contradizendo, que é o jeito mais rápido de perder a confiança do
+    # administrativo no relatório.
+    ids_visiveis = {i["user_id"] for i in itens}
+    linhas_visiveis = [l for l in linhas_acoes if int(l[0]) in ids_visiveis]
+
+    serie = _serie_diaria(linhas_visiveis, ids_sup, desde, hoje.date())
+
+    # Tipos de ação mais executados no período, somando todo mundo. Responde
+    # "o que a casa de fato usa" — que costuma ser diferente do que se imagina.
+    por_tipo: dict[str, int] = {}
+    for _uid, _dia, tipo, n in linhas_visiveis:
+        por_tipo[tipo] = por_tipo.get(tipo, 0) + int(n)
+    ranking_tipos = [
+        {"tipo": t, "acoes": n}
+        for t, n in sorted(por_tipo.items(), key=lambda kv: -kv[1])
+    ]
+
+    # Ranking de pessoas: só quem agiu, senão a barra fica cheia de zeros.
+    ranking_pessoas = [
+        {"nome": i["nome"], "primeiro_nome": i["nome"].split(" ")[0],
+         "acoes": i["acoes"], "supervisor": i["supervisor"]}
+        for i in sorted(itens, key=lambda x: -x["acoes"]) if i["acoes"] > 0
+    ][:12]
     def conta(lista, sit):
         return sum(1 for i in lista if i["situacao"] == sit)
 
@@ -249,6 +385,9 @@ def gerar(db: Session, dias: int = 30, apenas_supervisores: bool = False) -> dic
         # só há ação efetiva. A tela precisa dizer isso, senão o período de
         # transição é lido como queda de uso.
         "navegacao_disponivel": bool(navegacao),
+        "serie": serie,
+        "ranking_tipos": ranking_tipos,
+        "ranking_pessoas": ranking_pessoas,
         "resumo": {
             "supervisores": len(supervisores),
             "supervisores_ativos": conta(supervisores, "ativo"),

@@ -14,6 +14,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Activity, Download, Loader2, RefreshCw, Users } from "lucide-react";
+import {
+  Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Legend,
+  ResponsiveContainer, Tooltip as RTooltip, XAxis, YAxis,
+} from "recharts";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -42,10 +46,23 @@ interface ItemUso {
   situacao: string;
 }
 
+interface PontoSerie {
+  dia: string;
+  rotulo: string;
+  acoes: number;
+  pessoas: number;
+  supervisores: number;
+}
+
 interface Relatorio {
   periodo_dias: number;
   desde: string;
   navegacao_disponivel: boolean;
+  serie: PontoSerie[];
+  ranking_tipos: { tipo: string; acoes: number }[];
+  ranking_pessoas: {
+    nome: string; primeiro_nome: string; acoes: number; supervisor: boolean;
+  }[];
   resumo: {
     supervisores: number;
     supervisores_ativos: number;
@@ -59,6 +76,13 @@ interface Relatorio {
 }
 
 const PERIODOS = [7, 30, 60, 90];
+
+// Mesma família de cores dos selos de situação, pra leitura casar entre o
+// gráfico e a tabela logo abaixo.
+const COR_PESSOAS = "#0ea5e9";
+const COR_SUPERVISORES = "#8b5cf6";
+const COR_BARRA_SUP = "#8b5cf6";
+const COR_BARRA_OUTROS = "#94a3b8";
 const TAMANHOS = [25, 50, 100];
 
 const CORES_SITUACAO: Record<string, string> = {
@@ -218,6 +242,129 @@ export default function UtilizacaoManager() {
           )}
         </CardContent>
       </Card>
+
+      {dados && dados.serie?.length > 0 && (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <Card className="lg:col-span-2">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">Pessoas usando o sistema, por dia</CardTitle>
+              <CardDescription>
+                Quantas pessoas distintas executaram alguma ação em cada dia —
+                não o volume de ações. Uma pessoa fazendo cinquenta coisas faz
+                um pico bonito e não significa que o time adotou.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ResponsiveContainer width="100%" height={240}>
+                <AreaChart data={dados.serie} margin={{ left: -18, right: 8, top: 6 }}>
+                  <defs>
+                    <linearGradient id="gPessoas" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={COR_PESSOAS} stopOpacity={0.35} />
+                      <stop offset="100%" stopColor={COR_PESSOAS} stopOpacity={0.02} />
+                    </linearGradient>
+                    <linearGradient id="gSup" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={COR_SUPERVISORES} stopOpacity={0.35} />
+                      <stop offset="100%" stopColor={COR_SUPERVISORES} stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                  <XAxis dataKey="rotulo" fontSize={11} tickLine={false}
+                         axisLine={false} interval="preserveStartEnd" minTickGap={18} />
+                  <YAxis fontSize={11} tickLine={false} axisLine={false}
+                         allowDecimals={false} />
+                  <RTooltip
+                    formatter={(v: number, nome: string) => [v, nome]}
+                    labelFormatter={(l) => `Dia ${l}`}
+                    contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  <Area type="monotone" dataKey="pessoas" name="Pessoas"
+                        stroke={COR_PESSOAS} fill="url(#gPessoas)" strokeWidth={2} />
+                  <Area type="monotone" dataKey="supervisores" name="Supervisores"
+                        stroke={COR_SUPERVISORES} fill="url(#gSup)" strokeWidth={2} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">Quem mais executa</CardTitle>
+              <CardDescription>
+                Ações no período. Roxo é supervisor.
+                {!soSupervisores && (
+                  <> Os números não são comparáveis entre funções: agendar uma
+                  publicação e redistribuir uma agenda contam 1 cada, mas não
+                  são o mesmo tamanho de trabalho.</>
+                )}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {dados.ranking_pessoas.length === 0 ? (
+                <p className="py-10 text-center text-sm text-slate-400">
+                  Ninguém executou ações no período.
+                </p>
+              ) : (
+                <ResponsiveContainer
+                  width="100%"
+                  height={Math.max(200, dados.ranking_pessoas.length * 28)}
+                >
+                  <BarChart data={dados.ranking_pessoas} layout="vertical"
+                            margin={{ left: 8, right: 30, top: 4 }}>
+                    <XAxis type="number" hide />
+                    <YAxis type="category" dataKey="primeiro_nome" width={78}
+                           fontSize={11} tickLine={false} axisLine={false} />
+                    <RTooltip
+                      formatter={(v: number) => [v, "ações"]}
+                      labelFormatter={(_l, p) => p?.[0]?.payload?.nome ?? ""}
+                      contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                    />
+                    <Bar dataKey="acoes" radius={[0, 4, 4, 0]}>
+                      {dados.ranking_pessoas.map((d, i) => (
+                        <Cell key={i}
+                              fill={d.supervisor ? COR_BARRA_SUP : COR_BARRA_OUTROS} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">O que a casa usa</CardTitle>
+              <CardDescription>
+                Tipos de ação mais executados — costuma diferir do que se imagina.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {dados.ranking_tipos.length === 0 ? (
+                <p className="py-10 text-center text-sm text-slate-400">
+                  Nenhuma ação registrada no período.
+                </p>
+              ) : (
+                <ResponsiveContainer
+                  width="100%"
+                  height={Math.max(200, Math.min(10, dados.ranking_tipos.length) * 28)}
+                >
+                  <BarChart data={dados.ranking_tipos.slice(0, 10)} layout="vertical"
+                            margin={{ left: 8, right: 30, top: 4 }}>
+                    <XAxis type="number" hide />
+                    <YAxis type="category" dataKey="tipo" width={168}
+                           fontSize={10.5} tickLine={false} axisLine={false} />
+                    <RTooltip
+                      formatter={(v: number) => [v, "ações"]}
+                      contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                    />
+                    <Bar dataKey="acoes" fill={COR_PESSOAS} radius={[0, 4, 4, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       <Card>
         <CardContent className="pt-6">
