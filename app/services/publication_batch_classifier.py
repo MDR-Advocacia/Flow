@@ -24,7 +24,7 @@ Limitações:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from sqlalchemy.orm import Session
@@ -510,6 +510,74 @@ class PublicationBatchClassifier:
     # ──────────────────────────────────────────────────────────────────
     # Status & polling
     # ──────────────────────────────────────────────────────────────────
+
+    async def recover_stale_batches(self, max_age_minutes: int = 60) -> dict:
+        """Revisita batches não-terminais antigos e resolve cada um.
+
+        Existe por causa do batch 114 (17/07/2026): o processo morreu no meio
+        do polling (redeploy na janela), o batch ficou EM_PROCESSAMENTO pra
+        sempre e as 521 publicações dele ficaram SOMBREADAS — o
+        collect_pending_records exclui, corretamente, registro que já está em
+        batch ativo, então elas nunca mais entraram em rodada nenhuma. Vinte
+        dias invisíveis, sem alerta, até o operador estranhar a tela. Nada no
+        sistema revisitava batch não-terminal; agora isto roda antes de toda
+        classificação agendada.
+
+        Para cada batch pendurado: se a Anthropic terminou, aplica os
+        resultados (classificação JÁ PAGA — o caso 114 recuperou as 521 sem
+        gastar um token novo); se ainda processa de verdade, deixa; se a
+        consulta falhar (batch expirado/apagado na Anthropic), marca FALHA —
+        isso solta os registros de volta pra fila, que é o comportamento
+        correto: melhor reclassificar do que esconder.
+        """
+        limite = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        pendurados = (
+            self.db.query(PublicationBatchClassification)
+            .filter(
+                PublicationBatchClassification.status.in_([
+                    PUB_BATCH_STATUS_SUBMITTED,
+                    PUB_BATCH_STATUS_IN_PROGRESS,
+                    PUB_BATCH_STATUS_READY,
+                ]),
+                PublicationBatchClassification.created_at < limite,
+            )
+            .all()
+        )
+        resumo = {"verificados": len(pendurados), "aplicados": 0,
+                  "liberados": 0, "em_andamento": 0}
+        for batch in pendurados:
+            try:
+                batch = await self.refresh_batch_status(batch)
+            except Exception as exc:  # noqa: BLE001
+                # Anthropic não conhece mais o batch (expirou/apagado): FALHA
+                # devolve os registros à fila na próxima coleta.
+                logger.warning(
+                    "recover_stale_batches: batch %s irrecuperável (%s) — "
+                    "marcando FALHA pra liberar os registros.", batch.id, exc,
+                )
+                batch.status = PUB_BATCH_STATUS_FAILED
+                batch.error_message = f"Zumbi irrecuperável: {str(exc)[:300]}"
+                self.db.commit()
+                resumo["liberados"] += 1
+                continue
+            if batch.anthropic_status == ANTHROPIC_STATUS_ENDED:
+                try:
+                    await self.apply_batch_results(batch)
+                    resumo["aplicados"] += 1
+                    logger.info(
+                        "recover_stale_batches: batch %s estava pronto na "
+                        "Anthropic — resultados aplicados.", batch.id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "recover_stale_batches: batch %s pronto mas o apply "
+                        "falhou: %s", batch.id, exc,
+                    )
+            else:
+                resumo["em_andamento"] += 1
+        if resumo["verificados"]:
+            logger.info("recover_stale_batches: %s", resumo)
+        return resumo
 
     async def refresh_batch_status(
         self, batch: PublicationBatchClassification

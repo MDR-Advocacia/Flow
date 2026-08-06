@@ -1077,6 +1077,16 @@ class ScheduledAutomationService:
 
         classifier = PublicationBatchClassifier(db=self.db)
 
+        # 1.5) Resgata batch zumbi ANTES de coletar. Batch não-terminal
+        # sombreia seus registros na coleta (proteção anti-duplicação), então
+        # um batch pendurado por redeploy esconde publicações PRA SEMPRE — o
+        # 114 segurou 521 por 20 dias sem nenhum alerta. Best-effort: o resgate
+        # não pode derrubar a rodada que veio proteger.
+        try:
+            asyncio.run(classifier.recover_stale_batches())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Classify: resgate de batches zumbis falhou: %s", exc)
+
         # 2) Coleta pendentes em todos os escritórios selecionados
         if run_id is not None:
             self._update_progress(run_id, phase="classify:collect", message="Coletando publicações pendentes...")
