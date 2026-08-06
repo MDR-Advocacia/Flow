@@ -129,6 +129,11 @@ export interface FaixaData {
   /** Recorta a seleção às tarefas originadas no módulo de Publicações.
    *  Age SÓ na escolha do que mover — a tabela de carga não muda. */
   apenasPublicacoes?: boolean;
+  /** Faixa por DATA DE CADASTRO da tarefa (quando ela CHEGOU), combinável com
+   *  a faixa de conclusão: "cadastrada ontem pra semana que vem" é a
+   *  interseção das duas. No live, o recorte é feito NO L1 (creationDate). */
+  cadInicio?: string;
+  cadFim?: string;
 }
 
 export async function getLivePessoa(
@@ -143,6 +148,8 @@ export async function getLivePessoa(
     qs.set("fim", faixa.fim);
     qs.set("incluir_atrasadas", String(!!faixa.incluirAtrasadas));
     if (faixa.apenasPublicacoes) qs.set("apenas_publicacoes", "true");
+    if (faixa.cadInicio) qs.set("cad_inicio", faixa.cadInicio);
+    if (faixa.cadFim) qs.set("cad_fim", faixa.cadFim);
   } else {
     qs.set("dias", String(dias));
     qs.set("incluir_atrasadas", "true");
@@ -150,11 +157,26 @@ export async function getLivePessoa(
   return json(await apiFetch(`${BASE}/live-pessoa?${qs.toString()}`));
 }
 
+export interface FaixaTabela {
+  inicio?: string;
+  fim?: string;
+  cadInicio?: string;
+  cadFim?: string;
+}
+
+function faixaTabelaQs(qs: URLSearchParams, faixa?: FaixaTabela | null): void {
+  if (!faixa) return;
+  if (faixa.inicio) qs.set("inicio", faixa.inicio);
+  if (faixa.fim) qs.set("fim", faixa.fim);
+  if (faixa.cadInicio) qs.set("cad_inicio", faixa.cadInicio);
+  if (faixa.cadFim) qs.set("cad_fim", faixa.cadFim);
+}
+
 export async function getDiagnostico(
-  team: string, faixa?: { inicio: string; fim: string } | null,
+  team: string, faixa?: FaixaTabela | null,
 ): Promise<Colaborador[]> {
   const qs = new URLSearchParams({ team });
-  if (faixa) { qs.set("inicio", faixa.inicio); qs.set("fim", faixa.fim); }
+  faixaTabelaQs(qs, faixa);
   const r = await json<{ colaboradores: Colaborador[]; publicacoes_desde?: string | null }>(
     await apiFetch(`${BASE}/diagnostico?${qs.toString()}`),
   );
@@ -167,14 +189,28 @@ export async function getDiagnostico(
  *  a data do agendamento mais antigo registrado. Tarefa de Publicações
  *  anterior a isso existe na fila e não aparece no recorte. */
 export async function getDiagnosticoCompleto(
-  team: string, faixa?: { inicio: string; fim: string } | null,
+  team: string, faixa?: FaixaTabela | null,
 ): Promise<{ colaboradores: Colaborador[]; publicacoes_desde: string | null }> {
   const qs = new URLSearchParams({ team });
-  if (faixa) { qs.set("inicio", faixa.inicio); qs.set("fim", faixa.fim); }
+  faixaTabelaQs(qs, faixa);
   const r = await json<{ colaboradores: Colaborador[]; publicacoes_desde?: string | null }>(
     await apiFetch(`${BASE}/diagnostico?${qs.toString()}`),
   );
   return { colaboradores: r.colaboradores, publicacoes_desde: r.publicacoes_desde ?? null };
+}
+
+/** Prévia do "o que chegou": cadastros de tarefa por dia nos últimos N dias.
+ *  Vem do snapshot — o dia de HOJE aparece parcial até o snapshot da manhã. */
+export interface EntradaDia {
+  dia: string;
+  cadastradas: number;
+  ainda_pendentes: number;
+  pessoas: number;
+}
+export async function getEntradas(team: string, dias = 7): Promise<EntradaDia[]> {
+  const qs = new URLSearchParams({ team, dias: String(dias) });
+  const r = await json<{ entradas: EntradaDia[] }>(await apiFetch(`${BASE}/entradas?${qs.toString()}`));
+  return r.entradas;
 }
 
 export async function getMatriz(team: string, pessoaIds: number[], dias: number): Promise<MatrizItem[]> {

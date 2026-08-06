@@ -3,7 +3,7 @@
 // MOCK (2026-06-29): leitura real do pool; escrita simulada.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, AlertTriangle, ArrowLeftRight, CalendarClock, CalendarRange, Clock, Loader2, Newspaper, Star, X } from "lucide-react";
+import { Activity, AlertTriangle, ArrowLeftRight, CalendarClock, CalendarPlus, CalendarRange, Clock, HelpCircle, Loader2, Newspaper, Star, X } from "lucide-react";
 import { type DateRange } from "react-day-picker";
 
 import { Button } from "@/components/ui/button";
@@ -15,7 +15,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
-import { type Colaborador, type FaixaData, getDiagnosticoCompleto, listarExecucoes } from "@/services/balanceador";
+import { type Colaborador, type EntradaDia, type FaixaData, getDiagnosticoCompleto, getEntradas, listarExecucoes } from "@/services/balanceador";
 import ExecucoesDialog from "@/components/balanceador/ExecucoesDialog";
 import RedistribuicaoModal from "@/components/balanceador/RedistribuicaoModal";
 
@@ -61,6 +61,14 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
   //    hoje → hoje+30.
   const [tableRange, setTableRange] = useState<DateRange | undefined>(undefined);
   const [tableCalOpen, setTableCalOpen] = useState(false);
+  // Recorte por data de CADASTRO (quando a tarefa CHEGOU) — o acompanhamento
+  // que a supervisão faz do que entrou de novo. Independente e combinável com
+  // o recorte de conclusão: "cadastrada ontem pra semana que vem" = os dois.
+  const [tableCadRange, setTableCadRange] = useState<DateRange | undefined>(undefined);
+  const [tableCadOpen, setTableCadOpen] = useState(false);
+  // Prévia "o que chegou" (cadastros/dia, últimos 7 dias) — carrega ao abrir
+  // o popover do filtro de chegada, não no boot da seção.
+  const [entradas, setEntradas] = useState<EntradaDia[] | null>(null);
   const [redistRange, setRedistRange] = useState<DateRange | undefined>(() => {
     const hoje = new Date();
     return { from: hoje, to: addDays(hoje, 30) };
@@ -68,6 +76,9 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
   // Vencidas (prazo < hoje) NÃO entram por padrão: com o calendário fixo, a
   // faixa escolhida é o recorte exato (decisão do operador 2026-07-29).
   const [redistAtrasadas, setRedistAtrasadas] = useState(false);
+  // Faixa de CADASTRO na REDISTRIBUIÇÃO (opcional, além da faixa de conclusão).
+  const [redistPorCadastro, setRedistPorCadastro] = useState(false);
+  const [redistCadRange, setRedistCadRange] = useState<DateRange | undefined>(undefined);
   const [faixaModalOpen, setFaixaModalOpen] = useState(false);
   // Limite do recorte de origem (data do agendamento mais antigo registrado).
   const [publicacoesDesde, setPublicacoesDesde] = useState<string | null>(null);
@@ -79,11 +90,20 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
   const [execucoesOpen, setExecucoesOpen] = useState(false);
   const [temRodando, setTemRodando] = useState(false);
 
-  // Faixa da TABELA (pro getDiagnostico) — só quando início e fim escolhidos.
-  const tableFaixa: FaixaData | null = useMemo(() => {
-    if (!tableRange?.from || !tableRange?.to) return null;
-    return { inicio: toISO(tableRange.from), fim: toISO(tableRange.to) };
-  }, [tableRange]);
+  // Faixa da TABELA (pro getDiagnostico) — cada janela é opcional e as duas
+  // se combinam (interseção). Conclusão exige o par completo; cadastro idem.
+  const tableFaixa = useMemo(() => {
+    const f: { inicio?: string; fim?: string; cadInicio?: string; cadFim?: string } = {};
+    if (tableRange?.from && tableRange?.to) {
+      f.inicio = toISO(tableRange.from);
+      f.fim = toISO(tableRange.to);
+    }
+    if (tableCadRange?.from && tableCadRange?.to) {
+      f.cadInicio = toISO(tableCadRange.from);
+      f.cadFim = toISO(tableCadRange.to);
+    }
+    return Object.keys(f).length ? f : null;
+  }, [tableRange, tableCadRange]);
 
   // Sinaliza no botão "Execuções" se há redistribuição rodando em 2º plano
   // (poll leve de 20s — o acompanhamento fino é dentro do painel).
@@ -100,6 +120,14 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
       clearInterval(t);
     };
   }, [team]);
+
+  useEffect(() => {
+    if (!tableCadOpen || entradas !== null) return;
+    getEntradas(team, 7).then(setEntradas).catch(() => setEntradas([]));
+  }, [tableCadOpen, entradas, team]);
+
+  // Troca de time invalida a prévia (recarrega na próxima abertura).
+  useEffect(() => { setEntradas(null); }, [team]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -159,13 +187,18 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
   // Faixa da REDISTRIBUIÇÃO (escolhida no modal do botão Redistribuir).
   const redistFaixa: FaixaData | null = useMemo(() => {
     if (!redistRange?.from || !redistRange?.to) return null;
-    return {
+    const base: FaixaData = {
       inicio: toISO(redistRange.from),
       fim: toISO(redistRange.to),
       incluirAtrasadas: redistAtrasadas,
       apenasPublicacoes: redistSoPub,
     };
-  }, [redistRange, redistAtrasadas, redistSoPub]);
+    if (redistPorCadastro && redistCadRange?.from && redistCadRange?.to) {
+      base.cadInicio = toISO(redistCadRange.from);
+      base.cadFim = toISO(redistCadRange.to);
+    }
+    return base;
+  }, [redistRange, redistAtrasadas, redistSoPub, redistPorCadastro, redistCadRange]);
   const rangeLabel = (r: DateRange | undefined, vazio: string) =>
     r?.from ? (r.to ? `${fmtBR(r.from)} – ${fmtBR(r.to)}` : `${fmtBR(r.from)} – …`) : vazio;
 
@@ -267,10 +300,101 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
               onSelect={setTableRange} defaultMonth={tableRange?.from ?? new Date()} />
           </PopoverContent>
         </Popover>
+        <span className="ml-2 font-medium text-muted-foreground">Chegada (cadastro):</span>
+        <Popover open={tableCadOpen} onOpenChange={setTableCadOpen}>
+          <PopoverTrigger asChild>
+            <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs font-normal"
+              title="Filtra a tabela pela DATA DE CADASTRO da tarefa — o que CHEGOU no período.">
+              <CalendarPlus className="h-3.5 w-3.5 text-sky-600" /> {rangeLabel(tableCadRange, "Qualquer data")}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="w-auto p-0" align="start">
+            <div className="border-b px-3 py-2 text-[11px] text-muted-foreground">
+              Filtra por <b>data de cadastro</b> — o que <b>chegou</b> no período, independente do prazo.
+            </div>
+            {/* Prévia do que chegou: o número que a supervisão acompanha de
+                cabeça, servido pronto ao abrir o filtro. */}
+            <div className="border-b px-3 py-2">
+              <div className="mb-1 text-[11px] font-semibold text-muted-foreground">
+                O que chegou nos últimos 7 dias
+              </div>
+              {entradas === null ? (
+                <div className="py-1 text-[11px] text-muted-foreground">
+                  <Loader2 className="mr-1 inline h-3 w-3 animate-spin" /> carregando…
+                </div>
+              ) : entradas.length === 0 ? (
+                <div className="py-1 text-[11px] text-muted-foreground">Sem cadastros no período.</div>
+              ) : (
+                <div className="space-y-0.5">
+                  {entradas.map((e) => {
+                    const d = new Date(e.dia + "T12:00:00");
+                    const max = Math.max(...entradas.map((x) => x.cadastradas), 1);
+                    return (
+                      <div key={e.dia} className="flex items-center gap-2 text-[11px] tabular-nums">
+                        <span className="w-10 text-muted-foreground">{fmtBR(d).slice(0, 5)}</span>
+                        <div className="h-1.5 w-24 overflow-hidden rounded-full bg-muted">
+                          <div className="h-full bg-sky-500" style={{ width: `${(e.cadastradas / max) * 100}%` }} />
+                        </div>
+                        <span className="font-medium">{e.cadastradas}</span>
+                        <span className="text-muted-foreground">
+                          chegaram · {e.ainda_pendentes} ainda pendentes
+                        </span>
+                      </div>
+                    );
+                  })}
+                  <div className="pt-1 text-[10px] text-muted-foreground">
+                    O dia de hoje aparece parcial — a foto é do início da manhã.
+                  </div>
+                </div>
+              )}
+            </div>
+            <Calendar mode="range" numberOfMonths={2} selected={tableCadRange}
+              onSelect={setTableCadRange} defaultMonth={tableCadRange?.from ?? new Date()} />
+          </PopoverContent>
+        </Popover>
+        <Popover>
+          <PopoverTrigger asChild>
+            <button type="button"
+              className="inline-flex h-6 w-6 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              title="Como funcionam os dois filtros de data?">
+              <HelpCircle className="h-4 w-4" />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent className="w-96 text-xs leading-relaxed" align="start">
+            <p className="mb-2 font-semibold">Os dois filtros de data, sem mistério</p>
+            <p className="mb-2">
+              Toda tarefa tem <b>duas datas</b>: o dia em que ela foi{" "}
+              <b className="text-sky-700">cadastrada</b> (quando ela <i>chegou</i> pra
+              equipe) e o dia em que ela deve ser{" "}
+              <b>concluída</b> (o prazo dela).
+            </p>
+            <p className="mb-2">
+              <b>Estoque por data</b> olha o <b>prazo</b>: "o que vence hoje?",
+              "o que já venceu?", "o que cai semana que vem?".
+            </p>
+            <p className="mb-2">
+              <b className="text-sky-700">Chegada (cadastro)</b> olha a <b>entrada</b>:
+              "o que chegou ontem?", "quanto entrou essa semana?" — é o
+              acompanhamento do que é <i>novo</i>, independente do prazo.
+            </p>
+            <p className="mb-2 rounded-md bg-muted/60 p-2">
+              <b>Os dois juntos</b> respondem a pergunta completa:{" "}
+              <i>"do que chegou ontem, o que precisa ser feito até semana que
+              vem?"</i> — marque a chegada como ontem e o estoque como hoje até
+              +7 dias. A tabela mostra só a interseção.
+            </p>
+            <p className="text-muted-foreground">
+              Tarefa <b>concluída não aparece</b> em nenhum dos dois — o
+              balanceador só olha pendentes. E a tabela reflete a foto da
+              manhã; a redistribuição em si sempre confere ao vivo no L1.
+            </p>
+          </PopoverContent>
+        </Popover>
         {tableFaixa && (
-          <button type="button" onClick={() => setTableRange(undefined)}
+          <button type="button"
+            onClick={() => { setTableRange(undefined); setTableCadRange(undefined); }}
             className="inline-flex items-center gap-0.5 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
-            <X className="h-3 w-3" /> Limpar filtro
+            <X className="h-3 w-3" /> Limpar filtros
           </button>
         )}
       </div>
@@ -413,16 +537,45 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
               </span>
             </span>
           </label>
+          <label className="flex cursor-pointer items-start gap-2 rounded-md border p-2.5 text-sm hover:bg-muted/40">
+            <Checkbox
+              className="mt-0.5"
+              checked={redistPorCadastro}
+              onCheckedChange={(c) => setRedistPorCadastro(!!c)}
+            />
+            <span className="flex-1">
+              Só o que <b className="text-sky-700">chegou</b> num período{" "}
+              <span className="text-muted-foreground">(data de cadastro)</span>
+              <span className="block text-xs text-muted-foreground">
+                Move só as tarefas <b>cadastradas</b> na faixa escolhida — ex.:
+                marque ontem pra redistribuir o que entrou ontem. Combina com a
+                faixa de conclusão acima (vale a interseção das duas).
+              </span>
+              {redistPorCadastro && (
+                <span className="mt-1.5 block" onClick={(e) => e.preventDefault()}>
+                  <Calendar mode="range" numberOfMonths={1} selected={redistCadRange}
+                    onSelect={setRedistCadRange} defaultMonth={redistCadRange?.from ?? new Date()} />
+                </span>
+              )}
+            </span>
+          </label>
           <div className="text-xs text-muted-foreground">
             Faixa: <span className="font-medium text-foreground">{rangeLabel(redistRange, "escolha início e fim")}</span>
             {redistAtrasadas && <span className="font-medium text-amber-700"> + vencidas</span>}
             {redistSoPub && <span className="font-medium text-violet-700"> · só Publicações</span>}
+            {redistPorCadastro && (
+              <span className="font-medium text-sky-700">
+                {" "}· chegadas em {rangeLabel(redistCadRange, "(escolha a faixa)")}
+              </span>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setFaixaModalOpen(false)}>Cancelar</Button>
             <Button
               className="gap-1.5"
-              disabled={!redistFaixa}
+              disabled={!redistFaixa || (redistPorCadastro && !(redistCadRange?.from && redistCadRange?.to))}
+              title={redistPorCadastro && !(redistCadRange?.from && redistCadRange?.to)
+                ? "Escolha a faixa de cadastro (ou desmarque a opção)" : undefined}
               onClick={() => { setFaixaModalOpen(false); setModalOpen(true); }}
             >
               <ArrowLeftRight className="h-4 w-4" /> Redistribuir

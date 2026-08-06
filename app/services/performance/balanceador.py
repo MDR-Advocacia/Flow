@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 _BRT = "America/Sao_Paulo"
 _HOJE = f"(now() AT TIME ZONE '{_BRT}')::date"
 _PRAZO = f"(t.prazo_previsto AT TIME ZONE '{_BRT}')::date"
+_CADASTRO = f"(t.cadastrado_em AT TIME ZONE '{_BRT}')::date"
 
 try:
     from zoneinfo import ZoneInfo
@@ -134,7 +135,10 @@ class BalanceadorService:
         desde = row.desde
         return desde.date().isoformat() if hasattr(desde, "date") else str(desde)[:10]
 
-    def diagnostico(self, team: str, inicio: str | None = None, fim: str | None = None) -> list[dict]:
+    def diagnostico(
+        self, team: str, inicio: str | None = None, fim: str | None = None,
+        cad_inicio: str | None = None, cad_fim: str | None = None,
+    ) -> list[dict]:
         """Por colaborador do time: pendentes atrasadas / fatais hoje / futuras.
 
         Filtro de data OPCIONAL (analise do estoque pendente por dia): quando
@@ -157,6 +161,16 @@ class BalanceadorService:
             if fim:
                 janela += f" AND {_PRAZO} <= :fim"
                 params["fim"] = fim
+        # Recorte por DATA DE CADASTRO (quando a tarefa CHEGOU) — independente
+        # e combinável com o de conclusão: "o que foi cadastrado ontem pra
+        # semana que vem" é a interseção dos dois. 100% das tarefas do snapshot
+        # têm cadastrado_em (medido 06/08/2026), então não há balde "sem data".
+        if cad_inicio:
+            janela += f" AND {_CADASTRO} >= :cad_ini"
+            params["cad_ini"] = cad_inicio
+        if cad_fim:
+            janela += f" AND {_CADASTRO} <= :cad_fim"
+            params["cad_fim"] = cad_fim
         rows = self.db.execute(
             text(
                 f"""
@@ -196,6 +210,47 @@ class BalanceadorService:
                 "sem_prazo": r.sem_prazo, "total": r.total,
                 "atrasado_pub": r.atrasado_pub, "fatal_hoje_pub": r.fatal_hoje_pub,
                 "futuro_pub": r.futuro_pub, "total_pub": r.total_pub,
+            }
+            for r in rows
+        ]
+
+    def entradas_recentes(self, team: str, dias: int = 7) -> list[dict]:
+        """Prévia do "o que chegou": cadastros por dia (BRT) nos últimos N dias.
+
+        É o acompanhamento que a supervisão faz de cabeça — quanto entrou de
+        tarefa nova por dia — servido pronto ao abrir o filtro de chegada.
+        Vem do SNAPSHOT (não do L1 ao vivo): a prévia é orientação de volume,
+        não base da redistribuição, e bater no L1 por pessoa aqui custaria a
+        cota que a captura de publicações disputa. Consequência honesta: o dia
+        de HOJE aparece parcial até o snapshot da manhã seguinte.
+
+        `cadastradas` conta TODAS as que chegaram no dia (mede o fluxo de
+        entrada); `ainda_pendentes` é o que dessas continua em aberto — a
+        diferença entre os dois é vazão, não erro.
+        """
+        rows = self.db.execute(
+            text(
+                f"""
+                SELECT {_CADASTRO} AS dia,
+                  count(*) AS cadastradas,
+                  count(*) FILTER (WHERE t.status = 'Pendente') AS ainda_pendentes,
+                  count(DISTINCT t.pessoa_id) AS pessoas
+                FROM perf_l1_tarefa t
+                JOIN perf_pessoa p ON p.id = t.pessoa_id
+                WHERE p.equipe = :team AND p.ativo
+                  AND t.cadastrado_em >= now() - make_interval(days => :dias)
+                GROUP BY 1
+                ORDER BY 1
+                """
+            ),
+            {"team": team, "dias": int(dias)},
+        ).fetchall()
+        return [
+            {
+                "dia": r.dia.isoformat() if hasattr(r.dia, "isoformat") else str(r.dia),
+                "cadastradas": int(r.cadastradas),
+                "ainda_pendentes": int(r.ainda_pendentes),
+                "pessoas": int(r.pessoas),
             }
             for r in rows
         ]
@@ -433,6 +488,8 @@ class BalanceadorService:
         inicio: str | None = None,
         fim: str | None = None,
         apenas_publicacoes: bool = False,
+        cad_inicio: str | None = None,
+        cad_fim: str | None = None,
     ) -> dict:
         """Pendentes NÃO iniciadas (statusId=0) da pessoa, AO VIVO do L1 (filtro
         por participante). Agrupa por subtipo (nome via catálogo local
@@ -495,6 +552,14 @@ class BalanceadorService:
             if dias and dias > 0:
                 teto = hoje + _dt.timedelta(days=dias)
                 flt += f" and endDateTime le {teto.isoformat()}T23:59:59-03:00"
+        # Recorte por DATA DE CADASTRO, feito NO L1 (creationDate é filtrável —
+        # sondado 06/08/2026: ge/le respondem 200 e o count bate). Ao vivo, não
+        # no snapshot: a redistribuição mexe no estado de AGORA, e tarefa
+        # cadastrada hoje de manhã ainda não está no snapshot (ingerido ~9h).
+        if cad_inicio:
+            flt += f" and creationDate ge {cad_inicio}T00:00:00-03:00"
+        if cad_fim:
+            flt += f" and creationDate le {cad_fim}T23:59:59-03:00"
         # No L1 "Compromissos e Tarefas" são entidades SEPARADAS na API (/Tasks e
         # /Appointments), mesmo modelo. A agenda de execução é a UNIÃO das duas —
         # ler só /Tasks perdia os compromissos (audiências, prazos internos,

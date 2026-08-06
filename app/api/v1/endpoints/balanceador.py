@@ -29,11 +29,16 @@ def diagnostico(
     team: str = Query(...),
     inicio: str | None = Query(None, description="filtro da tabela: conclusão prevista >= (YYYY-MM-DD)"),
     fim: str | None = Query(None, description="filtro da tabela: conclusão prevista <= (YYYY-MM-DD)"),
+    cad_inicio: str | None = Query(None, description="filtro da tabela: data de CADASTRO >= (YYYY-MM-DD)"),
+    cad_fim: str | None = Query(None, description="filtro da tabela: data de CADASTRO <= (YYYY-MM-DD)"),
     db: Session = Depends(get_db),
 ):
     svc = BalanceadorService(db)
     return {
-        "colaboradores": svc.diagnostico(team, inicio=inicio, fim=fim),
+        "colaboradores": svc.diagnostico(
+            team, inicio=inicio, fim=fim,
+            cad_inicio=cad_inicio, cad_fim=cad_fim,
+        ),
         # Limite do recorte de origem: agendamento mais antigo registrado. A
         # tela avisa que tarefa de Publicações anterior a isso é invisível.
         "publicacoes_desde": svc.origem_publicacoes_desde(),
@@ -81,12 +86,28 @@ def live_pessoa(
     apenas_publicacoes: bool = Query(
         False, description="recorta a seleção às tarefas originadas no módulo de Publicações"
     ),
+    cad_inicio: str | None = Query(None, description="faixa por data de CADASTRO da tarefa: inicial (YYYY-MM-DD)"),
+    cad_fim: str | None = Query(None, description="faixa por data de CADASTRO da tarefa: final (YYYY-MM-DD)"),
     db: Session = Depends(get_db),
 ):
     return BalanceadorService(db).live_pessoa(
         team, pessoa_id, dias, incluir_atrasadas, inicio=inicio, fim=fim,
         apenas_publicacoes=apenas_publicacoes,
+        cad_inicio=cad_inicio, cad_fim=cad_fim,
     )
+
+
+@router.get(
+    "/entradas",
+    summary="Prévia do que CHEGOU: cadastros de tarefa por dia (últimos N dias)",
+    dependencies=[_team],
+)
+def entradas(
+    team: str = Query(...),
+    dias: int = Query(7, ge=1, le=30),
+    db: Session = Depends(get_db),
+):
+    return {"entradas": BalanceadorService(db).entradas_recentes(team, dias)}
 
 
 @router.get("/usuarios", summary="Destinos da fila: setor primeiro + busca externa no L1", dependencies=[_team])
