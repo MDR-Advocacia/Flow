@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -21,6 +21,8 @@ import {
 import {
   Area,
   AreaChart,
+  Bar,
+  BarChart,
   CartesianGrid,
   Cell,
   Legend,
@@ -409,6 +411,190 @@ const KpiCard = ({ label, value, caption, icon: Icon, tone = 'default', isLoadin
   );
 };
 
+// ─── Entradas por dia (o que CHEGOU, por cliente) ──────────────────────────
+// Pedido da supervisão (06/08/2026): acompanhar o volume de entrada de
+// publicações por dia, separado por cliente, com o período livre. "Cliente" é
+// o ramo do escritório responsável (Banco do Brasil, Ativos, ...), extraído do
+// path — determinístico, sem cadastro novo. Duas bases de data porque medem
+// coisas diferentes: CAPTURA = carga que entrou na fila naquele dia (inclui
+// recuperação retroativa, e é honesto o pico aparecer); PUBLICAÇÃO = o fato
+// jurídico no tempo (fim de semana zera, como deve).
+const ENTRADA_CORES = [
+  '#0ea5e9', '#8b5cf6', '#10b981', '#f59e0b',
+  '#e11d48', '#6366f1', '#14b8a6', '#94a3b8',
+];
+const ENTRADA_PRESETS = [7, 15, 30, 60, 90];
+
+interface EntradasResp {
+  inicio: string;
+  fim: string;
+  base: string;
+  clientes: string[];
+  total_periodo: number;
+  serie: Array<Record<string, number | string>>;
+}
+
+function isoDiasAtras(dias: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - dias);
+  return d.toISOString().slice(0, 10);
+}
+
+function EntradasPorDiaCard() {
+  const [dados, setDados] = useState<EntradasResp | null>(null);
+  const [carregando, setCarregando] = useState(false);
+  const [base, setBase] = useState<'captura' | 'publicacao'>('captura');
+  const [inicio, setInicio] = useState(() => isoDiasAtras(29));
+  const [fim, setFim] = useState(() => isoDiasAtras(0));
+
+  useEffect(() => {
+    let ativo = true;
+    (async () => {
+      setCarregando(true);
+      try {
+        const res = await apiFetch(
+          `/api/v1/dashboard/publications-entradas?inicio=${inicio}&fim=${fim}&base=${base}`,
+        );
+        if (res.ok && ativo) setDados(await res.json());
+      } catch {
+        /* painel informativo — não derruba o dashboard */
+      } finally {
+        if (ativo) setCarregando(false);
+      }
+    })();
+    return () => { ativo = false; };
+  }, [inicio, fim, base]);
+
+  const mediaDia = useMemo(() => {
+    if (!dados || dados.serie.length === 0) return 0;
+    return Math.round(dados.total_periodo / dados.serie.length);
+  }, [dados]);
+
+  const presetAtivo = useMemo(() => {
+    return ENTRADA_PRESETS.find(
+      (d) => inicio === isoDiasAtras(d - 1) && fim === isoDiasAtras(0),
+    );
+  }, [inicio, fim]);
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle className="text-base flex items-center gap-2">
+              Entradas por dia
+              {carregando && (
+                <span className="text-xs font-normal text-muted-foreground">atualizando…</span>
+              )}
+            </CardTitle>
+            <CardDescription>
+              Volume de publicações que chegou, por cliente.
+              {dados && (
+                <>
+                  {' '}No período:{' '}
+                  <strong>{dados.total_periodo.toLocaleString('pt-BR')}</strong>{' '}
+                  (média de {mediaDia}/dia).
+                </>
+              )}
+            </CardDescription>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Base da data: captura mede carga da fila; publicação, o fato no diário */}
+            <div className="flex rounded-md border border-slate-200 p-0.5">
+              <Button
+                size="sm"
+                variant={base === 'captura' ? 'default' : 'ghost'}
+                className="h-7 px-2 text-xs"
+                title="Agrupa pelo dia em que o Flow capturou (mede carga de trabalho; recuperação retroativa aparece como pico no dia)"
+                onClick={() => setBase('captura')}
+              >
+                Por captura
+              </Button>
+              <Button
+                size="sm"
+                variant={base === 'publicacao' ? 'default' : 'ghost'}
+                className="h-7 px-2 text-xs"
+                title="Agrupa pelo dia em que o diário publicou (o fato jurídico no tempo)"
+                onClick={() => setBase('publicacao')}
+              >
+                Por publicação
+              </Button>
+            </div>
+            <div className="flex gap-1">
+              {ENTRADA_PRESETS.map((d) => (
+                <Button
+                  key={d}
+                  size="sm"
+                  variant={presetAtivo === d ? 'default' : 'outline'}
+                  className="h-7 px-2 text-xs"
+                  onClick={() => {
+                    setInicio(isoDiasAtras(d - 1));
+                    setFim(isoDiasAtras(0));
+                  }}
+                >
+                  {d}d
+                </Button>
+              ))}
+            </div>
+            <div className="flex items-center gap-1">
+              <Input
+                type="date"
+                value={inicio}
+                onChange={(e) => e.target.value && setInicio(e.target.value)}
+                className="h-7 w-[8.6rem] px-2 text-xs"
+              />
+              <span className="text-xs text-muted-foreground">a</span>
+              <Input
+                type="date"
+                value={fim}
+                onChange={(e) => e.target.value && setFim(e.target.value)}
+                className="h-7 w-[8.6rem] px-2 text-xs"
+              />
+            </div>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {!dados || dados.serie.length === 0 ? (
+          <p className="py-10 text-center text-sm text-muted-foreground">
+            {carregando ? 'Carregando…' : 'Sem entradas no período.'}
+          </p>
+        ) : (
+          <ResponsiveContainer width="100%" height={280}>
+            <BarChart data={dados.serie} margin={{ left: -14, right: 8, top: 6 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+              <XAxis
+                dataKey="rotulo"
+                fontSize={11}
+                tickLine={false}
+                axisLine={false}
+                interval="preserveStartEnd"
+                minTickGap={16}
+              />
+              <YAxis fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} />
+              <RTooltip
+                labelFormatter={(l) => `Dia ${l}`}
+                formatter={(v: number, nome: string) => [v.toLocaleString('pt-BR'), nome]}
+                contentStyle={{ fontSize: 12, borderRadius: 8 }}
+              />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              {dados.clientes.map((c, i) => (
+                <Bar
+                  key={c}
+                  dataKey={c}
+                  name={c}
+                  stackId="entradas"
+                  fill={ENTRADA_CORES[i % ENTRADA_CORES.length]}
+                />
+              ))}
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // Passo do funil compacto (Bloco 3): rótulo + número + seta pra baixo.
 const FunnelStep = ({
   label,
@@ -684,6 +870,9 @@ const PublicationsDashboardPage = () => {
               isLoading={rhythmLoading}
             />
           </div>
+
+          {/* Entradas por dia — o que chegou, por cliente (acompanhamento da supervisão) */}
+          <EntradasPorDiaCard />
 
           {/* Bloco 4 — Tratamento por operador (agendadas + ciências) */}
           <Card>

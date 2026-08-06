@@ -4193,6 +4193,33 @@ const PublicationsPage = () => {
                                   </div>
                                 )}
                               </div>
+                            ) : status !== "AGENDADO" &&
+                              group.records.some((r) => r.category) ? (
+                              // Classificada mas sem template: o "Sem template"
+                              // vira atalho pra configurar — abre a página de
+                              // templates em NOVA ABA já posicionada nesta
+                              // classificação+escritório (edita se existir,
+                              // cria pré-preenchido se não), sem perder a fila.
+                              (() => {
+                                const rc = group.records.find((r) => r.category)!;
+                                const qs = new URLSearchParams({
+                                  category: rc.category ?? "",
+                                  subcategory: rc.subcategory ?? "",
+                                  office_id: group.office_id != null ? String(group.office_id) : "",
+                                });
+                                return (
+                                  <a
+                                    href={`/publications/templates?${qs.toString()}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    title="Configurar o template desta classificação (abre em nova aba)"
+                                    className="italic text-blue-600 underline-offset-2 hover:underline"
+                                  >
+                                    Sem template — configurar ↗
+                                  </a>
+                                );
+                              })()
                             ) : (
                               <span className="italic text-muted-foreground">
                                 {status === "AGENDADO" ? "Já agendado" : "Sem template"}
