@@ -732,8 +732,18 @@ def get_publications_entradas(
     rows = db.execute(
         text(f"""
             select {col_dia} as dia,
+                   -- Escritório responsável COMPLETO (cliente / posição):
+                   -- "Banco do Brasil / Réu" e "Banco do Brasil / Autor" são
+                   -- operações diferentes e o dashboard precisa separá-las
+                   -- (pedido do operador 06/08). Recuperação de Honorários não
+                   -- tem folha de posição — fica só o ramo.
                    coalesce(
-                     nullif(split_part(o.path, ' / ', 3), ''),
+                     nullif(
+                       split_part(o.path, ' / ', 3) ||
+                       case when split_part(o.path, ' / ', 4) <> ''
+                            then ' / ' || split_part(o.path, ' / ', 4)
+                            else '' end,
+                       ''),
                      'Sem escritório'
                    ) as cliente,
                    count(*) as n

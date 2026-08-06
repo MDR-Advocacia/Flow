@@ -21,8 +21,6 @@ import {
 import {
   Area,
   AreaChart,
-  Bar,
-  BarChart,
   CartesianGrid,
   Cell,
   Legend,
@@ -419,10 +417,12 @@ const KpiCard = ({ label, value, caption, icon: Icon, tone = 'default', isLoadin
 // coisas diferentes: CAPTURA = carga que entrou na fila naquele dia (inclui
 // recuperação retroativa, e é honesto o pico aparecer); PUBLICAÇÃO = o fato
 // jurídico no tempo (fim de semana zera, como deve).
-const ENTRADA_CORES = [
-  '#0ea5e9', '#8b5cf6', '#10b981', '#f59e0b',
-  '#e11d48', '#6366f1', '#14b8a6', '#94a3b8',
-];
+// Visual em duas camadas em vez de barra empilhada (feedback do operador
+// 06/08): com ~10 escritórios a pilha vira sopa de cores e o rabo da legenda
+// não diz nada. A ÁREA de cima mostra o ritmo total; o MAPA DE CALOR de baixo
+// dá uma linha por escritório responsável — padrão semanal, pico e ausência
+// ficam legíveis por linha, e escala pra quantos escritórios existirem.
+const ENTRADA_COR_BASE = '14, 165, 233'; // sky-500 em RGB (intensidade via alpha)
 const ENTRADA_PRESETS = [7, 15, 30, 60, 90];
 
 interface EntradasResp {
@@ -560,35 +560,116 @@ function EntradasPorDiaCard() {
             {carregando ? 'Carregando…' : 'Sem entradas no período.'}
           </p>
         ) : (
-          <ResponsiveContainer width="100%" height={280}>
-            <BarChart data={dados.serie} margin={{ left: -14, right: 8, top: 6 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-              <XAxis
-                dataKey="rotulo"
-                fontSize={11}
-                tickLine={false}
-                axisLine={false}
-                interval="preserveStartEnd"
-                minTickGap={16}
-              />
-              <YAxis fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} />
-              <RTooltip
-                labelFormatter={(l) => `Dia ${l}`}
-                formatter={(v: number, nome: string) => [v.toLocaleString('pt-BR'), nome]}
-                contentStyle={{ fontSize: 12, borderRadius: 8 }}
-              />
-              <Legend wrapperStyle={{ fontSize: 12 }} />
-              {dados.clientes.map((c, i) => (
-                <Bar
-                  key={c}
-                  dataKey={c}
-                  name={c}
-                  stackId="entradas"
-                  fill={ENTRADA_CORES[i % ENTRADA_CORES.length]}
+          <div className="space-y-4">
+            {/* Camada 1: o ritmo total do período */}
+            <ResponsiveContainer width="100%" height={150}>
+              <AreaChart data={dados.serie} margin={{ left: -14, right: 8, top: 6 }}>
+                <defs>
+                  <linearGradient id="gEntradas" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={`rgb(${ENTRADA_COR_BASE})`} stopOpacity={0.3} />
+                    <stop offset="100%" stopColor={`rgb(${ENTRADA_COR_BASE})`} stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                <XAxis
+                  dataKey="rotulo"
+                  fontSize={11}
+                  tickLine={false}
+                  axisLine={false}
+                  interval="preserveStartEnd"
+                  minTickGap={16}
                 />
-              ))}
-            </BarChart>
-          </ResponsiveContainer>
+                <YAxis fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} />
+                <RTooltip
+                  labelFormatter={(l) => `Dia ${l}`}
+                  formatter={(v: number) => [Number(v).toLocaleString('pt-BR'), 'entradas']}
+                  contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="total"
+                  name="Entradas"
+                  stroke={`rgb(${ENTRADA_COR_BASE})`}
+                  strokeWidth={2}
+                  fill="url(#gEntradas)"
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+
+            {/* Camada 2: mapa de calor escritório responsável × dia */}
+            <div className="overflow-x-auto">
+              <div className="min-w-[560px]">
+                {(() => {
+                  const totalPorCliente = new Map(
+                    dados.clientes.map((c) => [
+                      c,
+                      dados.serie.reduce((soma, ponto) => soma + Number(ponto[c] || 0), 0),
+                    ]),
+                  );
+                  const maxCelula = Math.max(
+                    1,
+                    ...dados.serie.flatMap((ponto) =>
+                      dados.clientes.map((c) => Number(ponto[c] || 0)),
+                    ),
+                  );
+                  // Rótulo do eixo a cada K dias pra não virar serrilhado em 90d.
+                  const passo = Math.max(1, Math.ceil(dados.serie.length / 15));
+                  return (
+                    <>
+                      {dados.clientes.map((c) => (
+                        <div key={c} className="flex items-center gap-1 py-[1px]">
+                          <span
+                            className="w-44 shrink-0 truncate pr-1 text-right text-[11px] text-muted-foreground"
+                            title={c}
+                          >
+                            {c}
+                          </span>
+                          <div className="flex flex-1 gap-[2px]">
+                            {dados.serie.map((ponto) => {
+                              const v = Number(ponto[c] || 0);
+                              return (
+                                <div
+                                  key={`${c}-${ponto.dia}`}
+                                  className="h-5 flex-1 rounded-[3px]"
+                                  style={{
+                                    backgroundColor:
+                                      v > 0
+                                        ? `rgba(${ENTRADA_COR_BASE}, ${0.15 + 0.85 * (v / maxCelula)})`
+                                        : 'rgba(148, 163, 184, 0.12)',
+                                  }}
+                                  title={`${c} — ${ponto.rotulo}: ${v.toLocaleString('pt-BR')} publicação(ões)`}
+                                />
+                              );
+                            })}
+                          </div>
+                          <span className="w-14 shrink-0 pl-1 text-right text-[11px] font-semibold tabular-nums">
+                            {(totalPorCliente.get(c) ?? 0).toLocaleString('pt-BR')}
+                          </span>
+                        </div>
+                      ))}
+                      {/* eixo de dias, alinhado às células */}
+                      <div className="flex items-center gap-1 pt-1">
+                        <span className="w-44 shrink-0" />
+                        <div className="flex flex-1 gap-[2px]">
+                          {dados.serie.map((ponto, i) => (
+                            <div
+                              key={`eixo-${ponto.dia}`}
+                              className="flex-1 text-center text-[9px] leading-none text-muted-foreground"
+                            >
+                              {i % passo === 0 ? ponto.rotulo : ''}
+                            </div>
+                          ))}
+                        </div>
+                        <span className="w-14 shrink-0 pl-1 text-right text-[10px] text-muted-foreground">
+                          total
+                        </span>
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+          </div>
         )}
       </CardContent>
     </Card>
