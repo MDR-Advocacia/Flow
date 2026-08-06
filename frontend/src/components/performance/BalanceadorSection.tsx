@@ -495,7 +495,10 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
       {/* Modal da FAIXA da redistribuição — abre ao clicar Redistribuir. Deixa
           claro que este recorte é SÓ da redistribuição (o da tabela é outro). */}
       <Dialog open={faixaModalOpen} onOpenChange={setFaixaModalOpen}>
-        <DialogContent className="max-w-fit">
+        {/* max-h + rolagem interna: com o calendário de cadastro aberto o
+            conteúdo passa da altura da tela e cortava em cima e embaixo —
+            os botões do rodapé sumiam junto. */}
+        <DialogContent className="max-h-[92vh] max-w-fit overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Faixa da redistribuição</DialogTitle>
             <DialogDescription>
