@@ -132,7 +132,15 @@ class MetadataSyncService:
                         # módulos — a sync continua intocada fora deste vínculo.
                         if user.last_sso_at is None:
                             user.email = email
-                        user.is_active = user_data.get("isActive", False)
+                            user.is_active = user_data.get("isActive", False)
+                        # Quem já loga por Entra: o status da CADEIRA do L1 não
+                        # manda mais no acesso ao Flow. Caso real (06/08/2026):
+                        # o usuário 10276 foi desativado no L1 na migração de
+                        # e-mails (cadastro antigo em gmail), mas a pessoa segue
+                        # na banca logando por SSO — o sync derrubava o acesso
+                        # dela a cada rodada e o admin reativava na mão, num
+                        # cabo de guerra. Desligamento de verdade é gerido no
+                        # Entra (conta Microsoft morre) e no admin do Flow.
                     else:
                         new_user = LegalOneUser(
                             external_id=external_id,
@@ -150,6 +158,13 @@ class MetadataSyncService:
                     if user.get("id") and user.get("isActive")
                 }
                 for external_id, user in existing_users.items():
+                    # Usuário nascido do LOGIN SSO não existe no L1
+                    # (external_id=None) — a varredura o desativava em TODA
+                    # sincronização, e o admin reativava na mão até o sync
+                    # seguinte derrubar de novo. Mesma razão acima pra quem tem
+                    # last_sso_at: o L1 deixou de ser dono do acesso ao Flow.
+                    if external_id is None or user.last_sso_at is not None:
+                        continue
                     if external_id not in active_external_ids:
                         user.is_active = False
 
