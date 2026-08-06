@@ -89,3 +89,5 @@ from .distribuidos_bb import (
     BbResponsavel,
     BbRun,
 )
+
+from .uso import UsoDiario

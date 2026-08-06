@@ -46,6 +46,7 @@ from app.api.v1.endpoints import (
     users,
     varredura,
     cargos,
+    uso,
 )
 from app.core import auth as auth_security
 from app.core.config import settings
@@ -429,6 +430,18 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         batch_worker.stop()
+        # Descarrega o que o relatório de utilização ainda tinha em memória.
+        # Sem isto, todo redeploy perde o acumulado da última janela — e num
+        # dia de vários deploys o relatório subcontaria justamente quem estava
+        # trabalhando na hora.
+        try:
+            from app.services import uso_service
+
+            gravadas = uso_service.descarregar()
+            if gravadas:
+                logger.info("uso: %s linha(s) gravadas no shutdown", gravadas)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("uso: flush de shutdown falhou (%s)", exc)
         scheduler.shutdown()
         logger.info("APScheduler stopped")
 
@@ -457,6 +470,7 @@ protected_dependencies = [Depends(auth_security.get_current_user)]
 
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"], dependencies=protected_dependencies)
 app.include_router(cargos.router, prefix="/api/v1/admin", tags=["Admin"], dependencies=protected_dependencies)
+app.include_router(uso.router, prefix="/api/v1/admin", tags=["Admin: Utilização"], dependencies=protected_dependencies)
 app.include_router(cargos.me_router, prefix="/api/v1", tags=["User"], dependencies=protected_dependencies)
 # admin_notices.router usa o prefixo /api/v1 cru porque algumas rotas
 # (active/dismiss) sao acessiveis a qualquer JWT, e outras (CRUD) tem

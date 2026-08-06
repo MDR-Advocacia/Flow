@@ -3,7 +3,7 @@ from typing import Optional
 import secrets
 import string
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -81,6 +81,7 @@ def create_access_token(
 
 
 def get_current_user(
+    request: Request = None,  # noqa: B008 - injetado pelo FastAPI
     db: Session = Depends(get_db),
     token: str = Depends(oauth2_scheme),
 ) -> LegalOneUser:
@@ -102,6 +103,19 @@ def get_current_user(
     user = db.query(LegalOneUser).filter(LegalOneUser.email == token_data.username).first()
     if user is None or not user.is_active:
         raise credentials_exception
+
+    # Relatório de utilização: este é o ponto ÚNICO por onde passa toda
+    # requisição autenticada do Flow, então instrumentar aqui cobre todos os
+    # módulos sem tocar em endpoint nenhum — e sem alguém esquecer de somar o
+    # módulo novo depois. Custa um dicionário em memória; a escrita no banco
+    # acontece a cada 60s, fora do caminho da resposta.
+    if request is not None:
+        try:
+            from app.services import uso_service
+
+            uso_service.registrar(user.id, request.url.path)
+        except Exception:  # noqa: BLE001
+            pass  # medir adesão jamais pode derrubar a requisição
 
     return user
 

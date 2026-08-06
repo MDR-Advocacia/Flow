@@ -17,6 +17,7 @@ import SquadsManager from "@/components/admin/SquadsManager";
 import SyncManager from "@/components/admin/SyncManager";
 import UsersAndPermissions from "@/components/admin/UsersAndPermissions";
 import SsoUnifyManager from "@/components/admin/SsoUnifyManager";
+import UtilizacaoManager from "@/components/admin/UtilizacaoManager";
 import { MOSTRAR_LEGADO } from "@/components/admin/types";
 
 // --- Componente Principal da Página (Renderizando todos) ---
@@ -59,6 +60,7 @@ const AdminPage = () => {
                     <TabsTrigger value="users">Usuários & Permissões</TabsTrigger>
                     <TabsTrigger value="sso">Contas SSO</TabsTrigger>
                     <TabsTrigger value="notices">Avisos</TabsTrigger>
+                    <TabsTrigger value="utilizacao">Utilização</TabsTrigger>
                     <TabsTrigger value="feedback">Feedback</TabsTrigger>
                     <TabsTrigger value="base-processual">Base Banco Master</TabsTrigger>
                 </TabsList>
@@ -87,6 +89,9 @@ const AdminPage = () => {
                 </TabsContent>
                 <TabsContent value="notices" className="space-y-6">
                     <AdminNoticesManager />
+                </TabsContent>
+                <TabsContent value="utilizacao" className="space-y-6">
+                    <UtilizacaoManager />
                 </TabsContent>
                 <TabsContent value="feedback" className="space-y-6">
                     <UserFeedbackManager />
