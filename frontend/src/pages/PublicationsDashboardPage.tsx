@@ -460,6 +460,10 @@ function EntradasPorDiaCard() {
   const [base, setBase] = useState<'captura' | 'publicacao'>('captura');
   const [inicio, setInicio] = useState(() => isoDiasAtras(29));
   const [fim, setFim] = useState(() => isoDiasAtras(0));
+  // Escritório FOCADO: clicar numa linha do mapa de calor abre a curva só
+  // dele, no mesmo período e na mesma base — o recorte de data continua
+  // valendo porque a curva lê a MESMA série já carregada.
+  const [focoCliente, setFocoCliente] = useState<string | null>(null);
 
   useEffect(() => {
     let ativo = true;
@@ -483,6 +487,29 @@ function EntradasPorDiaCard() {
     if (!dados || dados.serie.length === 0) return 0;
     return Math.round(dados.total_periodo / dados.serie.length);
   }, [dados]);
+
+  // Foco só vale enquanto o escritório existir no período carregado — mudar
+  // a faixa pode fazê-lo sumir da resposta, e aí o painel fecha sozinho.
+  const focoValido = useMemo(
+    () => (focoCliente && dados?.clientes.includes(focoCliente) ? focoCliente : null),
+    [focoCliente, dados],
+  );
+
+  const focoStats = useMemo(() => {
+    if (!focoValido || !dados) return null;
+    let total = 0;
+    let pico = { rotulo: '—', v: 0 };
+    for (const ponto of dados.serie) {
+      const v = Number(ponto[focoValido] || 0);
+      total += v;
+      if (v > pico.v) pico = { rotulo: String(ponto.rotulo), v };
+    }
+    return {
+      total,
+      media: Math.round(total / Math.max(1, dados.serie.length)),
+      pico,
+    };
+  }, [focoValido, dados]);
 
   const presetAtivo = useMemo(() => {
     return ENTRADA_PRESETS.find(
@@ -610,6 +637,63 @@ function EntradasPorDiaCard() {
               </AreaChart>
             </ResponsiveContainer>
 
+            {/* Curva FOCADA de um escritório (clique numa linha do mapa) */}
+            {focoValido && focoStats && (
+              <div className="rounded-lg border border-sky-200 bg-sky-50/40 p-3">
+                <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-sm">
+                    <span className="font-semibold text-sky-800">{focoValido}</span>
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {focoStats.total.toLocaleString('pt-BR')} no período · média{' '}
+                      {focoStats.media}/dia · pico {focoStats.pico.v.toLocaleString('pt-BR')} em{' '}
+                      {focoStats.pico.rotulo}
+                    </span>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 px-2 text-xs text-muted-foreground"
+                    onClick={() => setFocoCliente(null)}
+                  >
+                    Fechar ✕
+                  </Button>
+                </div>
+                <ResponsiveContainer width="100%" height={160}>
+                  <AreaChart data={dados.serie} margin={{ left: -14, right: 8, top: 6 }}>
+                    <defs>
+                      <linearGradient id="gFoco" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor={`rgb(${ENTRADA_COR_BASE})`} stopOpacity={0.35} />
+                        <stop offset="100%" stopColor={`rgb(${ENTRADA_COR_BASE})`} stopOpacity={0.02} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#dbeafe" vertical={false} />
+                    <XAxis
+                      dataKey="rotulo"
+                      fontSize={11}
+                      tickLine={false}
+                      axisLine={false}
+                      interval="preserveStartEnd"
+                      minTickGap={16}
+                    />
+                    <YAxis fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} />
+                    <RTooltip
+                      labelFormatter={(l) => `Dia ${l}`}
+                      formatter={(v: number) => [Number(v).toLocaleString('pt-BR'), focoValido]}
+                      contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey={focoValido}
+                      name={focoValido}
+                      stroke={`rgb(${ENTRADA_COR_BASE})`}
+                      strokeWidth={2}
+                      fill="url(#gFoco)"
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
             {/* Camada 2: mapa de calor escritório responsável × dia */}
             <div className="overflow-x-auto">
               <div className="min-w-[560px]">
@@ -631,9 +715,18 @@ function EntradasPorDiaCard() {
                   return (
                     <>
                       {dados.clientes.map((c) => (
-                        <div key={c} className="flex items-center gap-1 py-[1px]">
+                        <div
+                          key={c}
+                          className={`flex cursor-pointer items-center gap-1 rounded py-[1px] transition-colors hover:bg-sky-50 ${
+                            focoValido === c ? 'bg-sky-100/70 ring-1 ring-sky-300' : ''
+                          }`}
+                          title={`Clique para ver a curva só de ${c}`}
+                          onClick={() => setFocoCliente(focoValido === c ? null : c)}
+                        >
                           <span
-                            className="w-44 shrink-0 truncate pr-1 text-right text-[11px] text-muted-foreground"
+                            className={`w-44 shrink-0 truncate pr-1 text-right text-[11px] ${
+                              focoValido === c ? 'font-semibold text-sky-800' : 'text-muted-foreground'
+                            }`}
                             title={c}
                           >
                             {c}
