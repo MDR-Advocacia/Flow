@@ -331,8 +331,12 @@ const OperatorOfficeRows = ({
           <td className="py-1.5 px-2">
             <div className="flex items-center gap-1.5 pl-7 text-muted-foreground">
               <CornerDownRight className="h-3 w-3 shrink-0" />
+              {/* Sem o prefixo constante ("MDR Advocacia / Área operacional /"):
+                  truncar pela direita comia justamente a ponta que distingue as
+                  operações (Banco do Brasil / RÉU vs / AUTOR). O caminho
+                  completo continua no tooltip. */}
               <span className="max-w-[320px] truncate" title={of.office_name}>
-                {of.office_name}
+                {folhaEscritorio(of.office_name)}
               </span>
             </div>
           </td>
@@ -432,6 +436,16 @@ interface EntradasResp {
   clientes: string[];
   total_periodo: number;
   serie: Array<Record<string, number | string>>;
+}
+
+// "MDR Advocacia / Área operacional / Banco do Brasil / Réu" → "Banco do Brasil / Réu".
+// O prefixo é idêntico em todo escritório da casa — mostrar só o fim é o que
+// deixa a distinção (cliente / posição) visível em espaço curto.
+function folhaEscritorio(path: string | null | undefined): string {
+  if (!path) return '';
+  const partes = path.split(' / ').map((x) => x.trim()).filter(Boolean);
+  if (partes.length <= 2) return path;
+  return partes.slice(2).join(' / ');
 }
 
 function isoDiasAtras(dias: number): string {
