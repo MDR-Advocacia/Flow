@@ -6,6 +6,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { useAuth } from '@/hooks/useAuth';
 import { DunaFlowMark } from '@/components/DunaFlowMark';
 
 // Base do oauth2-proxy (Microsoft Entra ID). Em produção fica em
@@ -27,6 +28,10 @@ const MicrosoftIcon = ({ className }: { className?: string }) => (
 // e-mail/senha saiu da tela. O endpoint /auth/login continua existindo no
 // backend (integrações/emergência), mas o caminho do usuário é o Entra ID.
 const LoginPage = () => {
+  // Motivo de bloqueio vindo do bootstrap (ex.: conta inativa). Sem exibir
+  // isto, quem está barrado vê o botão "não fazer nada": o Entra devolve na
+  // hora (sessão Microsoft ainda válida) e a tela volta sem explicação.
+  const { ssoError } = useAuth();
   // Inicia o fluxo SSO: redireciona pro oauth2-proxy/Entra e volta pra cá com
   // a sessão (cookie .dunatecnologia.com). No retorno, o AuthContext chama
   // /api/v1/auth/sso/session e loga automaticamente.
@@ -56,6 +61,11 @@ const LoginPage = () => {
               <MicrosoftIcon className="mr-2 h-4 w-4" />
               Entrar com Microsoft
             </Button>
+            {ssoError && (
+              <p className="mt-3 rounded-md border border-red-200 bg-red-50 p-2.5 text-center text-sm text-red-700">
+                {ssoError}
+              </p>
+            )}
           </CardContent>
         </Card>
       </div>
