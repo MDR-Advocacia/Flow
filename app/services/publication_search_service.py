@@ -3242,8 +3242,18 @@ class PublicationSearchService:
             "task_audit_labels": self._build_audit_labels(task_audits),
         }
 
+    # Motivos estruturados da ciência — espelham os 3 critérios que a operação
+    # declarou (06/08/2026: já agendado / parte adversa / só informativa) +
+    # classificação incorreta (alimenta a taxonomia) + escape.
+    IGNORE_REASONS = {
+        "ja_agendado", "parte_adversa", "informativa",
+        "classificacao_incorreta", "outro",
+    }
+
     def update_record_status(
-        self, record_id: int, new_status: str, acted_by: Optional[Any] = None
+        self, record_id: int, new_status: str, acted_by: Optional[Any] = None,
+        ignore_reason: Optional[str] = None,
+        ignore_reason_note: Optional[str] = None,
     ) -> dict[str, Any]:
         valid_statuses = {
             RECORD_STATUS_NEW, RECORD_STATUS_CLASSIFIED,
@@ -3270,6 +3280,14 @@ class PublicationSearchService:
             record.ignored_by_email = getattr(acted_by, "email", None)
             record.ignored_by_name = getattr(acted_by, "name", None)
             record.ignored_at = now_utc
+        if new_status == RECORD_STATUS_IGNORED and ignore_reason:
+            if ignore_reason not in self.IGNORE_REASONS:
+                raise ValueError(
+                    f"Motivo de ciência inválido: {ignore_reason}. "
+                    f"Aceitos: {sorted(self.IGNORE_REASONS)}"
+                )
+            record.ignore_reason = ignore_reason
+            record.ignore_reason_note = (ignore_reason_note or "").strip() or None
 
         from app.services.publication_treatment_service import PublicationTreatmentService
         treatment_service = PublicationTreatmentService(self.db)

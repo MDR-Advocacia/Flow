@@ -155,6 +155,13 @@ class PublicationRecord(Base):
     ignored_by_email = Column(String, nullable=True)
     ignored_by_name = Column(String, nullable=True)
     ignored_at = Column(DateTime(timezone=True), nullable=True)
+    # Motivo estruturado da ciência (pub006): escolhido pelo operador no modal
+    # de ignorar. Slugs: ja_agendado | parte_adversa | informativa |
+    # classificacao_incorreta | outro. Nulo no histórico e na ciência
+    # automática. É o gabarito que faltava pro estudo de automação — 12.773
+    # ignoradas sem nenhum motivo registrado até 06/08/2026.
+    ignore_reason = Column(String(40), nullable=True, index=True)
+    ignore_reason_note = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)

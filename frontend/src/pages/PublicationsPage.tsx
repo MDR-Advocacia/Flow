@@ -1425,17 +1425,70 @@ const PublicationsPage = () => {
     loadGrouped(newPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
   };
 
-  const handleIgnoreRecord = async (recordId: number) => {
-    try {
-      await apiFetch(`${API}/records/${recordId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "IGNORADO" }),
+  // ── Ciência com MOTIVO (pub006) ──────────────────────────────────────────
+  // Estudo de 06/08/2026: 12.773 ignoradas sem nenhum motivo registrado, e a
+  // taxa de ignore varia 20%→41% entre operadores do MESMO escritório. O modal
+  // pede o motivo (um clique) e isso vira o gabarito da automação — e o
+  // espelho da consistência da própria equipe.
+  const IGNORE_REASONS: { value: string; label: string; hint: string }[] = [
+    { value: "ja_agendado", label: "Já agendado / em tarefa aberta",
+      hint: "Já existe tarefa ou agendamento cobrindo esta providência." },
+    { value: "parte_adversa", label: "Providência da parte adversa",
+      hint: "O ato é dirigido à parte que não representamos." },
+    { value: "informativa", label: "Apenas informativa",
+      hint: "Não enseja ação imediata (ciência, decurso, expediente)." },
+    { value: "classificacao_incorreta", label: "Classificação incorreta",
+      hint: "A publicação não é o que a classificação diz." },
+    { value: "outro", label: "Outro motivo", hint: "Descreva no campo abaixo." },
+  ];
+  const [ignoreDialog, setIgnoreDialog] = useState<{ recordIds: number[]; origem: string } | null>(null);
+  const [ignoreReason, setIgnoreReason] = useState<string>("");
+  const [ignoreNote, setIgnoreNote] = useState<string>("");
+  const [ignoreSubmitting, setIgnoreSubmitting] = useState(false);
+
+  const openIgnoreDialog = (recordIds: number[], origem: string) => {
+    if (recordIds.length === 0) {
+      toast({
+        title: "Nada a ignorar",
+        description: "As publicações já estão agendadas ou ignoradas.",
+        variant: "destructive",
       });
-      toast({ title: "Registro ignorado" });
-      loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
-      loadStats();
-    } catch { /* ignore */ }
+      return;
+    }
+    setIgnoreReason("");
+    setIgnoreNote("");
+    setIgnoreDialog({ recordIds, origem });
+  };
+
+  const confirmIgnore = async () => {
+    if (!ignoreDialog || !ignoreReason) return;
+    setIgnoreSubmitting(true);
+    const corpo = JSON.stringify({
+      status: "IGNORADO",
+      ignore_reason: ignoreReason,
+      ignore_reason_note: ignoreNote.trim() || null,
+    });
+    const results = await Promise.allSettled(
+      ignoreDialog.recordIds.map((id) =>
+        apiFetch(`${API}/records/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: corpo,
+        }),
+      ),
+    );
+    const ok = results.filter((r) => r.status === "fulfilled").length;
+    const failed = results.length - ok;
+    toast({
+      title: `${ok} publicação(ões) ignorada(s)`,
+      description: failed > 0 ? `${failed} falharam.` : undefined,
+      variant: failed > 0 ? "destructive" : "default",
+    });
+    setIgnoreSubmitting(false);
+    setIgnoreDialog(null);
+    clearSelection();
+    loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
+    loadStats();
   };
 
   const handleReclassifyGroup = async (
@@ -2363,46 +2416,16 @@ const PublicationsPage = () => {
     loadStats();
   };
 
-  const handleBulkIgnore = async () => {
+  const handleBulkIgnore = () => {
     if (!grouped && bulkScopeAllGroups.length === 0) return;
     const sourceGroups = bulkScopeAllGroups.length > 0 ? bulkScopeAllGroups : (grouped?.groups || []);
     const selected = sourceGroups.filter((g) => selectedGroupKeys.has(groupKey(g)));
     const recordIds = selected.flatMap((g) =>
       g.records.filter((r) => r.status !== "AGENDADO" && r.status !== "IGNORADO").map((r) => r.id),
     );
-
-    if (recordIds.length === 0) {
-      toast({
-        title: "Nada a ignorar",
-        description: "As publicações selecionadas já estão agendadas ou ignoradas.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    setBulkProcessing(true);
-    const results = await Promise.allSettled(
-      recordIds.map((id) =>
-        apiFetch(`${API}/records/${id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "IGNORADO" }),
-        }),
-      ),
-    );
-    const ok = results.filter((r) => r.status === "fulfilled").length;
-    const failed = results.length - ok;
-
-    toast({
-      title: `${ok} publicação(ões) ignorada(s)`,
-      description: failed > 0 ? `${failed} falharam.` : undefined,
-      variant: failed > 0 ? "destructive" : "default",
-    });
-
-    clearSelection();
-    setBulkProcessing(false);
-    loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
-    loadStats();
+    // Mesmo modal da linha: UM motivo vale pro lote inteiro — quem ignora em
+    // lote está aplicando um critério só (ex.: tudo parte adversa).
+    openIgnoreDialog(recordIds, "lote");
   };
 
   // ─── Derived ─────────────────────────────────────────────────────────
@@ -3847,7 +3870,69 @@ const PublicationsPage = () => {
                   </div>
                 </div>
               )}
-              {/* Hint mobile: indica que a tabela scrolla horizontalmente */}
+              {/* Modal do MOTIVO da ciência (pub006) — um clique, sem digitação
+          obrigatória (exceto no "Outro"). */}
+      <Dialog open={!!ignoreDialog} onOpenChange={(o) => { if (!o) setIgnoreDialog(null); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              Ignorar {ignoreDialog?.recordIds.length === 1
+                ? "1 publicação"
+                : `${ignoreDialog?.recordIds.length ?? 0} publicações`}
+            </DialogTitle>
+            <DialogDescription>
+              Escolha o motivo — ele fica registrado na publicação e alimenta a
+              auditoria e o estudo de automação.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            {IGNORE_REASONS.map((r) => (
+              <label
+                key={r.value}
+                className={`flex cursor-pointer items-start gap-2.5 rounded-md border p-2.5 text-sm transition-colors hover:bg-muted/40 ${
+                  ignoreReason === r.value ? "border-primary bg-primary/5" : ""
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="ignore-reason"
+                  className="mt-1"
+                  checked={ignoreReason === r.value}
+                  onChange={() => setIgnoreReason(r.value)}
+                />
+                <span>
+                  <span className="font-medium">{r.label}</span>
+                  <span className="block text-xs text-muted-foreground">{r.hint}</span>
+                </span>
+              </label>
+            ))}
+            {ignoreReason === "outro" && (
+              <Textarea
+                value={ignoreNote}
+                onChange={(e) => setIgnoreNote(e.target.value)}
+                placeholder="Descreva o motivo…"
+                className="mt-1 min-h-[70px]"
+              />
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIgnoreDialog(null)} disabled={ignoreSubmitting}>
+              Cancelar
+            </Button>
+            <Button
+              onClick={confirmIgnore}
+              disabled={
+                ignoreSubmitting || !ignoreReason ||
+                (ignoreReason === "outro" && !ignoreNote.trim())
+              }
+            >
+              {ignoreSubmitting ? "Ignorando…" : "Ignorar"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Hint mobile: indica que a tabela scrolla horizontalmente */}
               <div className="mb-1 flex items-center gap-1 text-[11px] text-muted-foreground md:hidden">
                 <ChevronLeft className="h-3 w-3" />
                 <span>Arraste para o lado para ver todas as colunas</span>
@@ -4240,8 +4325,10 @@ const PublicationsPage = () => {
                               {group.records.some((r) => r.status !== "AGENDADO" && r.status !== "IGNORADO") && (
                                 <Button size="sm" variant="ghost"
                                   className="h-7 px-2 text-xs text-muted-foreground"
-                                  onClick={() => group.records.filter((r) => r.status !== "AGENDADO" && r.status !== "IGNORADO")
-                                    .forEach((r) => handleIgnoreRecord(r.id))}>
+                                  onClick={() => openIgnoreDialog(
+                                    group.records.filter((r) => r.status !== "AGENDADO" && r.status !== "IGNORADO").map((r) => r.id),
+                                    "grupo",
+                                  )}>
                                   Ignorar
                                 </Button>
                               )}
@@ -4754,7 +4841,7 @@ const PublicationsPage = () => {
                       Confirmar agendamento
                     </Button>
                     <Button size="sm" variant="outline"
-                      onClick={() => { handleIgnoreRecord(selectedRecord.id); setDetailOpen(false); }}>
+                      onClick={() => { setDetailOpen(false); openIgnoreDialog([selectedRecord.id], "detalhe"); }}>
                       <EyeOff className="mr-1 h-3.5 w-3.5" />
                       Ignorar publicação
                     </Button>

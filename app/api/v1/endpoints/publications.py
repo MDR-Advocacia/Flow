@@ -68,6 +68,10 @@ class SearchRequest(BaseModel):
 
 class UpdateRecordStatusRequest(BaseModel):
     status: str
+    # Motivo da ciência (obrigatório na UI quando status=IGNORADO; opcional na
+    # API pra não quebrar chamadas legadas/automação).
+    ignore_reason: Optional[str] = None
+    ignore_reason_note: Optional[str] = None
 
 
 class ScheduleGroupRequest(BaseModel):
@@ -941,7 +945,9 @@ def update_record_status(
     """
     try:
         return service.update_record_status(
-            record_id, payload.status, acted_by=current_user
+            record_id, payload.status, acted_by=current_user,
+            ignore_reason=payload.ignore_reason,
+            ignore_reason_note=payload.ignore_reason_note,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
