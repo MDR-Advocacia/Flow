@@ -3264,6 +3264,7 @@ class PublicationSearchService:
         self, record_id: int, new_status: str, acted_by: Optional[Any] = None,
         ignore_reason: Optional[str] = None,
         ignore_reason_note: Optional[str] = None,
+        consultou_autos: bool = False,
     ) -> dict[str, Any]:
         valid_statuses = {
             RECORD_STATUS_NEW, RECORD_STATUS_CLASSIFIED,
@@ -3298,6 +3299,8 @@ class PublicationSearchService:
                 )
             record.ignore_reason = ignore_reason
             record.ignore_reason_note = (ignore_reason_note or "").strip() or None
+        if new_status == RECORD_STATUS_IGNORED and consultou_autos:
+            record.consultou_autos = True
 
         # SHADOW: fecha o par previsão × realidade.
         if new_status in (RECORD_STATUS_IGNORED, RECORD_STATUS_SCHEDULED):
@@ -3618,6 +3621,21 @@ class PublicationSearchService:
             }
         return adjustments
 
+    @staticmethod
+    def _so_data_iso(valor):
+        """'2026-08-12T14:00:00-03:00' → date(2026,8,12). None se não parsear."""
+        if not valor or not isinstance(valor, str):
+            return None
+        try:
+            from datetime import datetime as _dt
+            return _dt.fromisoformat(valor.replace("Z", "+00:00")).date()
+        except Exception:  # noqa: BLE001
+            try:
+                from datetime import datetime as _dt
+                return _dt.strptime(valor[:10], "%Y-%m-%d").date()
+            except Exception:  # noqa: BLE001
+                return None
+
     def _record_scheduled_task_audit(
         self,
         *,
@@ -3683,15 +3701,47 @@ class PublicationSearchService:
                 # aceitável, e é o sinal que conserta template). Nunca na troca
                 # de responsável (~224/dia: rotina de carga, não dúvida).
                 motivo_sub = None
+                marcadores: dict = {}
                 if isinstance(sent, dict):
                     motivo_sub = sent.pop("_subtipo_troca_motivo", None)
+                    # pub008 — captura do conhecimento tácito. Todos os
+                    # marcadores saem do payload aqui: nunca podem vazar pro L1.
+                    for chave in ("_data_troca_motivo", "_consultou_autos",
+                                  "_agendou_com_tarefa_aberta_motivo",
+                                  "_tarefa_removida_motivo"):
+                        v = sent.pop(chave, None)
+                        if v not in (None, "", False):
+                            marcadores[chave] = v
                 if motivo_sub and "subTypeId" not in override_fields:
                     motivo_sub = None  # só vale quando houve troca de fato
+
+                # DELTA DE DATA (pub008): gravado SEMPRE, sem perguntar nada.
+                # 72% dos agendamentos mexem na data e isso não era auditado —
+                # negativo = operador antecipou, positivo = adiou. Metade do
+                # valor vem do número puro, sem custar atrito a ninguém.
+                delta_dias = None
+                if prop:
+                    d_prop = self._so_data_iso(prop.get("endDateTime"))
+                    d_sent = self._so_data_iso(sent.get("endDateTime"))
+                    if d_prop and d_sent:
+                        delta_dias = (d_sent - d_prop).days
+                        if delta_dias != 0:
+                            override_fields.setdefault("endDateTime", {
+                                "proposto": prop.get("endDateTime"),
+                                "enviado": sent.get("endDateTime"),
+                                "delta_dias": delta_dias,
+                            })
                 self.db.add(PublicationTaskAudit(
                     lawsuit_id=lawsuit_id,
                     publication_record_id=rec_id,
                     subtype_id=int(sub) if sub is not None else None,
                     subtipo_troca_motivo=motivo_sub,
+                    data_delta_dias=delta_dias,
+                    data_troca_motivo=marcadores.get("_data_troca_motivo"),
+                    consultou_autos=bool(marcadores.get("_consultou_autos")) or None,
+                    agendou_com_tarefa_aberta_motivo=marcadores.get(
+                        "_agendou_com_tarefa_aberta_motivo"),
+                    tarefa_removida_motivo=marcadores.get("_tarefa_removida_motivo"),
                     created_task_id=task_id,
                     sent_payload=sent,
                     proposed_payload=prop,
@@ -3961,6 +4011,10 @@ class PublicationSearchService:
             if isinstance(p, dict):
                 p.pop("_responsible_overridden", None)
                 p.pop("_subtipo_troca_motivo", None)
+                for _k in ("_data_troca_motivo", "_consultou_autos",
+                           "_agendou_com_tarefa_aberta_motivo",
+                           "_tarefa_removida_motivo"):
+                    p.pop(_k, None)
 
         # Fallback de office pra tarefas avulsas: embora esse fluxo seja
         # explicitamente "sem processo vinculado", alguns records ainda

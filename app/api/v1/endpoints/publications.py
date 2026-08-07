@@ -72,6 +72,8 @@ class UpdateRecordStatusRequest(BaseModel):
     # API pra não quebrar chamadas legadas/automação).
     ignore_reason: Optional[str] = None
     ignore_reason_note: Optional[str] = None
+    # pub008: "precisei abrir o processo pra decidir" — vale também no ignorar.
+    consultou_autos: bool = False
 
 
 class ScheduleGroupRequest(BaseModel):
@@ -948,6 +950,7 @@ def update_record_status(
             record_id, payload.status, acted_by=current_user,
             ignore_reason=payload.ignore_reason,
             ignore_reason_note=payload.ignore_reason_note,
+            consultou_autos=payload.consultou_autos,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

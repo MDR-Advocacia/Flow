@@ -406,6 +406,40 @@ const SUBTYPE_CHANGE_REASONS: { value: string; label: string; hint: string }[] =
     hint: "Não havia template — montei a tarefa na mão." },
 ];
 
+// pub008 — captura do conhecimento tácito. Só perguntamos no DESVIO ANÔMALO:
+// 72% dos agendamentos mexem na data, mas 260 perguntas/dia é inviável; fora
+// de ±3 dias sobram ~90/dia, e é aí que mora a regra que não está escrita.
+const DESVIO_DATA_DIAS = 3;
+
+const DATE_CHANGE_REASONS: { value: string; label: string; hint: string }[] = [
+  { value: "prazo_no_texto", label: "Prazo vinha no texto",
+    hint: "A publicação trazia o prazo e o template não refletia." },
+  { value: "margem_subsidio", label: "Margem p/ subsídio",
+    hint: "Antecipei pra dar tempo do subsídio chegar (ex.: contestação)." },
+  { value: "prazo_legal_diferente", label: "Prazo legal é outro",
+    hint: "O prazo legal desta providência difere do configurado." },
+  { value: "carga_agenda", label: "Agenda da equipe",
+    hint: "Remanejei pela carga/disponibilidade, não pelo prazo." },
+];
+
+const OPEN_TASK_REASONS: { value: string; label: string; hint: string }[] = [
+  { value: "outra_providencia", label: "É outra providência",
+    hint: "A tarefa aberta trata de outro ato — esta publicação exige coisa diferente." },
+  { value: "novo_prazo", label: "Novo prazo",
+    hint: "Mesmo assunto, mas nasceu prazo novo que precisa de tarefa própria." },
+  { value: "tarefa_antiga_parada", label: "A aberta está parada",
+    hint: "A tarefa existente não está sendo tocada; criei uma nova." },
+];
+
+const REMOVE_TASK_REASONS: { value: string; label: string; hint: string }[] = [
+  { value: "nao_se_aplica", label: "Não se aplica ao caso",
+    hint: "O template propõe esta tarefa, mas aqui ela não cabe." },
+  { value: "ja_existe", label: "Já existe na pasta",
+    hint: "Essa providência já está coberta por tarefa existente." },
+  { value: "template_propoe_demais", label: "Template propõe demais",
+    hint: "O template deveria propor menos nesta classificação." },
+];
+
 const L1_TAG_COLORS: Record<string, string> = {
   "tag-color-red": "bg-red-100 text-red-800 border-red-300",
   "tag-color-orange": "bg-orange-100 text-orange-800 border-orange-300",
@@ -842,6 +876,13 @@ const PublicationsPage = () => {
   // de distribuição de carga e não dúvida — ali NÃO se pergunta nada.
   const [originalSubtypeByIndex, setOriginalSubtypeByIndex] = useState<Map<number, number | null>>(new Map());
   const [subtypeReasonByIndex, setSubtypeReasonByIndex] = useState<Map<number, string>>(new Map());
+  // pub008 — os outros três pontos de captura.
+  const [originalDateByIndex, setOriginalDateByIndex] = useState<Map<number, string | null>>(new Map());
+  const [dateReasonByIndex, setDateReasonByIndex] = useState<Map<number, string>>(new Map());
+  const [openTaskReasonByIndex, setOpenTaskReasonByIndex] = useState<Map<number, string>>(new Map());
+  const [removeReasonByIndex, setRemoveReasonByIndex] = useState<Map<number, string>>(new Map());
+  // "Precisei abrir o processo pra decidir" — vale pro grupo todo.
+  const [consultouAutos, setConsultouAutos] = useState(false);
   const [scheduling, setScheduling] = useState(false);
   // Checagem de duplicatas (tarefa pendente no L1) — Onda 1.
   // Estrutura: { [subTypeId]: [{task_id, description, status_label, end_date_time, l1_url}] }
@@ -1465,6 +1506,7 @@ const PublicationsPage = () => {
   const [ignoreReason, setIgnoreReason] = useState<string>("");
   const [ignoreNote, setIgnoreNote] = useState<string>("");
   const [ignoreSubmitting, setIgnoreSubmitting] = useState(false);
+  const [ignoreConsultouAutos, setIgnoreConsultouAutos] = useState(false);
 
   const openIgnoreDialog = (recordIds: number[], origem: string) => {
     if (recordIds.length === 0) {
@@ -1477,6 +1519,7 @@ const PublicationsPage = () => {
     }
     setIgnoreReason("");
     setIgnoreNote("");
+    setIgnoreConsultouAutos(false);
     setIgnoreDialog({ recordIds, origem });
   };
 
@@ -1487,6 +1530,7 @@ const PublicationsPage = () => {
       status: "IGNORADO",
       ignore_reason: ignoreReason,
       ignore_reason_note: ignoreNote.trim() || null,
+      consultou_autos: ignoreConsultouAutos,
     });
     const results = await Promise.allSettled(
       ignoreDialog.recordIds.map((id) =>
@@ -1957,6 +2001,13 @@ const PublicationsPage = () => {
       new Map(dateAdjustedTasks.map((t, i) => [i, (t as any).subTypeId ?? null])),
     );
     setSubtypeReasonByIndex(new Map());
+    setOriginalDateByIndex(
+      new Map(dateAdjustedTasks.map((t, i) => [i, (t as any).endDateTime ?? null])),
+    );
+    setDateReasonByIndex(new Map());
+    setOpenTaskReasonByIndex(new Map());
+    setRemoveReasonByIndex(new Map());
+    setConsultouAutos(false);
     // Reset do estado de duplicatas — a checagem roda via useEffect abaixo.
     setDuplicatesBySubtype({});
     setDuplicateCheckFailed(false);
@@ -2120,6 +2171,11 @@ const PublicationsPage = () => {
       if (motivoSub) {
         (t as any)._subtipo_troca_motivo = motivoSub;
       }
+      const motivoData = dateReasonByIndex.get(realIdx);
+      if (motivoData) (t as any)._data_troca_motivo = motivoData;
+      const motivoAberta = openTaskReasonByIndex.get(realIdx);
+      if (motivoAberta) (t as any)._agendou_com_tarefa_aberta_motivo = motivoAberta;
+      if (consultouAutos) (t as any)._consultou_autos = true;
       if (touchedResponsible.has(realIdx)) {
         // Operador mexeu no responsável (mesmo re-escolhendo a mesma
         // pessoa) — decisão final dele. Marcador avisa o backend pra
@@ -3943,6 +3999,21 @@ const PublicationsPage = () => {
               />
             )}
           </div>
+          {/* pub008 — o sinal mais valioso do balde OPERADOR: hoje eu adivinho
+              por heurística de texto qual publicação é indecidível; com este
+              clique passo a saber. ~2 casos/dia de atrito. */}
+          <label className="flex cursor-pointer items-center gap-2 rounded-md border border-dashed p-2.5 text-sm hover:bg-muted/40">
+            <Checkbox
+              checked={ignoreConsultouAutos}
+              onCheckedChange={(c) => setIgnoreConsultouAutos(!!c)}
+            />
+            <span>
+              Precisei <b>abrir o processo</b> pra decidir
+              <span className="block text-xs text-muted-foreground">
+                A publicação sozinha não dizia o suficiente.
+              </span>
+            </span>
+          </label>
           <DialogFooter>
             <Button variant="outline" onClick={() => setIgnoreDialog(null)} disabled={ignoreSubmitting}>
               Cancelar
@@ -5520,6 +5591,77 @@ const PublicationsPage = () => {
                                       }}
                                     />
                                   </div>
+                                  {/* Chip: AGENDOU apesar de tarefa aberta na
+                                      pasta — o inverso do chip de ignorar. Diz
+                                      que a tarefa existente NÃO cobre esta
+                                      publicação: é a distinção semântica que
+                                      nenhum casamento estrutural alcança (foi a
+                                      hipótese que o backtest derrubou). */}
+                                  {payload.subTypeId &&
+                                   (duplicatesBySubtype[payload.subTypeId]?.length ?? 0) > 0 && (
+                                    <div className="col-span-12 rounded-md border border-violet-200 bg-violet-50/60 p-2.5">
+                                      <p className="mb-1.5 text-[11px] font-medium text-violet-900">
+                                        Já existe tarefa aberta desse tipo na pasta — por que agendar mesmo assim?
+                                      </p>
+                                      <div className="flex flex-wrap gap-1.5">
+                                        {OPEN_TASK_REASONS.map((r) => {
+                                          const ativo = openTaskReasonByIndex.get(idx) === r.value;
+                                          return (
+                                            <button key={r.value} type="button" title={r.hint}
+                                              onClick={() => setOpenTaskReasonByIndex((prev) => {
+                                                const m = new Map(prev);
+                                                if (m.get(idx) === r.value) m.delete(idx);
+                                                else m.set(idx, r.value);
+                                                return m;
+                                              })}
+                                              className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                                                ativo ? "border-violet-600 bg-violet-600 text-white"
+                                                      : "border-violet-300 bg-white text-violet-900 hover:bg-violet-100"}`}>
+                                              {r.label}
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  )}
+                                  {/* Chip do DESVIO DE DATA — só aparece quando
+                                      o operador desloca a data em mais de 3 dias
+                                      em relação ao template. O desvio pequeno é
+                                      rotina; o grande carrega regra não escrita. */}
+                                  {(() => {
+                                    const orig = originalDateByIndex.get(idx);
+                                    if (!orig || !payload.endDateTime) return null;
+                                    const d0 = new Date(orig).getTime();
+                                    const d1 = new Date(payload.endDateTime).getTime();
+                                    const dias = Math.round((d1 - d0) / 86400000);
+                                    if (Math.abs(dias) <= DESVIO_DATA_DIAS) return null;
+                                    return (
+                                      <div className="col-span-12 rounded-md border border-sky-200 bg-sky-50/60 p-2.5">
+                                        <p className="mb-1.5 text-[11px] font-medium text-sky-900">
+                                          {dias > 0 ? `Adiou ${dias} dias` : `Antecipou ${Math.abs(dias)} dias`} — por quê?
+                                        </p>
+                                        <div className="flex flex-wrap gap-1.5">
+                                          {DATE_CHANGE_REASONS.map((r) => {
+                                            const ativo = dateReasonByIndex.get(idx) === r.value;
+                                            return (
+                                              <button key={r.value} type="button" title={r.hint}
+                                                onClick={() => setDateReasonByIndex((prev) => {
+                                                  const m = new Map(prev);
+                                                  if (m.get(idx) === r.value) m.delete(idx);
+                                                  else m.set(idx, r.value);
+                                                  return m;
+                                                })}
+                                                className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                                                  ativo ? "border-sky-600 bg-sky-600 text-white"
+                                                        : "border-sky-300 bg-white text-sky-900 hover:bg-sky-100"}`}>
+                                                {r.label}
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      </div>
+                                    );
+                                  })()}
                                   <div className="col-span-4 grid gap-1.5">
                                     <Label className="text-xs font-medium">Prioridade</Label>
                                     <Select

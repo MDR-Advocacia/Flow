@@ -162,6 +162,10 @@ class PublicationRecord(Base):
     # ignoradas sem nenhum motivo registrado até 06/08/2026.
     ignore_reason = Column(String(40), nullable=True, index=True)
     ignore_reason_note = Column(Text, nullable=True)
+    # "Precisei abrir o processo pra decidir" também no ignorar (pub008): o
+    # operador consultou os autos e concluiu que não há providência. Sem isto
+    # o sinal ficaria só do lado do agendamento.
+    consultou_autos = Column(Boolean, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
