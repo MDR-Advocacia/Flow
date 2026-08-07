@@ -26,6 +26,19 @@ Aprendizados que moldaram as regras (cada um medido, não intuído):
   - O resíduo sem regra tem marcadores no máximo ~70% de pureza (minerado):
     é semântica de verdade — território de LLM, não de regex. Fica pro
     próximo estágio, se o placar justificar o custo.
+  - Audiência (07/08): só decide com data E hora explícitas; sem isso vai pro
+    OPERADOR. Tarefa de audiência sem o "quando" é pior que nenhuma.
+
+LIMITE METODOLÓGICO que vale mais que qualquer número acima: TODA acurácia
+aqui é medida contra a decisão do operador como se fosse gabarito — e não é.
+O operador também erra, e não temos a taxa dele. Tentamos dois proxies e os
+dois falharam: (1) ignore que "volta" como tarefa em 10 dias dá só 0,9%, o
+que mede pouco; (2) tarefa de publicação cancelada dá ZERO — mas o operador
+avisou (07/08) que a equipe marca tarefa errada como "Cumprido", então esse
+sinal é contaminado e não serve de evidência. Conclusão honesta: hoje só
+sabemos CONCORDÂNCIA, não acerto. O único caminho limpo é um gold standard —
+revisão cega da mesma amostra por 2–3 pessoas seniores — que mede de uma vez
+a confiabilidade do operador E a do modelo.
 """
 
 from __future__ import annotations
@@ -74,6 +87,12 @@ _PAUTA = re.compile(
 _NOSSOS = re.compile(r"(banco do brasil|ativos s|banco master|banese|bb\b)")
 _CASCA_PARA = re.compile(
     r"para\s+advogados?/curador/defensor de (.{3,80}?)\s+com prazo")
+# Data E hora explícitas no texto — a condição que o operador impôs pra
+# audiência ser decidível: "designada para 06/07/2026 às 16:15". Sem as duas,
+# a tarefa nasceria sem quando, e audiência sem hora é pior que nenhuma.
+_DATA_HORA = re.compile(
+    r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}[^.]{0,40}?"
+    r"(as|hs?|horas?|\d{1,2}\s*:\s*\d{2})")
 _AUDIENCIA = re.compile(
     r"(designo audiencia|audiencia (de conciliacao|una|de instrucao)[^.]{0,80}"
     r"(designada|realizada por|no dia)|link de acesso|pauta de audiencia)")
@@ -212,6 +231,7 @@ class ShadowService:
         sinais["parte_adversa"] = adversa
         sinais["adversa_peticionou"] = bool(adversa and _PECA_ADVERSA.search(txt))
         sinais["audiencia"] = bool(_AUDIENCIA.search(txt))
+        sinais["tem_data_hora"] = bool(_DATA_HORA.search(txt))
         return sinais
 
     # ── política v5 ─────────────────────────────────────────────────────
@@ -253,9 +273,14 @@ class ShadowService:
             if taxa_cel >= CELULA_IGNORA:
                 return SHADOW_IGNORAR, "informativa", CONF_MEDIA, "r4_celula_ignora"
 
-        # r4b — audiência designada (média: 67–78% no lab).
+        # r4b — audiência: DECISÃO DO OPERADOR (07/08). Audiência só se decide
+        # quando a publicação traz data E hora explícitas; sem isso a tarefa
+        # nasceria sem o "quando", e audiência sem hora é pior que nenhuma —
+        # o operador precisa abrir o processo pra achar a designação.
         if sinais.get("audiencia"):
-            return SHADOW_AGENDAR, None, CONF_MEDIA, "r4b_audiencia"
+            if sinais.get("tem_data_hora"):
+                return SHADOW_AGENDAR, None, CONF_MEDIA, "r4b_audiencia_com_data"
+            return SHADOW_OPERADOR, "texto_insuficiente", "n/a", "r4b_audiencia_sem_data"
 
         # r4g — célula global (sem escritório), sempre média.
         ng = sinais.get("celula_g_n") or 0
