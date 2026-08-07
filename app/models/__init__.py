@@ -91,3 +91,5 @@ from .distribuidos_bb import (
 )
 
 from .uso import UsoDiario
+
+from .publication_shadow import PublicacaoShadowDecisao

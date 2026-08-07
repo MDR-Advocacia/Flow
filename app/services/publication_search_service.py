@@ -1420,6 +1420,16 @@ class PublicationSearchService:
                     raw["_proposed_tasks"] = proposals
             rec.raw_relationships = raw
 
+        # SHADOW MODE: a previsão é gravada AQUI — proposta montada, operador
+        # ainda não viu. Prever depois da ação humana seria trapaça: o placar
+        # mediria memória, não capacidade de decidir.
+        try:
+            from app.services.publication_shadow import ShadowService
+
+            ShadowService(self.db).prever_muitos(records)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("shadow: previsão em lote falhou (%s)", exc)
+
         self.db.commit()
 
     # Limite máximo de caracteres aceito pela API Legal One no campo description.
@@ -3289,6 +3299,18 @@ class PublicationSearchService:
             record.ignore_reason = ignore_reason
             record.ignore_reason_note = (ignore_reason_note or "").strip() or None
 
+        # SHADOW: fecha o par previsão × realidade.
+        if new_status in (RECORD_STATUS_IGNORED, RECORD_STATUS_SCHEDULED):
+            try:
+                from app.services.publication_shadow import ShadowService
+
+                ShadowService(self.db).registrar_desfecho(
+                    record.id, new_status, motivo=ignore_reason,
+                    por=getattr(acted_by, "name", None),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("shadow: desfecho não registrado (%s)", exc)
+
         from app.services.publication_treatment_service import PublicationTreatmentService
         treatment_service = PublicationTreatmentService(self.db)
         treatment_service.sync_item_from_record(record, commit=False)
@@ -3673,6 +3695,18 @@ class PublicationSearchService:
                 ))
         except Exception as exc:  # noqa: BLE001
             logger.warning("publications: falha ao gravar auditoria de agendamento: %s", exc)
+
+        # SHADOW: agendamento efetivado = desfecho real das publicações do grupo.
+        try:
+            from app.services.publication_shadow import ShadowService
+
+            shadow = ShadowService(self.db)
+            for rec in records:
+                shadow.registrar_desfecho(
+                    getattr(rec, "id", None), "AGENDADO", por=sb_name,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("shadow: desfecho de agendamento não registrado (%s)", exc)
 
     def schedule_group(
         self,

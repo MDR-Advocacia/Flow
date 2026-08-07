@@ -91,3 +91,105 @@ def exportar_uso(
         headers={"Content-Disposition":
                  f'attachment; filename="utilizacao_{dias}dias.csv"'},
     )
+
+
+@router.get("/shadow-publicacoes")
+def placar_shadow(
+    dias: int = Query(30, ge=1, le=180),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    """Placar do shadow mode do tratamento de publicações.
+
+    Responde a pergunta que o estudo de 06/08/2026 deixou em aberto com
+    número real em vez de estimativa: quanto o sistema concorda com a
+    operação, e ONDE ele já é confiável o bastante pra virar automação.
+
+    Só entra par COMPLETO (previsão feita antes + desfecho do operador).
+    """
+    _exige_admin(current_user)
+    from sqlalchemy import text as _t
+
+    corte = f"real_em >= now() - interval '{int(dias)} days'"
+
+    geral = db.execute(_t(f"""
+        select count(*) as pares,
+               count(*) filter (where acertou) as acertos,
+               round(100.0 * count(*) filter (where acertou)
+                     / nullif(count(*),0), 1) as pct
+          from publicacao_shadow_decisao
+         where real is not null and {corte}
+    """)).first()
+
+    # Por CONFIANÇA: é o corte que decide o que pode ser automatizado.
+    por_confianca = [dict(r._mapping) for r in db.execute(_t(f"""
+        select confianca, count(*) as pares,
+               count(*) filter (where acertou) as acertos,
+               round(100.0 * count(*) filter (where acertou)
+                     / nullif(count(*),0), 1) as pct
+          from publicacao_shadow_decisao
+         where real is not null and {corte}
+         group by 1 order by 1
+    """))]
+
+    # Por REGRA: mostra qual parte da política acerta e qual erra.
+    por_regra = [dict(r._mapping) for r in db.execute(_t(f"""
+        select regra, count(*) as pares,
+               count(*) filter (where acertou) as acertos,
+               round(100.0 * count(*) filter (where acertou)
+                     / nullif(count(*),0), 1) as pct
+          from publicacao_shadow_decisao
+         where real is not null and {corte}
+         group by 1 order by 2 desc
+    """))]
+
+    # Matriz de confusão — o erro que importa é prever IGNORAR no que o
+    # operador AGENDOU (risco de prazo perdido), não o contrário.
+    matriz = [dict(r._mapping) for r in db.execute(_t(f"""
+        select previsto, real, count(*) as n
+          from publicacao_shadow_decisao
+         where real is not null and {corte}
+         group by 1,2 order by 1,2
+    """))]
+
+    # Células candidatas a automação: alta confiança, massa e acerto alto.
+    candidatas = [dict(r._mapping) for r in db.execute(_t(f"""
+        select s.sinais->>'categoria' as categoria,
+               s.sinais->>'subcategoria' as subcategoria,
+               (s.sinais->>'office_id') as office_id,
+               count(*) as pares,
+               round(100.0 * count(*) filter (where s.acertou)
+                     / nullif(count(*),0), 1) as pct
+          from publicacao_shadow_decisao s
+         where s.real is not null and s.confianca = 'alta' and {corte}
+         group by 1,2,3
+        having count(*) >= 20
+           and 100.0 * count(*) filter (where s.acertou) / count(*) >= 95
+         order by pares desc limit 40
+    """))]
+
+    # Motivos do ignore que a operação registrou (pub006) — o gabarito novo.
+    motivos = [dict(r._mapping) for r in db.execute(_t(f"""
+        select ignore_reason as motivo, count(*) as n
+          from publicacao_registros
+         where status = 'IGNORADO' and ignore_reason is not null
+           and ignored_at >= now() - interval '{int(dias)} days'
+         group by 1 order by 2 desc
+    """))]
+
+    pendentes = db.execute(_t(
+        "select count(*) from publicacao_shadow_decisao where real is null"
+    )).scalar()
+
+    return {
+        "periodo_dias": int(dias),
+        "pares": int(geral.pares or 0) if geral else 0,
+        "acertos": int(geral.acertos or 0) if geral else 0,
+        "concordancia_pct": float(geral.pct) if geral and geral.pct else 0.0,
+        "previsoes_aguardando_desfecho": int(pendentes or 0),
+        "por_confianca": por_confianca,
+        "por_regra": por_regra,
+        "matriz": matriz,
+        "celulas_candidatas_automacao": candidatas,
+        "motivos_de_ignore": motivos,
+    }
