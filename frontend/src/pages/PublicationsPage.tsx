@@ -2234,6 +2234,17 @@ const PublicationsPage = () => {
       }
     }
 
+    // pub008 — o motivo da REMOÇÃO precisa pegar carona: a tarefa removida
+    // não é enviada, então ela não tem payload próprio pra carregar o dado.
+    // Anexamos ao PRIMEIRO payload enviado do grupo, que é o que vira a
+    // primeira linha de auditoria daquele agendamento.
+    const motivosRemocao = Array.from(removeReasonByIndex.entries())
+      .filter(([i]) => removedTaskIndices.has(i))
+      .map(([, motivo]) => motivo);
+    if (motivosRemocao.length > 0 && resolvedTasks.length > 0) {
+      (resolvedTasks[0] as any)._tarefa_removida_motivo = motivosRemocao[0];
+    }
+
     // Remove campos de metadata (frontend-only) antes de enviar ao backend
     const sanitizedTasks = resolvedTasks.map((t) => {
       const { is_custom: _ic, template_name: _tn, suggested_responsible: _sr, target_role: _tr, template_id: _tid, ...rest } = t as any;
@@ -5221,13 +5232,55 @@ const PublicationsPage = () => {
                               className={`h-6 px-2 text-xs ${isRemoved ? "text-emerald-600" : "text-destructive hover:text-destructive"}`}
                               onClick={() => {
                                 const next = new Set(removedTaskIndices);
-                                if (isRemoved) next.delete(idx); else next.add(idx);
+                                if (isRemoved) {
+                                  next.delete(idx);
+                                  // Restaurou → o motivo da remoção não vale mais.
+                                  setRemoveReasonByIndex((prev) => {
+                                    const m = new Map(prev);
+                                    m.delete(idx);
+                                    return m;
+                                  });
+                                } else {
+                                  next.add(idx);
+                                }
                                 setRemovedTaskIndices(next);
                               }}
                             >
                               {isRemoved ? "Restaurar" : "Remover"}
                             </Button>
                           </div>
+
+                          {/* pub008 — por que removeu a tarefa que o template
+                              propôs. Calibra a regra de dupla tarefa: se o
+                              motivo mais frequente for "template propõe
+                              demais", o template é que precisa mudar, não a
+                              publicação. Só aparece no bloco removido. */}
+                          {isRemoved && !payload.is_custom && (
+                            <div className="border-b bg-rose-50/60 px-4 py-2.5">
+                              <p className="mb-1.5 text-[11px] font-medium text-rose-900">
+                                Por que esta tarefa não vai?
+                              </p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {REMOVE_TASK_REASONS.map((r) => {
+                                  const ativo = removeReasonByIndex.get(idx) === r.value;
+                                  return (
+                                    <button key={r.value} type="button" title={r.hint}
+                                      onClick={() => setRemoveReasonByIndex((prev) => {
+                                        const m = new Map(prev);
+                                        if (m.get(idx) === r.value) m.delete(idx);
+                                        else m.set(idx, r.value);
+                                        return m;
+                                      })}
+                                      className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                                        ativo ? "border-rose-600 bg-rose-600 text-white"
+                                              : "border-rose-300 bg-white text-rose-900 hover:bg-rose-100"}`}>
+                                      {r.label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
 
                           {/* Banner de duplicata (Onda 1): exibido quando o
                               check-duplicates encontrou tasks pendentes no L1
