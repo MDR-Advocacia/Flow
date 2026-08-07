@@ -112,11 +112,14 @@ def placar_shadow(
 
     corte = f"real_em >= now() - interval '{int(dias)} days'"
 
+    # OPERADOR (abstenção) fica FORA do placar de acurácia — abster não é
+    # acertar nem errar; é ceder a decisão ao humano. Conta em linha própria.
     geral = db.execute(_t(f"""
-        select count(*) as pares,
+        select count(*) filter (where previsto <> 'OPERADOR') as pares,
                count(*) filter (where acertou) as acertos,
                round(100.0 * count(*) filter (where acertou)
-                     / nullif(count(*),0), 1) as pct
+                     / nullif(count(*) filter (where previsto <> 'OPERADOR'),0), 1) as pct,
+               count(*) filter (where previsto = 'OPERADOR') as abstencoes
           from publicacao_shadow_decisao
          where real is not null and {corte}
     """)).first()
@@ -186,6 +189,7 @@ def placar_shadow(
         "pares": int(geral.pares or 0) if geral else 0,
         "acertos": int(geral.acertos or 0) if geral else 0,
         "concordancia_pct": float(geral.pct) if geral and geral.pct else 0.0,
+        "abstencoes_operador": int(getattr(geral, "abstencoes", 0) or 0) if geral else 0,
         "previsoes_aguardando_desfecho": int(pendentes or 0),
         "por_confianca": por_confianca,
         "por_regra": por_regra,
