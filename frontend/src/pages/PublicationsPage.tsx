@@ -393,6 +393,19 @@ interface GroupedRecord {
 }
 
 // Mapa das cores de etiqueta do L1 → classes Tailwind (fallback: cinza).
+// Motivos da troca de subtipo (pub007). Curtos de propósito: o operador faz
+// ~51 dessas por dia e a pergunta precisa custar um clique.
+const SUBTYPE_CHANGE_REASONS: { value: string; label: string; hint: string }[] = [
+  { value: "template_errado", label: "Template errado",
+    hint: "O template desta classificação aponta pro subtipo errado — deveria já vir assim." },
+  { value: "caso_especifico", label: "Caso específico",
+    hint: "O template está certo em geral; esta publicação é exceção." },
+  { value: "classificacao_errada", label: "Classificação errada",
+    hint: "A publicação foi classificada na categoria errada pela IA." },
+  { value: "template_ausente", label: "Faltava template",
+    hint: "Não havia template — montei a tarefa na mão." },
+];
+
 const L1_TAG_COLORS: Record<string, string> = {
   "tag-color-red": "bg-red-100 text-red-800 border-red-300",
   "tag-color-orange": "bg-orange-100 text-orange-800 border-orange-300",
@@ -822,6 +835,13 @@ const PublicationsPage = () => {
   // a decisão final do operador SEMPRE vence a regra automática de
   // squad/assistente (comparar ids não detecta a re-escolha deliberada).
   const [touchedResponsible, setTouchedResponsible] = useState<Set<number>>(new Set());
+  // Troca de SUBTIPO: guardamos o proposto por índice pra saber se houve troca
+  // de fato, e o motivo escolhido. Captura estratégica (pub007) — medido em
+  // 06/08: trocar subtipo são ~51 casos/dia (atrito aceitável, e é o sinal que
+  // aponta template errado); trocar responsável seriam ~224/dia, que é rotina
+  // de distribuição de carga e não dúvida — ali NÃO se pergunta nada.
+  const [originalSubtypeByIndex, setOriginalSubtypeByIndex] = useState<Map<number, number | null>>(new Map());
+  const [subtypeReasonByIndex, setSubtypeReasonByIndex] = useState<Map<number, string>>(new Map());
   const [scheduling, setScheduling] = useState(false);
   // Checagem de duplicatas (tarefa pendente no L1) — Onda 1.
   // Estrutura: { [subTypeId]: [{task_id, description, status_label, end_date_time, l1_url}] }
@@ -1933,6 +1953,10 @@ const PublicationsPage = () => {
       }
     }
     setEditedPayloads(dateAdjustedTasks.map((t) => ({ ...t })));
+    setOriginalSubtypeByIndex(
+      new Map(dateAdjustedTasks.map((t, i) => [i, (t as any).subTypeId ?? null])),
+    );
+    setSubtypeReasonByIndex(new Map());
     // Reset do estado de duplicatas — a checagem roda via useEffect abaixo.
     setDuplicatesBySubtype({});
     setDuplicateCheckFailed(false);
@@ -2092,6 +2116,10 @@ const PublicationsPage = () => {
       // Encontra o indice REAL no editedPayloads (activeTasks pula removed).
       const realIdx = editedPayloads.findIndex((p) => p === t);
       const originalId = originalResponsibleByIndex.get(realIdx) ?? null;
+      const motivoSub = subtypeReasonByIndex.get(realIdx);
+      if (motivoSub) {
+        (t as any)._subtipo_troca_motivo = motivoSub;
+      }
       if (touchedResponsible.has(realIdx)) {
         // Operador mexeu no responsável (mesmo re-escolhendo a mesma
         // pessoa) — decisão final dele. Marcador avisa o backend pra
@@ -5260,8 +5288,52 @@ const PublicationsPage = () => {
                                       typeId: newType?.external_id ?? next[idx].typeId,
                                     };
                                     setEditedPayloads(next);
+                                    // Troca nova → motivo anterior não vale mais.
+                                    setSubtypeReasonByIndex((prev) => {
+                                      const m = new Map(prev);
+                                      m.delete(idx);
+                                      return m;
+                                    });
                                   }}
                                 />
+                                {/* Só aparece quando o subtipo REALMENTE mudou
+                                    em relação ao proposto pelo template. */}
+                                {(originalSubtypeByIndex.get(idx) ?? null) !== null &&
+                                 currentSubId !== (originalSubtypeByIndex.get(idx) ?? null) && (
+                                  <div className="rounded-md border border-amber-200 bg-amber-50/60 p-2.5">
+                                    <p className="mb-1.5 text-[11px] font-medium text-amber-900">
+                                      Por que trocou o subtipo?
+                                    </p>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {SUBTYPE_CHANGE_REASONS.map((r) => {
+                                        const ativo = subtypeReasonByIndex.get(idx) === r.value;
+                                        return (
+                                          <button
+                                            key={r.value}
+                                            type="button"
+                                            title={r.hint}
+                                            onClick={() => setSubtypeReasonByIndex((prev) => {
+                                              const m = new Map(prev);
+                                              if (m.get(idx) === r.value) m.delete(idx);
+                                              else m.set(idx, r.value);
+                                              return m;
+                                            })}
+                                            className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                                              ativo
+                                                ? "border-amber-500 bg-amber-500 text-white"
+                                                : "border-amber-300 bg-white text-amber-900 hover:bg-amber-100"
+                                            }`}
+                                          >
+                                            {r.label}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                    <p className="mt-1.5 text-[10px] text-amber-800/80">
+                                      Opcional — mas é o que nos diz qual template corrigir.
+                                    </p>
+                                  </div>
+                                )}
                                 {parentType && (
                                   <p className="text-[10px] text-muted-foreground -mt-1">
                                     Tipo: {parentType.name}

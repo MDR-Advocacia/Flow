@@ -38,6 +38,10 @@ class PublicationTaskAudit(Base):
     # separada do override humano (pub005). {campo: {antes, depois, motivo}}.
     system_adjustments = Column(jsonb(), nullable=True)
 
+    # Por que o operador trocou o SUBTIPO proposto (pub007). Captura
+    # estratégica: só ~51 casos/dia, e é o sinal que aponta template errado.
+    # Nulo quando não houve troca ou o motivo não foi informado.
+    subtipo_troca_motivo = Column(String(40), nullable=True)
     # Quem agendou (snapshot do operador — o L1 só guarda "Sistema").
     scheduled_by_user_id = Column(Integer, nullable=True, index=True)
     scheduled_by_name = Column(String, nullable=True)

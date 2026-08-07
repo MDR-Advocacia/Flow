@@ -3678,10 +3678,20 @@ class PublicationSearchService:
                             continue
                         if proposto is not None and proposto != enviado:
                             override_fields[field] = {"proposto": proposto, "enviado": enviado}
+                # Motivo da troca de SUBTIPO (pub007): o modal pergunta só
+                # quando o operador troca o subtipo proposto (~51/dia — atrito
+                # aceitável, e é o sinal que conserta template). Nunca na troca
+                # de responsável (~224/dia: rotina de carga, não dúvida).
+                motivo_sub = None
+                if isinstance(sent, dict):
+                    motivo_sub = sent.pop("_subtipo_troca_motivo", None)
+                if motivo_sub and "subTypeId" not in override_fields:
+                    motivo_sub = None  # só vale quando houve troca de fato
                 self.db.add(PublicationTaskAudit(
                     lawsuit_id=lawsuit_id,
                     publication_record_id=rec_id,
                     subtype_id=int(sub) if sub is not None else None,
+                    subtipo_troca_motivo=motivo_sub,
                     created_task_id=task_id,
                     sent_payload=sent,
                     proposed_payload=prop,
@@ -3762,6 +3772,13 @@ class PublicationSearchService:
         # routing abaixo e é removido aqui pra nunca vazar pro L1.
         operator_locked = [
             bool(p.pop("_responsible_overridden", False)) if isinstance(p, dict) else False
+            for p in payloads
+        ]
+        # `_subtipo_troca_motivo` viaja no payload até a auditoria (que o
+        # remove ao gravar). Guardamos uma cópia porque o payload enviado ao
+        # L1 é sanitizado antes — sem isto o motivo se perderia no caminho.
+        motivos_subtipo = [
+            (p.get("_subtipo_troca_motivo") if isinstance(p, dict) else None)
             for p in payloads
         ]
 
@@ -3943,6 +3960,7 @@ class PublicationSearchService:
         for p in payloads:
             if isinstance(p, dict):
                 p.pop("_responsible_overridden", None)
+                p.pop("_subtipo_troca_motivo", None)
 
         # Fallback de office pra tarefas avulsas: embora esse fluxo seja
         # explicitamente "sem processo vinculado", alguns records ainda
