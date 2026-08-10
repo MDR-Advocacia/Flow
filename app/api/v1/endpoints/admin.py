@@ -1108,6 +1108,51 @@ def listar_equipes(
     return [_equipe_dto(e, contagem.get(e.key, 0)) for e in rows]
 
 
+def _exige_admin(current_user: LegalOneUser) -> None:
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required"
+        )
+
+
+def _slug_equipe(texto: str) -> str:
+    import re as _re
+    import unicodedata as _ud
+
+    s = _ud.normalize("NFKD", str(texto or ""))
+    s = "".join(c for c in s if not _ud.combining(c))
+    s = _re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-").lower()
+    return _re.sub(r"-{2,}", "-", s)
+
+
+def _equipe_dto(e, pessoas: int) -> dict:
+    return {
+        "id": e.id, "key": e.key, "label": e.label, "grupo": e.grupo,
+        "ordem": e.ordem, "ativo": e.ativo, "pessoas": pessoas,
+    }
+
+
+def _headcount(db) -> dict:
+    """Pessoas ATIVAS por equipe — alimenta o aviso de impacto na exclusão."""
+    from app.models.performance import PerfPessoa
+
+    return {
+        k: int(n)
+        for k, n in db.query(PerfPessoa.equipe, func.count(PerfPessoa.id))
+        .filter(PerfPessoa.ativo)
+        .group_by(PerfPessoa.equipe)
+        .all()
+    }
+
+
+class EquipePayload(BaseModel):
+    label: str
+    grupo: str
+    key: Optional[str] = None   # só na criação; derivado do label quando vazio
+    ordem: Optional[int] = None
+    ativo: Optional[bool] = None
+
+
 @router.post("/equipes", tags=["Admin"], status_code=201, summary="Cria uma equipe")
 def criar_equipe(
     payload: EquipePayload,
