@@ -289,14 +289,31 @@ def _cadastrar_lote(db: Session, lote_id: int, processo_ids: list[int]) -> None:
     /Lawsuits da API REST não dispara). O monitor confirma cada pasta depois.
     """
     from app.services.distribuidos_bb.import_l1_service import cadastrar_planilha
-    from app.services.distribuidos_bb.planilha_service import gerar_e_persistir
+    from app.services.distribuidos_bb.planilha_service import (
+        cnjs_liberados_da_planilha,
+        gerar_e_persistir,
+    )
 
     planilha = gerar_e_persistir(db, processo_ids=processo_ids, cliente=CLIENTE_ATIVOS)
     if planilha is None:
         return
     db.commit()
 
-    rel = cadastrar_planilha(bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False)
+    # `cnjs_liberados` é OBRIGATÓRIO aqui, e a falta dele foi um bug real
+    # (10/08/2026): o L1 marca `duplicated` sempre que já existe pasta com
+    # aquele CNJ no tenant — INCLUSIVE quando a pasta é de OUTRO cliente. Como
+    # a MDR conduz os dois lados em vários processos, isso é rotina: o CNJ
+    # 0803278-77.2026.8.14.0008 já tinha pasta do BB (cadastrada em 07/08) e a
+    # pasta da ATIVOS foi recusada, ficando "Pendente cadastro" sem virar
+    # tarefa. O BB já passava essa liberação; a Ativos nasceu sem ela.
+    #
+    # A liberação é segura porque a trava anterior (`_marcar_ja_existentes_no_l1`)
+    # já removeu quem tinha pasta do MESMO cliente — o que sobra pendente só
+    # pode ser duplicata de outro cliente, que DEVE ser cadastrada.
+    rel = cadastrar_planilha(
+        bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False,
+        cnjs_liberados=cnjs_liberados_da_planilha(db, planilha.id),
+    )
     from app.services.distribuidos_bb.cadastro_descartes import registrar_descartes
 
     registrar_descartes(db, rel, planilha_id=planilha.id)
