@@ -27,17 +27,6 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 
-def generate_temp_password(length: int = 12) -> str:
-    """
-    Generate a temporary random password.
-    Excludes confusing characters like 0/O and 1/l.
-    """
-    # Remove confusing characters: 0, O, l, 1, I
-    alphabet = string.ascii_letters + string.digits
-    alphabet = alphabet.replace('0', '').replace('O', '').replace('l', '').replace('1', '').replace('I', '')
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
-
-
 def validate_password(pwd: str) -> None:
     """
     Validate password strength.

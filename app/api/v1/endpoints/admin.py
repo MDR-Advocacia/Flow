@@ -491,9 +491,11 @@ def list_users(
             "can_manage_distribuidos_bb": getattr(u, "can_manage_distribuidos_bb", False),
             "notify_onerequest_errors": getattr(u, "notify_onerequest_errors", False),
             "default_office_id": u.default_office_id,
-            "has_password": u.hashed_password is not None,
+            # Sem senha no sistema (identidade e' o Entra). O que o admin
+            # precisa ver aqui e' se a pessoa pode ser RESPONSAVEL por tarefa:
+            # isso exige contato no L1 (external_id).
+            "tem_contato_l1": u.external_id is not None,
             "is_sso": getattr(u, "last_sso_at", None) is not None,
-            "must_change_password": u.must_change_password,
             # RBAC (usr005): de onde vem a permissão e se há desvio individual.
             "cargo_id": getattr(u, "cargo_id", None),
             "cargo_nome": _cargos.get(getattr(u, "cargo_id", None)),
@@ -567,69 +569,17 @@ def update_user(
     }
 
 
-@router.post("/users/{user_id}/activate", tags=["Admin"])
-def activate_user(
-    user_id: int,
-    db: Session = Depends(get_db),
-    current_user: LegalOneUser = Depends(auth.get_current_user),
-):
-    """Activate user and generate temporary password (admin only)."""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
-
-    user = db.query(LegalOneUser).filter(LegalOneUser.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-
-    # Generate temporary password
-    temp_password = auth.generate_temp_password()
-    user.hashed_password = auth.get_password_hash(temp_password)
-    user.is_active = True
-    user.must_change_password = True
-
-    db.commit()
-    db.refresh(user)
-
-    # Return the plaintext password ONCE
-    return {
-        "id": user.id,
-        "email": user.email,
-        "name": user.name,
-        "temp_password": temp_password,
-        "message": "Esta senha só será exibida uma vez. Repasse-a ao usuário com segurança.",
-    }
-
-
-@router.post("/users/{user_id}/reset-password", tags=["Admin"])
-def reset_user_password(
-    user_id: int,
-    db: Session = Depends(get_db),
-    current_user: LegalOneUser = Depends(auth.get_current_user),
-):
-    """Reset user password (admin only)."""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
-
-    user = db.query(LegalOneUser).filter(LegalOneUser.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-
-    # Generate temporary password
-    temp_password = auth.generate_temp_password()
-    user.hashed_password = auth.get_password_hash(temp_password)
-    user.must_change_password = True
-
-    db.commit()
-    db.refresh(user)
-
-    # Return the plaintext password ONCE
-    return {
-        "id": user.id,
-        "email": user.email,
-        "name": user.name,
-        "temp_password": temp_password,
-        "message": "Esta senha só será exibida uma vez. Repasse-a ao usuário com segurança.",
-    }
+# Ativacao de conta e reset de senha REMOVIDOS em 07/08/2026 (decisao do
+# operador). Nao existe mais senha no Flow: a identidade e' o Entra ID.
+#
+# O fluxo agora e' um so': a pessoa entra pelo botao da Microsoft, o usuario
+# nasce SEM permissao nenhuma, e o gestor define o CARGO. Nao ha conta pra
+# "ativar" — quem tem conta no Entra tem acesso ao login; o que o gestor
+# controla e' o papel, nao a existencia.
+#
+# O que motivou: manter senha provisoria significava manter um segundo caminho
+# de entrada, um estado "criado mas inativo" que so' confundia, e um campo de
+# senha em banco que ninguem usava. Some tudo.
 
 
 @router.post("/users/{user_id}/deactivate", tags=["Admin"])
@@ -646,6 +596,11 @@ def deactivate_user(
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
+    # Bloqueio de acesso no Flow. NAO e' "desativar cadastro": o cadastro
+    # pertence ao Entra. Isto e' a tranca local, pra quando o gestor precisa
+    # cortar o acesso na hora sem esperar o RH mexer no Entra. Se a conta
+    # continuar valida no Entra, a pessoa ainda passa pelo login da Microsoft
+    # e toma 403 na sessao — que e' o comportamento desejado e visivel.
     user.is_active = False
     db.commit()
     db.refresh(user)
@@ -1091,11 +1046,6 @@ def delete_saved_filter(
 # ─── User Self-Service Endpoints ───────────────────────────────────────────
 
 
-class ChangePasswordRequest(BaseModel):
-    current_password: str
-    new_password: str
-
-
 class MeResponseSchema(BaseModel):
     id: int
     name: str
@@ -1110,7 +1060,6 @@ class MeResponseSchema(BaseModel):
     minha_equipe_equipes: list = []
     can_manage_distribuidos_bb: bool = False
     default_office_id: Optional[int]
-    must_change_password: bool
 
     class Config:
         from_attributes = True
@@ -1136,102 +1085,15 @@ def get_current_user_info(
         "minha_equipe_equipes": _equipes_to_list(current_user),
         "can_manage_distribuidos_bb": getattr(current_user, "can_manage_distribuidos_bb", False),
         "default_office_id": current_user.default_office_id,
-        "must_change_password": current_user.must_change_password,
+        # Mantido como False fixo: o front antigo ainda le este campo, e
+        # remover de vez exigiria versionar a resposta. Nao existe mais senha
+        # pra trocar.
+        "must_change_password": False,
     }
 
 
-@me_router.post("/me/change-password", tags=["User"])
-def change_password(
-    payload: ChangePasswordRequest,
-    db: Session = Depends(get_db),
-    current_user: LegalOneUser = Depends(auth.get_current_user),
-):
-    """Change current user password."""
-    # Validate current password
-    if not current_user.hashed_password or not auth.verify_password(
-        payload.current_password, current_user.hashed_password
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Senha atual incorreta.",
-        )
-
-    # Validate new password
-    auth.validate_password(payload.new_password)
-
-    # Update password
-    current_user.hashed_password = auth.get_password_hash(payload.new_password)
-    current_user.must_change_password = False
-
-    db.commit()
-    db.refresh(current_user)
-
-    return {
-        "id": current_user.id,
-        "email": current_user.email,
-        "name": current_user.name,
-        "message": "Senha alterada com sucesso.",
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# Equipes do Minha Equipe (CRUD)
-#
-# Antes viviam hardcoded em TRÊS listas (teams.py, teams.ts e o EQUIPES do
-# AdminPage) e criar equipe exigia deploy — o desencontro entre elas já causou
-# bug de permissão. Fonte da verdade agora é `perf_equipe` (migration perf012).
-#
-# `key` é IMUTÁVEL: é o slug gravado em `perf_pessoa.equipe` e no CSV de
-# `legal_one_users.minha_equipe_equipes`. Renomear a key revogaria acesso e
-# orfanaria gente — por isso o admin edita só rótulo/grupo/ordem, e a exclusão
-# é SOFT (ativo=False), preservando histórico e permissões.
-# ─────────────────────────────────────────────────────────────────────────
-
-
-def _slug_equipe(texto: str) -> str:
-    import re as _re
-    import unicodedata as _ud
-
-    s = _ud.normalize("NFKD", str(texto or ""))
-    s = "".join(c for c in s if not _ud.combining(c))
-    s = _re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-").lower()
-    return _re.sub(r"-{2,}", "-", s)
-
-
-class EquipePayload(BaseModel):
-    label: str
-    grupo: str
-    key: Optional[str] = None   # só na criação; derivado do label quando vazio
-    ordem: Optional[int] = None
-    ativo: Optional[bool] = None
-
-
-def _exige_admin(current_user: LegalOneUser) -> None:
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required"
-        )
-
-
-def _equipe_dto(e, pessoas: int) -> dict:
-    return {
-        "id": e.id, "key": e.key, "label": e.label, "grupo": e.grupo,
-        "ordem": e.ordem, "ativo": e.ativo, "pessoas": pessoas,
-    }
-
-
-def _headcount(db) -> dict:
-    """Pessoas ATIVAS por equipe — alimenta o aviso de impacto na exclusão."""
-    from app.models.performance import PerfPessoa
-
-    return {
-        k: int(n)
-        for k, n in db.query(PerfPessoa.equipe, func.count(PerfPessoa.id))
-        .filter(PerfPessoa.ativo)
-        .group_by(PerfPessoa.equipe)
-        .all()
-    }
-
+# Troca de senha REMOVIDA em 07/08/2026: nao existe senha no Flow. A
+# credencial e' a conta Microsoft, e trocar senha se faz no Entra.
 
 @router.get("/equipes", tags=["Admin"], summary="Equipes do Minha Equipe (inclui as desativadas)")
 def listar_equipes(

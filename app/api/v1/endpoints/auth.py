@@ -77,45 +77,17 @@ def _name_from_id_token(authorization: str) -> "str | None":
         return None
 
 
-@router.post("/token", response_model=schemas.Token)
-def login_for_access_token(
-    db: Session = Depends(get_db),
-    form_data: OAuth2PasswordRequestForm = Depends()
-):
-    """
-    Login por senha (break-glass / fallback). O acesso padrão passou a ser via
-    SSO (Entra) em /sso/session. Recebe e-mail (como username) e senha.
-    Retorna um token de acesso JWT em caso de sucesso.
-    """
-    # 1. Busca o usuário pelo e-mail no banco de dados.
-    user = db.query(LegalOneUser).filter(LegalOneUser.email == form_data.username).first()
-
-    # 2. Verifica se o usuário existe e se a senha está correta.
-    if not user or not user.hashed_password or not auth.verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="E-mail ou senha incorretos",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    # 3. Cria o token de acesso (sub = e-mail; inclui role/permissões).
-    access_token = auth.create_access_token(
-        data={"sub": user.email},
-        role=user.role,
-        can_schedule_batch=user.can_schedule_batch,
-        can_use_publications=user.can_use_publications,
-        can_use_prazos_iniciais=getattr(user, "can_use_prazos_iniciais", False),
-        can_use_onerequest=getattr(user, "can_use_onerequest", False),
-        can_use_encerramentos=getattr(user, "can_use_encerramentos", False),
-        can_manage_distribuidos_bb=getattr(user, "can_manage_distribuidos_bb", False),
-        must_change_password=user.must_change_password,
-    )
-
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "must_change_password": user.must_change_password,
-    }
+# Login por senha REMOVIDO em 07/08/2026 (decisao do operador).
+#
+# A identidade do Flow e' o Entra ID e nada mais: nao ha senha, nao ha senha
+# provisoria, nao ha ativacao de conta. Quem entra, entra pelo botao da
+# Microsoft; o gestor define o papel depois. Manter um /auth/login vivo como
+# "break-glass" significava manter senha em banco, fluxo de troca de senha e
+# uma segunda porta de entrada que ninguem auditava — e o custo real disso foi
+# usuario duplicado e acesso derrubado por sincronizacao.
+#
+# Se algum dia precisar de acesso de emergencia, o caminho e' pelo Entra
+# (conta de servico), nao por senha local.
 
 
 @router.get("/sso/session", response_model=schemas.Token)

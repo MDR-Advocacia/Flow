@@ -45,7 +45,10 @@ export interface AdminUser {
   can_manage_distribuidos_bb: boolean;
   notify_onerequest_errors: boolean;
   default_office_id: number | null;
-  has_password: boolean;
+  /** Tem contato no Legal One (external_id). Sem isso a pessoa usa o Flow
+   *  normalmente, mas NÃO pode ser responsável por tarefa — o L1 exige o id
+   *  do contato no payload. Não tem relação com senha: senha não existe mais. */
+  tem_contato_l1: boolean;
   is_sso: boolean;
   must_change_password: boolean;
 }

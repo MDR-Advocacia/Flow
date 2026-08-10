@@ -99,41 +99,9 @@ const UsersAndPermissions = () => {
         },
     });
 
-    const activateUserMutation = useMutation({
-        mutationFn: async (userId: number) => {
-            const res = await apiFetch(`/api/v1/admin/users/${userId}/activate`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-            });
-            if (!res.ok) throw new Error('Falha ao ativar usuário');
-            return res.json();
-        },
-        onSuccess: (data) => {
-            setTempPasswordDialog({ isOpen: true, password: data.temp_password, userName: data.name });
-            refetchUsers();
-        },
-        onError: (err: any) => {
-            toast({ title: 'Erro', description: err.message, variant: 'destructive' });
-        },
-    });
-
-    const resetPasswordMutation = useMutation({
-        mutationFn: async (userId: number) => {
-            const res = await apiFetch(`/api/v1/admin/users/${userId}/reset-password`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-            });
-            if (!res.ok) throw new Error('Falha ao resetar senha');
-            return res.json();
-        },
-        onSuccess: (data) => {
-            setTempPasswordDialog({ isOpen: true, password: data.temp_password, userName: data.name });
-            refetchUsers();
-        },
-        onError: (err: any) => {
-            toast({ title: 'Erro', description: err.message, variant: 'destructive' });
-        },
-    });
+    // Ativação de conta e reset de senha removidos em 07/08/2026: não existe
+    // senha no Flow. Quem tem conta no Entra ID entra; o que o gestor define
+    // aqui é o CARGO, não a existência da conta.
 
     const deactivateUserMutation = useMutation({
         mutationFn: async (userId: number) => {
@@ -273,8 +241,13 @@ const UsersAndPermissions = () => {
                                                 Entra ID
                                             </Badge>
                                         ) : (
-                                            <Badge variant={user.has_password ? "outline" : "destructive"}>
-                                                {user.has_password ? "Configurado" : "Sem senha"}
+                                            <Badge
+                                                variant={user.tem_contato_l1 ? "outline" : "destructive"}
+                                                title={user.tem_contato_l1
+                                                    ? "Vinculada a um contato do Legal One — pode ser responsável por tarefa."
+                                                    : "Sem contato correspondente no Legal One. A pessoa usa o Flow normalmente, mas não aparece como opção de responsável por tarefa."}
+                                            >
+                                                {user.tem_contato_l1 ? "Contato L1" : "Sem contato L1"}
                                             </Badge>
                                         )}
                                     </TableCell>
@@ -446,27 +419,6 @@ const UsersAndPermissions = () => {
                                             </div>
                                         ) : (
                                             <div className="flex flex-col gap-1">
-                                                {!user.has_password && (
-                                                    <Button
-                                                        size="sm"
-                                                        variant="default"
-                                                        onClick={() => activateUserMutation.mutate(user.id)}
-                                                        disabled={activateUserMutation.isPending}
-                                                    >
-                                                        <Shield className="h-3 w-3 mr-1" />
-                                                        Ativar
-                                                    </Button>
-                                                )}
-                                                {user.has_password && (
-                                                    <Button
-                                                        size="sm"
-                                                        variant="outline"
-                                                        onClick={() => resetPasswordMutation.mutate(user.id)}
-                                                        disabled={resetPasswordMutation.isPending}
-                                                    >
-                                                        Resetar
-                                                    </Button>
-                                                )}
                                                 <Button
                                                     size="sm"
                                                     variant="outline"

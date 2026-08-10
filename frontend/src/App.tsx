@@ -6,7 +6,6 @@ import { useState, useEffect, useContext } from 'react';
 
 // Componentes de Rota e Layout
 import ProtectedRoute from './components/ProtectedRoute';
-import { ChangePasswordDialog } from './components/ChangePasswordDialog';
 import AdminNoticeBar from './components/AdminNoticeBar';
 import FeedbackButton from './components/FeedbackButton';
 
@@ -55,13 +54,8 @@ const queryClient = new QueryClient();
 
 function AppContent() {
   const authContext = useContext(AuthContext);
-  const [showChangePasswordDialog, setShowChangePasswordDialog] = useState(false);
-
-  useEffect(() => {
-    if (authContext?.mustChangePassword && authContext.isAuthenticated) {
-      setShowChangePasswordDialog(true);
-    }
-  }, [authContext?.mustChangePassword, authContext?.isAuthenticated]);
+  // Troca de senha removida em 07/08/2026: não existe senha no Flow, a
+  // credencial é a conta Microsoft (Entra ID).
 
   return (
     <>
@@ -139,20 +133,6 @@ function AppContent() {
 
       <Toaster />
 
-      <ChangePasswordDialog
-        isOpen={showChangePasswordDialog}
-        isMandatory={authContext?.mustChangePassword ?? false}
-        onPasswordChanged={() => {
-          setShowChangePasswordDialog(false);
-          // O JWT atual ainda carrega must_change_password=true.
-          // Força logout para que o próximo login emita um token com a claim atualizada.
-          if (authContext?.mustChangePassword) {
-            authContext?.logout();
-          } else {
-            authContext?.refreshMe();
-          }
-        }}
-      />
     </>
   );
 }
