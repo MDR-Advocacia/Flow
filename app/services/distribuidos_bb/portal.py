@@ -112,7 +112,32 @@ class PortalBBColetor:
         if not cookies:
             raise RuntimeError("OneLog não devolveu cookies válidos para injetar no navegador.")
 
+        # O `start()` liga um loop asyncio PROPRIO do Playwright e o mantem
+        # rodando nesta thread. Se qualquer passo daqui pra frente estourar
+        # sem que o Playwright seja parado, esse loop fica vivo — e a
+        # retentativa seguinte, na MESMA thread, morre com "Sync API inside
+        # the asyncio loop", mensagem que ESCONDE o erro real.
+        #
+        # Foi o que aconteceu em 10/08/2026: a tentativa 1 falhou por falta de
+        # display (Xvfb fora do ar), vazou o loop, e as tentativas 2 e 3
+        # gravaram no run o erro de asyncio. A investigacao foi atras de
+        # asyncio quando o problema era o display.
         self._pw = sync_playwright().start()
+        try:
+            self._abrir_navegador(cookies)
+        except BaseException:
+            # Devolve a thread ao estado limpo antes de repropagar, pra que a
+            # proxima tentativa enxergue o erro DE VERDADE.
+            try:
+                self._pw.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._pw = None
+            raise
+        return self
+
+    def _abrir_navegador(self, cookies) -> None:
+        """Sobe o Chromium e prepara contexto/pagina com a sessao do OneLog."""
         self._browser = self._pw.chromium.launch(
             headless=self.headless,
             args=[
@@ -123,7 +148,7 @@ class PortalBBColetor:
             ],
         )
         self._context = self._browser.new_context(
-            user_agent=sessao.get("user_agent"),
+            user_agent=(self.sessao_onelog or {}).get("user_agent"),
             viewport={"width": 1920, "height": 1080},
             locale="pt-BR",
             timezone_id="America/Fortaleza",
@@ -132,7 +157,6 @@ class PortalBBColetor:
         self._page = self._context.new_page()
         logger.info("Portal BB: abrindo %s", self.portal_url)
         self._page.goto(self.portal_url, wait_until="domcontentloaded", timeout=60000)
-        return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         for fechar in (

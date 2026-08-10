@@ -584,6 +584,29 @@ def executar_coleta_background(
                     dados={"tentativas": tentativas, "motivo": motivo}, run_id=run.id,
                 )
                 db.commit()
+                # ALERTA: sem isto a coleta morre em SILÊNCIO. Quem passa a
+                # busca depois vê "zerada" e conclui que não havia processo —
+                # foi assim que o cadastro do BB ficou 3 dias parado
+                # (07→10/08/2026) sem ninguém perceber. O evento na tela só
+                # aparece pra quem vai olhar o painel; o e-mail vai atrás.
+                try:
+                    from app.services.distribuidos_bb.alertas import (
+                        alertar_falha_cadastro,
+                    )
+
+                    alertar_falha_cadastro(
+                        contexto=(
+                            f"coleta do portal BB — desistiu após "
+                            f"{tentativas} tentativa(s)"
+                        ),
+                        erro=motivo,
+                        run_id=run.id,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Distribuídos BB: falha ao alertar sobre a coleta do run %s.",
+                        run.id,
+                    )
                 return
 
             registrar_evento(
