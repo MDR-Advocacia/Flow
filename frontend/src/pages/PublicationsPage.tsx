@@ -15,6 +15,7 @@ import {
   BookOpen,
   Building2,
   Calendar,
+  CalendarClock,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -410,6 +411,22 @@ const SUBTYPE_CHANGE_REASONS: { value: string; label: string; hint: string }[] =
 // 72% dos agendamentos mexem na data, mas 260 perguntas/dia é inviável; fora
 // de ±3 dias sobram ~90/dia, e é aí que mora a regra que não está escrita.
 const DESVIO_DATA_DIAS = 3;
+// Acima disto o motivo vira OBRIGATÓRIO. Medido em produção (3 dias, 249
+// desvios grandes): só 5,2% preenchiam quando era opcional, contra 99,8% no
+// motivo do ignorar — que é obrigatório. Opcional, na prática, é não
+// preenchido. O corte em 10 dias mira o desvio que denuncia template errado
+// (ex.: "Cumprir Determinação Específica" com mediana de +24 dias) sem
+// interrogar o ajuste fino do dia a dia.
+const DESVIO_DATA_OBRIGA = 10;
+
+/** Dias entre a data proposta pelo template e a que o operador vai enviar. */
+function desvioEmDias(orig: string | null | undefined, atual: string | null | undefined): number | null {
+  if (!orig || !atual) return null;
+  const d0 = new Date(orig).getTime();
+  const d1 = new Date(atual).getTime();
+  if (Number.isNaN(d0) || Number.isNaN(d1)) return null;
+  return Math.round((d1 - d0) / 86400000);
+}
 
 const DATE_CHANGE_REASONS: { value: string; label: string; hint: string }[] = [
   { value: "prazo_no_texto", label: "Prazo vinha no texto",
@@ -2134,6 +2151,18 @@ const PublicationsPage = () => {
       }
       if (!t.endDateTime) {
         toast({ title: `${label}: defina o prazo/data`, variant: "destructive" });
+        return;
+      }
+      // Motivo do desvio grande de data: obrigatório acima de 10 dias.
+      const realIdxVal = editedPayloads.findIndex((p) => p === t);
+      const desvio = desvioEmDias(originalDateByIndex.get(realIdxVal), t.endDateTime);
+      if (desvio !== null && Math.abs(desvio) > DESVIO_DATA_OBRIGA
+          && !dateReasonByIndex.get(realIdxVal)) {
+        toast({
+          title: `${label}: diga por que mudou a data em ${Math.abs(desvio)} dias`,
+          description: "Escolha um motivo no bloco azul da tarefa. É o que nos diz qual template corrigir.",
+          variant: "destructive",
+        });
         return;
       }
     }
@@ -5682,20 +5711,33 @@ const PublicationsPage = () => {
                                       em relação ao template. O desvio pequeno é
                                       rotina; o grande carrega regra não escrita. */}
                                   {(() => {
-                                    const orig = originalDateByIndex.get(idx);
-                                    if (!orig || !payload.endDateTime) return null;
-                                    const d0 = new Date(orig).getTime();
-                                    const d1 = new Date(payload.endDateTime).getTime();
-                                    const dias = Math.round((d1 - d0) / 86400000);
-                                    if (Math.abs(dias) <= DESVIO_DATA_DIAS) return null;
+                                    const dias = desvioEmDias(
+                                      originalDateByIndex.get(idx), payload.endDateTime);
+                                    if (dias === null || Math.abs(dias) <= DESVIO_DATA_DIAS) return null;
+                                    const obriga = Math.abs(dias) > DESVIO_DATA_OBRIGA;
+                                    const escolhido = dateReasonByIndex.get(idx);
+                                    const pendente = obriga && !escolhido;
                                     return (
-                                      <div className="col-span-12 rounded-md border border-sky-200 bg-sky-50/60 p-2.5">
-                                        <p className="mb-1.5 text-[11px] font-medium text-sky-900">
-                                          {dias > 0 ? `Adiou ${dias} dias` : `Antecipou ${Math.abs(dias)} dias`} — por quê?
-                                        </p>
+                                      <div className={`col-span-12 rounded-lg border-2 p-3 ${
+                                        pendente
+                                          ? "animate-pulse border-amber-400 bg-amber-50"
+                                          : escolhido
+                                            ? "border-emerald-300 bg-emerald-50/60"
+                                            : "border-sky-300 bg-sky-50"}`}>
+                                        <div className="mb-2 flex items-center gap-2">
+                                          <CalendarClock className={`h-4 w-4 shrink-0 ${
+                                            pendente ? "text-amber-700" : escolhido ? "text-emerald-700" : "text-sky-700"}`} />
+                                          <p className={`text-sm font-semibold ${
+                                            pendente ? "text-amber-900" : escolhido ? "text-emerald-900" : "text-sky-900"}`}>
+                                            {dias > 0 ? `Você adiou ${dias} dias` : `Você antecipou ${Math.abs(dias)} dias`}
+                                            {obriga && !escolhido && " — diga por quê para continuar"}
+                                            {obriga && escolhido && " — obrigado!"}
+                                            {!obriga && " — por quê? (opcional)"}
+                                          </p>
+                                        </div>
                                         <div className="flex flex-wrap gap-1.5">
                                           {DATE_CHANGE_REASONS.map((r) => {
-                                            const ativo = dateReasonByIndex.get(idx) === r.value;
+                                            const ativo = escolhido === r.value;
                                             return (
                                               <button key={r.value} type="button" title={r.hint}
                                                 onClick={() => setDateReasonByIndex((prev) => {
@@ -5704,14 +5746,21 @@ const PublicationsPage = () => {
                                                   else m.set(idx, r.value);
                                                   return m;
                                                 })}
-                                                className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
-                                                  ativo ? "border-sky-600 bg-sky-600 text-white"
-                                                        : "border-sky-300 bg-white text-sky-900 hover:bg-sky-100"}`}>
+                                                className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+                                                  ativo ? "border-emerald-600 bg-emerald-600 text-white"
+                                                        : pendente
+                                                          ? "border-amber-400 bg-white text-amber-900 hover:bg-amber-100"
+                                                          : "border-sky-300 bg-white text-sky-900 hover:bg-sky-100"}`}>
                                                 {r.label}
                                               </button>
                                             );
                                           })}
                                         </div>
+                                        <p className="mt-1.5 text-[10px] text-muted-foreground">
+                                          O prazo do template era{" "}
+                                          {formatDateShort(originalDateByIndex.get(idx) ?? null)} — sua resposta
+                                          diz se o template precisa mudar.
+                                        </p>
                                       </div>
                                     );
                                   })()}
