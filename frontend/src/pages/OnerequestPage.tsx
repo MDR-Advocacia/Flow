@@ -384,6 +384,13 @@ export default function OnerequestPage() {
   const [editData, setEditData] = useState("");
   const [saving, setSaving] = useState(false);
   const [scheduling, setScheduling] = useState(false);
+  // Trava 1 — clique reflexo: o botao de agendar so' arma alguns instantes
+  // depois de o modal abrir. Em fluxo repetitivo (um item a cada ~15s) o
+  // segundo clique do operador caia em cima dele e agendava sem leitura.
+  const [agendarArmado, setAgendarArmado] = useState(false);
+  // Trava 2 — confirmacao SEMPRE (nao so' na duplicidade): guarda o resumo
+  // do que sera' criado enquanto o operador confirma.
+  const [confirmarAgendamento, setConfirmarAgendamento] = useState(false);
   const [sugestao, setSugestao] = useState<Sugestao | null>(null);
   const [sugerido, setSugerido] = useState(false);
   const [l1, setL1] = useState<L1Tarefas | null>(null);
@@ -802,6 +809,9 @@ export default function OnerequestPage() {
 
   const openModal = (sol: OnerequestSolicitacao) => {
     setSelected(sol);
+    // Desarma e rearma depois — ver "Trava 1" na declaracao do estado.
+    setAgendarArmado(false);
+    window.setTimeout(() => setAgendarArmado(true), 700);
     const u = users.find((x) => x.id === sol.responsavel_user_id);
     setEditResponsavelExt(u ? String(u.external_id) : null);
     setEditSetor(sol.setor ?? "");
@@ -975,8 +985,15 @@ export default function OnerequestPage() {
     }
   };
 
+  // Clique no botao NAO agenda mais: abre a confirmacao com o resumo.
+  const pedirConfirmacao = () => {
+    if (!selected) return;
+    setConfirmarAgendamento(true);
+  };
+
   const handleAgendar = async () => {
     if (!selected) return;
+    setConfirmarAgendamento(false);
     const ok = await saveTratamento();
     if (!ok) return;
     setScheduling(true);
@@ -1867,7 +1884,13 @@ export default function OnerequestPage() {
                     {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                     Salvar
                   </Button>
-                  <Button onClick={handleAgendar} disabled={saving || scheduling}>
+                  <Button
+                    onClick={pedirConfirmacao}
+                    disabled={saving || scheduling || !agendarArmado}
+                    title={!agendarArmado
+                      ? "Aguarde um instante — evita clique acidental"
+                      : "Revise antes de criar a tarefa no Legal One"}
+                  >
                     {scheduling ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CalendarCheck className="mr-2 h-4 w-4" />}
                     Agendar no Legal One
                   </Button>
@@ -1875,6 +1898,56 @@ export default function OnerequestPage() {
               </DialogFooter>
             </>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Confirmação do agendamento — SEMPRE, não só quando há duplicidade.
+          Mostra o que vai ser criado (responsável e data) porque o erro que
+          motivou esta trava foi justamente agendar sem ler a tela. */}
+      <Dialog open={confirmarAgendamento} onOpenChange={setConfirmarAgendamento}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Criar a tarefa no Legal One?</DialogTitle>
+            <DialogDescription>
+              Confira antes de confirmar — depois de criada, a tarefa existe no
+              Legal One.
+            </DialogDescription>
+          </DialogHeader>
+          {selected && (
+            <div className="space-y-2 rounded-md border bg-muted/40 p-3 text-sm">
+              <div className="line-clamp-2 font-medium">{selected.titulo}</div>
+              <div className="flex justify-between gap-3">
+                <span className="text-muted-foreground">Responsável</span>
+                <span className="text-right font-medium">
+                  {users.find((u) => String(u.external_id) === editResponsavelExt)?.name
+                    ?? "— não definido —"}
+                </span>
+              </div>
+              <div className="flex justify-between gap-3">
+                <span className="text-muted-foreground">Conclusão prevista</span>
+                <span className="text-right font-medium">
+                  {editData
+                    ? editData.split("-").reverse().join("/")
+                    : "— não definida —"}
+                </span>
+              </div>
+              {editSetor && (
+                <div className="flex justify-between gap-3">
+                  <span className="text-muted-foreground">Setor</span>
+                  <span className="text-right font-medium">{editSetor}</span>
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter className="gap-2 sm:justify-end">
+            <Button variant="outline" onClick={() => setConfirmarAgendamento(false)}>
+              Cancelar
+            </Button>
+            <Button onClick={handleAgendar} disabled={scheduling}>
+              {scheduling && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Confirmar e criar
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
