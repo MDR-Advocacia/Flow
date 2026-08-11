@@ -127,39 +127,80 @@ Documentos sem texto capturável não devem ser descartados. Eles entram como `P
 
 A tela de Publicações exibe "Notificado pelo cliente em ..." na coluna de datas e no modal do registro quando esse vínculo existe.
 
-## Teste Local com Dados Reais
+## Teste Local com Recorte Completo
 
-A amostra foi montada com:
+Para validar o PR sem depender de amostra truncada, foi montada uma fixture local
+com o intervalo completo de `01/06/2026` a `31/07/2026`, sem excluir status ou
+tipos de notificação.
 
-- 2.179 linhas reais do relatório OneNotify x Flow;
-- 1.292 publicações reais exportadas em leitura da produção do Flow;
-- nenhum write em produção.
+Fontes:
 
-Nota sobre visualização textual: o CSV usado para esta amostra local traz
-`notify_excerpt`, não o payload integral do OneNotify. Por isso alguns registros
-da demonstração exibem o texto do OneNotify truncado, embora a publicação do
-Flow esteja completa. O contrato de produção exige que o OneNotify envie o texto
-integral capturado pela RPA em `conteudo.fontes_texto[].texto`.
+- Flow produção: `36.051` registros reais de `publicacao_registros`, exportados
+  em leitura via container da API.
+- OneNotify produção local: `28.635` linhas reais de `notificacoes`, agregadas
+  em `23.016` grupos por `NPJ + data_notificacao`.
+- Nenhum write em produção.
 
-Comando usado:
+Artefatos locais, fora do Git:
+
+- `data/onenotify_bb_interval_2026-06-01_2026-07-31_v2.db`
+- `/Users/rildonpimentelpereira/Documents/Codex/2026-06-25/um/work/real-interval-2026-06-07/flow_publicacao_registros_2026-06-01_2026-07-31.jsonl.gz`
+- `/Users/rildonpimentelpereira/Documents/Codex/2026-06-25/um/work/real-interval-2026-06-07/interval_summary_v2.json`
+
+Comandos usados:
 
 ```bash
-DATABASE_URL=sqlite:///./data/onenotify_bb_real_sample_20260811_v2.db \
-  .venv-flow/bin/python scripts/onenotify_bb_import_real_sample.py \
-  --create-schema \
-  --comparison-csv /Users/rildonpimentelpereira/Documents/Codex/2026-06-25/um/work/notify-flow-compare/notify_flow_publication_match_report.csv \
-  --flow-records-csv /Users/rildonpimentelpereira/Documents/Codex/2026-06-25/um/work/flow-real-sample/publicacao_registros_matched_sample.csv
+# Na EC2/container da API do Flow, somente leitura:
+python /tmp/onenotify_bb_build_interval_fixture.py export-flow \
+  --date-from 2026-06-01 \
+  --date-to 2026-07-31 \
+  --output /tmp/flow_publicacao_registros_2026-06-01_2026-07-31.jsonl
+
+# Local, lendo OneNotify via Postgres e criando SQLite isolado:
+.venv-flow/bin/python scripts/onenotify_bb_build_interval_fixture.py build-local \
+  --date-from 2026-06-01 \
+  --date-to 2026-07-31 \
+  --flow-jsonl /path/flow_publicacao_registros_2026-06-01_2026-07-31.jsonl \
+  --onenotify-dsn postgresql://onenotify:<senha>@192.168.0.51:5433/onenotify \
+  --output-db ./data/onenotify_bb_interval_2026-06-01_2026-07-31_v2.db \
+  --summary-json /path/interval_summary_v2.json \
+  --reset
 ```
 
 Resultado recalculado pelo backend do Flow:
 
-- total analisado: `2.179`
-- com publicação equivalente: `1.372` (`63,0%`)
-- conciliadas automaticamente: `1.359` (`62,4%`)
-- CNJ principal diferente do texto: `158`
-- sem match: `807`
+- total analisado: `23.016`
+- com publicação equivalente no Flow: `18.575` (`80,7%`)
+- conciliadas automaticamente: `18.200` (`79,1%`)
+- CNJ principal diferente do CNJ do texto: `1.585`
+- pendentes por documento: `1.951`
+- sem match: `4.441`
 
-O estudo anterior apontava 1.374 matches. A regra nova recusou 2 casos que eram falsos positivos úteis para o backlog: o Flow tinha publicação do CNJ principal, mas o texto do Notify era de recurso/agravo com CNJ incidental diferente.
+Recorte apenas dos `20.783` grupos de andamento de publicação:
+
+- conciliadas automaticamente: `18.200`
+- sem match no Flow: `2.071`
+- pendentes por documento: `450`
+- revisão por score baixo: `62`
+
+Distribuição de score em andamentos de publicação:
+
+- `>= 95%`: `14.201`
+- `80% a 94%`: `3.999`
+- `1% a 79%`: `62`
+- `0%`: `2.521`
+
+Esse recorte confirma que a redundância entre OneNotify BB e Publicações Legal
+One é material, mas também mostra que há notificações reais sem publicação
+equivalente no Flow. Esses casos devem permanecer visíveis para revisão ou virar
+demanda de documento/payload próprio, em vez de serem descartados.
+
+## Histórico da Amostra Truncada
+
+A demonstração inicial usava `notify_excerpt` de um CSV intermediário, não o
+payload integral do OneNotify. Ela serviu para validar a interface, mas podia
+gerar falso positivo de pendência por texto abreviado. A regra e os números do
+PR devem considerar o recorte completo acima.
 
 ## Validações
 

@@ -149,6 +149,9 @@ def _as_list(value: Any) -> list[Any]:
 class OneNotifyBBService:
     def __init__(self, db: Session):
         self.db = db
+        self._publication_by_date_cache: dict[str, list[PublicationRecord]] = {}
+        self._publication_text_cache: dict[int, str] = {}
+        self._publication_digits_cache: dict[int, str] = {}
 
     def ingest(self, payload: dict[str, Any] | list[dict[str, Any]]) -> dict[str, Any]:
         items = self._payload_items(payload)
@@ -339,7 +342,7 @@ class OneNotifyBBService:
         candidates = self._publication_candidates(record)
         best: tuple[PublicationRecord, dict[str, float]] | None = None
         for candidate in candidates:
-            candidate_text = self._publication_text(candidate)
+            candidate_text = self._publication_text_cached(candidate)
             scores = _token_score(record.text_content or "", candidate_text)
             if not best or scores["score"] > best[1]["score"]:
                 best = (candidate, scores)
@@ -391,13 +394,20 @@ class OneNotifyBBService:
                 )
             )
         )
-        candidates = query.limit(2_000).all()
+        candidates = self._publication_by_date_cache.get(record.publication_date)
+        if candidates is None:
+            candidates = query.all()
+            self._publication_by_date_cache[record.publication_date] = candidates
         matched: list[PublicationRecord] = []
         for candidate in candidates:
-            candidate_text = self._publication_text(candidate)
+            candidate_text = self._publication_text_cached(candidate)
+            candidate_digits = self._publication_digits_cache.get(candidate.id)
+            if candidate_digits is None:
+                candidate_digits = _normalize_digits(candidate_text)
+                self._publication_digits_cache[candidate.id] = candidate_digits
             if (
                 _normalize_digits(candidate.linked_lawsuit_cnj) == cnj_digits
-                or cnj_digits in _normalize_digits(candidate_text)
+                or cnj_digits in candidate_digits
                 or formatted in candidate_text
             ):
                 matched.append(candidate)
@@ -455,6 +465,13 @@ class OneNotifyBBService:
 
     def _publication_text(self, publication: PublicationRecord) -> str:
         return "\n\n".join([_clean_text(publication.description), _clean_text(publication.notes)]).strip()
+
+    def _publication_text_cached(self, publication: PublicationRecord) -> str:
+        cached = self._publication_text_cache.get(publication.id)
+        if cached is None:
+            cached = self._publication_text(publication)
+            self._publication_text_cache[publication.id] = cached
+        return cached
 
     def _publication_to_dict(self, publication: PublicationRecord | None) -> dict[str, Any] | None:
         if not publication:
