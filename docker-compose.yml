@@ -48,6 +48,14 @@ services:
       dockerfile: Dockerfile
       target: api
     restart: unless-stopped
+    # PID 1 aqui é o uvicorn, e uvicorn NÃO colhe filho órfão. Os runners
+    # Playwright deixam processos do Chromium que, quando o node morre, são
+    # reparentados pro PID 1 — e ao terminarem viram ZUMBI permanente, porque
+    # ninguém chama wait() neles. Em 12/08/2026 o container tinha 122 chrome
+    # defunct acumulados assim. `init: true` põe o tini como PID 1, que existe
+    # exatamente pra colher órfão. Zumbi não gasta CPU, mas consome slot de PID
+    # e polui todo diagnóstico do servidor (foi lido como "112 Chromes vivos").
+    init: true
     # Chromium (Playwright) crasha com "Target closed" se /dev/shm for muito
     # pequeno. Padrão do Docker é 64MB — subimos pra 1GB.
     shm_size: "1gb"
