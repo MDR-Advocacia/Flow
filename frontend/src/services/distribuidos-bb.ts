@@ -42,6 +42,8 @@ export interface RunResumo {
   total_erros: number;
   iniciado_em: string | null;
   concluido_em: string | null;
+  /** Mensagem de erro do run (ex.: por que a coleta desistiu). */
+  erro?: string | null;
 }
 
 export interface PlanilhasResumo {
@@ -862,6 +864,17 @@ export async function listarValores(): Promise<ValorPadrao[]> {
 }
 export async function atualizarValores(valores: Record<string, string | null>): Promise<ValorPadrao[]> {
   return json(await apiFetch(`${BASE}/config/valores`, { method: "PATCH", body: JSON.stringify({ valores }) }));
+}
+
+// ── Passagens de coleta (runs) — histórico paginado ───────────────────────
+export async function listarRuns(params: { limit?: number; offset?: number } = {}): Promise<{
+  total: number;
+  items: RunResumo[];
+}> {
+  const qs = new URLSearchParams();
+  qs.set("limit", String(params.limit ?? 20));
+  qs.set("offset", String(params.offset ?? 0));
+  return json(await apiFetch(`${BASE}/runs?${qs.toString()}`));
 }
 
 // ── Ativos: ingestão de lista seca (upload → DataJud) ─────────────────────
