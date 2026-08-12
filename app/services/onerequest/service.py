@@ -633,6 +633,17 @@ class OnerequestService:
                 "status_tratamento": solicitacao.status_tratamento,
                 "mensagem": "Responsável sem external_id no Legal One.",
             }
+        # Usuário INATIVO: o L1 recusa a criação com 400 ("Participants deve ser
+        # o id de um usuário ativo"). Barra aqui com mensagem acionável.
+        if not responsavel.is_active:
+            return {
+                "ok": False,
+                "status_tratamento": solicitacao.status_tratamento,
+                "mensagem": (
+                    f"O responsável {responsavel.name} está INATIVO no Legal One — "
+                    "troque o responsável antes de agendar."
+                ),
+            }
 
         try:
             strat = OnerequestStrategy(self.db, client)

@@ -77,17 +77,37 @@ def _papel_ids(parts: list) -> dict:
     return out
 
 
-def _reatribuir_uma(c, task_id: int, cid: int) -> dict:
+def _reatribuir_uma(c, task_id: int, cid: int, origem: str = "tarefa") -> dict:
     """Lê participantes atuais, preserva o solicitante e troca responsável +
     executante pro `cid`. Devolve {"reason", "http", "papeis"} — os papéis
-    atuais alimentam o fallback web (DE→PARA) quando a tarefa é de Workflow."""
+    atuais alimentam o fallback web (DE→PARA) quando a tarefa é de Workflow.
+
+    `origem`: "tarefa" (/Tasks) | "compromisso" (/Appointments) — mesmo modelo
+    de participante, endpoint diferente. Compromissos costumam dar 400 de
+    validação no PATCH (o modelo revalida `startDateTime`) → caem no caminho
+    web (fase 2), que trata compromisso e tarefa juntos (validado em prod)."""
+    ent_get = "appointments" if origem == "compromisso" else "tasks"
+    ent_patch = "Appointments" if origem == "compromisso" else "Tasks"
     try:
-        atuais = c.get_task_participants(task_id)
+        atuais = c.get_task_participants(task_id, entity=ent_get)
     except Exception:  # noqa: BLE001
-        logger.exception("get_task_participants falhou (task %s)", task_id)
+        logger.exception("get_task_participants falhou (%s %s)", origem, task_id)
         return {"reason": "error", "http": None, "papeis": None}
 
     papeis = _papel_ids(atuais)
+
+    if origem == "compromisso":
+        # NÃO tentar a API em compromisso: o PATCH /Appointments responde
+        # HTTP 204 (sucesso) mas NÃO aplica a troca — no-op silencioso. Medido
+        # em prod 2026-07-28 sobre todo o histórico: pela API 17 de 18 seguiam
+        # com o responsável ANTIGO; pelo caminho web, 32 de 32 aplicaram.
+        # O 204 mentiroso fazia o job marcar "reatribuída" e a tarefa voltava
+        # pro supervisor na rodada seguinte (caso Geovanna: 4 tentativas).
+        # Só os compromissos VENCIDOS escapavam, porque aí o PATCH dá 400 de
+        # validação e caíam no web por acidente. Agora vão sempre pelo web,
+        # que ainda confirma a troca por GET participants na fase 2.
+        return {"reason": "web_pendente", "http": None, "papeis": papeis}
+
     requester_id = papeis["requester"]
 
     if requester_id and requester_id != cid:
@@ -100,7 +120,7 @@ def _reatribuir_uma(c, task_id: int, cid: int) -> dict:
         desired = [
             {"contact": {"id": cid}, "isResponsible": True, "isExecuter": True, "isRequester": True},
         ]
-    res = c.update_task_participants(task_id, desired)
+    res = c.update_task_participants(task_id, desired, entity=ent_patch)
     res["papeis"] = papeis
     return res
 
@@ -119,6 +139,7 @@ def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
     from app.services.performance.balanceador import _users
     from app.services.prazos_iniciais.legacy_task_http_cancellation_service import (
         LegacyTaskHttpCancellationService,
+        SessionIndisponivelError,
     )
 
     svc = LegacyTaskHttpCancellationService(client=c)
@@ -129,7 +150,8 @@ def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
         grupos[(it["exec_de"], it["resp_de"], it["cid"])].append(it)
 
     postados: list = []
-    for (exec_de, resp_de, cid), itens in grupos.items():
+    pares = list(grupos.items())
+    for gi, ((exec_de, resp_de, cid), itens) in enumerate(pares):
         if _abortado(db, job.id):
             break
         tids = [it["task_id"] for it in itens]
@@ -164,14 +186,48 @@ def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
                     para_id=cid, para_text=para_text,
                 )
             postados.extend(itens)
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "POST web de reatribuição falhou (grupo exec=%s resp=%s -> %s, %s tarefas)",
-                exec_de, resp_de, cid, len(tids),
+        except SessionIndisponivelError as exc:
+            # Sem sessão web não adianta insistir grupo a grupo: cada tentativa
+            # custaria minutos de espera de lock pra falhar igual — foi assim
+            # que uma execução de 491 tarefas rastejou por horas em 04/08/2026.
+            # Marca este grupo E todos os restantes de uma vez, com o motivo,
+            # e encerra a fase web.
+            msg = str(exc)[:600]
+            logger.error(
+                "Sessão web indisponível — abortando a fase web com %s grupo(s) "
+                "restantes: %s", len(pares) - gi, msg,
             )
             for it in itens:
                 job.workflow_bloqueadas = (job.workflow_bloqueadas or 0) + 1
                 detalhe[it["idx"]]["reason"] = "web_erro"
+                detalhe[it["idx"]]["erro"] = msg
+            for _, itens_rest in pares[gi + 1:]:
+                for it in itens_rest:
+                    job.workflow_bloqueadas = (job.workflow_bloqueadas or 0) + 1
+                    detalhe[it["idx"]]["reason"] = "web_erro"
+                    detalhe[it["idx"]]["erro"] = (
+                        f"Sessão web indisponível — lote interrompido sem tentar. {msg}"
+                    )
+            job.detalhe = list(detalhe)
+            db.commit()
+            return
+        except Exception as exc:  # noqa: BLE001
+            # A MENSAGEM do L1 tem que sobreviver. Até 04/08/2026 só o
+            # `reason` era gravado, e o motivo do 400 morria no log: quando o
+            # operador foi olhar as 619 recusas de 31/07 e 02/08, o campo `erro`
+            # estava vazio em todas e o log já tinha rotacionado — não deu pra
+            # saber por que o Legal One recusou. Sem isto, o próximo diagnóstico
+            # começa do zero de novo.
+            msg = str(exc) or exc.__class__.__name__
+            logger.exception(
+                "POST web de reatribuição falhou (grupo exec=%s resp=%s -> %s, %s tarefas): %s",
+                exec_de, resp_de, cid, len(tids), msg,
+            )
+            for it in itens:
+                job.workflow_bloqueadas = (job.workflow_bloqueadas or 0) + 1
+                detalhe[it["idx"]]["reason"] = "web_erro"
+                detalhe[it["idx"]]["erro"] = msg[:600]
+            job.detalhe = list(detalhe)
             db.commit()
 
     # Verificação assíncrona: o L1 enfileira a troca; confere via API.
@@ -183,7 +239,8 @@ def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
         ainda: list = []
         for it in pendentes:
             try:
-                papeis = _papel_ids(c.get_task_participants(int(it["task_id"])))
+                _ent = "appointments" if it.get("origem") == "compromisso" else "tasks"
+                papeis = _papel_ids(c.get_task_participants(int(it["task_id"]), entity=_ent))
                 ok_exec = (not it["exec_de"] or it["exec_de"] == it["cid"]) or papeis["executer"] == it["cid"]
                 ok_resp = (not it["resp_de"] or it["resp_de"] == it["cid"]) or papeis["responsible"] == it["cid"]
                 if ok_exec and ok_resp:
@@ -200,8 +257,52 @@ def _fase_workflow_web(db, job, c, wf_queue: list, detalhe: list) -> None:
     for it in pendentes:  # o web não refletiu — fica no bucket manual
         job.workflow_bloqueadas = (job.workflow_bloqueadas or 0) + 1
         detalhe[it["idx"]]["reason"] = "web_nao_refletiu"
+        detalhe[it["idx"]]["erro"] = (
+            "O POST web foi aceito, mas depois de 2 conferências o Legal One "
+            "ainda mostrava o envolvido antigo."
+        )
     job.detalhe = list(detalhe)
     db.commit()
+
+
+def _espelhar_snapshot(db, detalhe: list) -> None:
+    """Reflete as reatribuições BEM-SUCEDIDAS no snapshot `perf_l1_tarefa`.
+
+    A tabela de diagnóstico do Balanceador (e os painéis do Minha Equipe) leem
+    do snapshot, que só re-ingere às 13h/manhã — sem isto, o operador migrava
+    N tarefas e via os MESMOS números na tabela (relato de 22/07: tirou 8 e
+    continuou 32). Mesmo padrão do cancelamento de duplicadas, que já desconta
+    do snapshot. Destino fora do roster → pessoa_id NULL (sai das contagens do
+    time, que é o correto). Best-effort: falha aqui não derruba o job.
+    """
+    from app.models.performance import PerfPessoa
+    from app.services.performance.seed import norm
+
+    try:
+        pessoas = {p.nome_norm: p for p in db.query(PerfPessoa).all()}
+        n = 0
+        for d in detalhe:
+            if d.get("reason") not in ("reassigned", "reassigned_web"):
+                continue
+            destino = pessoas.get(norm(d.get("to_nome") or ""))
+            db.execute(
+                text(
+                    "UPDATE perf_l1_tarefa SET pessoa_id = :pid, envolvido_nome = :nome "
+                    "WHERE l1_task_id = :tid"
+                ),
+                {
+                    "pid": destino.id if destino else None,
+                    "nome": (d.get("to_nome") or None),
+                    "tid": int(d["task_id"]),
+                },
+            )
+            n += 1
+        db.commit()
+        if n:
+            logger.info("Snapshot espelhado: %s tarefa(s) reatribuída(s) atualizadas em perf_l1_tarefa.", n)
+    except Exception:  # noqa: BLE001
+        logger.exception("Falha ao espelhar reatribuições no snapshot (segue sem — a ingestão corrige).")
+        db.rollback()
 
 
 def iniciar(team, itens, movimentos, dry_run, user) -> str:
@@ -268,6 +369,7 @@ def _run(job_id: str, team: str, itens: list, movimentos: list, dry_run: bool) -
             task_id = it.get("task_id")
             to_id = it.get("to_id")
             to_nome = it.get("to_nome")
+            origem = it.get("origem") or "tarefa"
             key = (to_id, to_nome)
             if key not in destino_cache:
                 destino_cache[key] = _resolver_destino_cid(db, to_id, to_nome)
@@ -278,18 +380,21 @@ def _run(job_id: str, team: str, itens: list, movimentos: list, dry_run: bool) -
                 reason, http = "destino_nao_resolvido", None
             elif dry_run:
                 try:
-                    c.get_task_participants(int(task_id))
+                    c.get_task_participants(
+                        int(task_id),
+                        entity="appointments" if origem == "compromisso" else "tasks",
+                    )
                     reason, http = "dry_ok", None
                 except Exception:  # noqa: BLE001
                     reason, http = "error", None
             else:
-                res = _reatribuir_uma(c, int(task_id), int(cid))
+                res = _reatribuir_uma(c, int(task_id), int(cid), origem)
                 reason, http = res.get("reason", "error"), res.get("http")
                 papeis = res.get("papeis")
 
             if reason in ("reassigned", "dry_ok"):
                 job.reatribuidas = (job.reatribuidas or 0) + 1
-            elif reason == "workflow_locked" or (reason == "error" and http == 400 and papeis is not None):
+            elif reason == "web_pendente" or reason == "workflow_locked" or (reason == "error" and http == 400 and papeis is not None):
                 # 400 no PATCH = lock de Workflow OU validação do modelo (ex.:
                 # tarefa ATRASADA — endDateTime no passado reprova a edição via
                 # API: "status 'Pendente' com data de conclusão anterior à
@@ -300,12 +405,14 @@ def _run(job_id: str, team: str, itens: list, movimentos: list, dry_run: bool) -
                 job.falhas = (job.falhas or 0) + 1
 
             detalhe.append(
-                {"task_id": task_id, "to_id": to_id, "to_nome": to_nome, "reason": reason, "http": http}
+                {"task_id": task_id, "to_id": to_id, "to_nome": to_nome,
+                 "origem": origem, "reason": reason, "http": http}
             )
             if reason == "web_pendente":
                 wf_queue.append(
                     {
                         "task_id": int(task_id), "cid": int(cid), "idx": len(detalhe) - 1,
+                        "origem": origem,
                         "exec_de": (papeis or {}).get("executer"),
                         "resp_de": (papeis or {}).get("responsible"),
                     }
@@ -323,7 +430,17 @@ def _run(job_id: str, team: str, itens: list, movimentos: list, dry_run: bool) -
         if wf_queue and not dry_run and not _abortado(db, job_id):
             _fase_workflow_web(db, job, c, wf_queue, detalhe)
 
+        # Espelha as trocas no snapshot ANTES de marcar 'done': o front faz poll
+        # do status e, ao ver 'done', dá refresh na tabela de diagnóstico. Se o
+        # espelho viesse depois, o refresh pegava o snapshot AINDA sem a troca
+        # (relato do operador: precisava dar F5 pra contagem mudar). Agora, quando
+        # o status vira 'done', o snapshot já reflete — o refresh automático pega
+        # os números novos na hora.
         job.detalhe = list(detalhe)
+        db.commit()
+        if not dry_run:
+            _espelhar_snapshot(db, detalhe)
+
         job.status = "done"
         job.terminado_em = func.now()
         db.commit()

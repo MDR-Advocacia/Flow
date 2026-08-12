@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright');
+const l1session = require('./l1-session');
 
 const PUBLICATION_TREATMENT_ENDPOINT =
   'https://legalone-prod-webapp-eastus2-api.azure-api.net/prod//webapi/api/internal/publications/SetPublicationTreatStatus/';
@@ -346,8 +347,19 @@ async function createLoggedInSession(loginConfig, firstPublicationId) {
     return route.continue();
   });
 
+  // Sessão compartilhada: com cookies válidos o login() vira só uma validação
+  // (navega, vê a home logada e retorna) — sem derrubar os outros robôs.
+  const sharedCookies = l1session.loadSharedCookies();
+  if (sharedCookies) {
+    await l1session.injectSharedCookies(context, loginConfig.returnUrl, sharedCookies);
+    console.error('[session] cookies compartilhados injetados — tentando reusar a sessão.');
+  }
+
   const page = await context.newPage();
   await login(page, loginConfig);
+  // Regrava o cache (sessão validada agora — herda pra todo o sistema).
+  const saved = await l1session.persistSharedCookies(null, context, loginConfig.returnUrl);
+  console.error(`[session] sessão ativa ${saved ? 'sincronizada no' : 'NÃO sincronizada (sem .ASPXAUTH) no'} cache compartilhado.`);
   const apiHeaders = await captureApiHeaders(page, firstPublicationId);
 
   return { browser, context, page, apiHeaders };

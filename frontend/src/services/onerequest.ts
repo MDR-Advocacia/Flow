@@ -336,6 +336,17 @@ export async function getEstado(): Promise<Estado> {
   return json(await apiFetch(`${BASE}/estado`));
 }
 
+// Sync sob demanda com o Postgres da fonte (RPA). O backend aplica throttle:
+// executado=false quando o último sync é recente (aí nem precisa recarregar).
+export interface SyncFonteResult {
+  executado: boolean;
+  motivo?: string | null;
+}
+
+export async function syncFonte(): Promise<SyncFonteResult> {
+  return json(await apiFetch(`${BASE}/sync-fonte`, { method: "POST" }));
+}
+
 export interface DashboardData {
   kpis: Record<string, number>;
   farol: Record<string, number>;

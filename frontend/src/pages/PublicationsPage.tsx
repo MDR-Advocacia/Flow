@@ -16,6 +16,7 @@ import {
   BookOpen,
   Building2,
   Calendar,
+  CalendarClock,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -29,6 +30,7 @@ import {
   EyeOff,
   ExternalLink,
   FileDown,
+  FileSpreadsheet,
   Filter,
   Layers,
   Link2,
@@ -45,6 +47,7 @@ import {
   Settings,
   ThumbsDown,
   TrendingUp,
+  Upload,
   UserCircle2,
   XCircle,
 } from "lucide-react";
@@ -385,6 +388,14 @@ interface ProposedTask {
   is_custom?: boolean;
 }
 
+// Etiqueta (tag) do processo no L1 — vem do cache do backend (caminho web).
+interface L1Etiqueta {
+  id: number | null;
+  name: string | null;
+  class_name: string | null; // ex.: "tag-color-orange" (classe do próprio L1)
+  color_id: number | null;
+}
+
 interface GroupedRecord {
   lawsuit_id: number | null;
   lawsuit_cnj: string | null;
@@ -393,6 +404,109 @@ interface GroupedRecord {
   proposed_task: ProposedTask | null;
   proposed_tasks: ProposedTask[];
   classifications: Classification[];
+  // null/undefined = ainda não enriquecido; [] = consultado e sem etiqueta.
+  l1_etiquetas?: L1Etiqueta[] | null;
+}
+
+// Mapa das cores de etiqueta do L1 → classes Tailwind (fallback: cinza).
+// Motivos da troca de subtipo (pub007). Curtos de propósito: o operador faz
+// ~51 dessas por dia e a pergunta precisa custar um clique.
+const SUBTYPE_CHANGE_REASONS: { value: string; label: string; hint: string }[] = [
+  { value: "template_errado", label: "Template errado",
+    hint: "O template desta classificação aponta pro subtipo errado — deveria já vir assim." },
+  { value: "caso_especifico", label: "Caso específico",
+    hint: "O template está certo em geral; esta publicação é exceção." },
+  { value: "classificacao_errada", label: "Classificação errada",
+    hint: "A publicação foi classificada na categoria errada pela IA." },
+  { value: "template_ausente", label: "Faltava template",
+    hint: "Não havia template — montei a tarefa na mão." },
+];
+
+// pub008 — captura do conhecimento tácito. Só perguntamos no DESVIO ANÔMALO:
+// 72% dos agendamentos mexem na data, mas 260 perguntas/dia é inviável; fora
+// de ±3 dias sobram ~90/dia, e é aí que mora a regra que não está escrita.
+const DESVIO_DATA_DIAS = 3;
+// Acima disto o motivo vira OBRIGATÓRIO. Medido em produção (3 dias, 249
+// desvios grandes): só 5,2% preenchiam quando era opcional, contra 99,8% no
+// motivo do ignorar — que é obrigatório. Opcional, na prática, é não
+// preenchido. O corte em 10 dias mira o desvio que denuncia template errado
+// (ex.: "Cumprir Determinação Específica" com mediana de +24 dias) sem
+// interrogar o ajuste fino do dia a dia.
+const DESVIO_DATA_OBRIGA = 10;
+
+/** Dias entre a data proposta pelo template e a que o operador vai enviar. */
+function desvioEmDias(orig: string | null | undefined, atual: string | null | undefined): number | null {
+  if (!orig || !atual) return null;
+  const d0 = new Date(orig).getTime();
+  const d1 = new Date(atual).getTime();
+  if (Number.isNaN(d0) || Number.isNaN(d1)) return null;
+  return Math.round((d1 - d0) / 86400000);
+}
+
+const DATE_CHANGE_REASONS: { value: string; label: string; hint: string }[] = [
+  { value: "prazo_no_texto", label: "Prazo vinha no texto",
+    hint: "A publicação trazia o prazo e o template não refletia." },
+  { value: "margem_subsidio", label: "Margem p/ subsídio",
+    hint: "Antecipei pra dar tempo do subsídio chegar (ex.: contestação)." },
+  { value: "prazo_legal_diferente", label: "Prazo legal é outro",
+    hint: "O prazo legal desta providência difere do configurado." },
+  { value: "carga_agenda", label: "Agenda da equipe",
+    hint: "Remanejei pela carga/disponibilidade, não pelo prazo." },
+];
+
+const OPEN_TASK_REASONS: { value: string; label: string; hint: string }[] = [
+  { value: "outra_providencia", label: "É outra providência",
+    hint: "A tarefa aberta trata de outro ato — esta publicação exige coisa diferente." },
+  { value: "novo_prazo", label: "Novo prazo",
+    hint: "Mesmo assunto, mas nasceu prazo novo que precisa de tarefa própria." },
+  { value: "tarefa_antiga_parada", label: "A aberta está parada",
+    hint: "A tarefa existente não está sendo tocada; criei uma nova." },
+];
+
+const REMOVE_TASK_REASONS: { value: string; label: string; hint: string }[] = [
+  { value: "nao_se_aplica", label: "Não se aplica ao caso",
+    hint: "O template propõe esta tarefa, mas aqui ela não cabe." },
+  { value: "ja_existe", label: "Já existe na pasta",
+    hint: "Essa providência já está coberta por tarefa existente." },
+  { value: "template_propoe_demais", label: "Template propõe demais",
+    hint: "O template deveria propor menos nesta classificação." },
+];
+
+const L1_TAG_COLORS: Record<string, string> = {
+  "tag-color-red": "bg-red-100 text-red-800 border-red-300",
+  "tag-color-orange": "bg-orange-100 text-orange-800 border-orange-300",
+  "tag-color-yellow": "bg-amber-100 text-amber-800 border-amber-300",
+  "tag-color-green": "bg-emerald-100 text-emerald-800 border-emerald-300",
+  "tag-color-lime": "bg-lime-100 text-lime-800 border-lime-300",
+  "tag-color-teal": "bg-teal-100 text-teal-800 border-teal-300",
+  "tag-color-blue": "bg-blue-100 text-blue-800 border-blue-300",
+  "tag-color-indigo": "bg-indigo-100 text-indigo-800 border-indigo-300",
+  "tag-color-purple": "bg-purple-100 text-purple-800 border-purple-300",
+  "tag-color-pink": "bg-pink-100 text-pink-800 border-pink-300",
+  "tag-color-gray": "bg-slate-100 text-slate-700 border-slate-300",
+};
+
+function L1EtiquetaChips({ etiquetas }: { etiquetas?: L1Etiqueta[] | null }) {
+  if (!etiquetas || etiquetas.length === 0) return null;
+  return (
+    <div className="mt-1 flex max-w-[150px] flex-wrap gap-1">
+      {etiquetas.map((t, i) => {
+        const cores = L1_TAG_COLORS[t.class_name ?? ""] ?? "bg-slate-100 text-slate-700 border-slate-300";
+        const destaque = /ESTRAT|PRIORI|URGEN/i.test(t.name ?? "");
+        return (
+          <span
+            key={`${t.id ?? i}`}
+            title={`Etiqueta do processo no Legal One: ${t.name ?? ""}`}
+            className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-semibold leading-none ${cores} ${
+              destaque ? "ring-1 ring-current" : ""
+            }`}
+          >
+            {destaque ? "★ " : ""}{t.name}
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 interface GroupedResponse {
@@ -667,6 +781,13 @@ const SubtypePicker = ({ value, parentType, taskTypes, onChange }: SubtypePicker
 const PublicationsPage = () => {
   const { toast } = useToast();
 
+  // Importacao por planilha (fallback manual)
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importPreview, setImportPreview] = useState<any>(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+
   const [offices, setOffices] = useState<Office[]>([]);
   const [taskTypes, setTaskTypes] = useState<TaskType[]>([]);
   const [appUsers, setAppUsers] = useState<AppUser[]>([]);
@@ -780,6 +901,20 @@ const PublicationsPage = () => {
   // a decisão final do operador SEMPRE vence a regra automática de
   // squad/assistente (comparar ids não detecta a re-escolha deliberada).
   const [touchedResponsible, setTouchedResponsible] = useState<Set<number>>(new Set());
+  // Troca de SUBTIPO: guardamos o proposto por índice pra saber se houve troca
+  // de fato, e o motivo escolhido. Captura estratégica (pub007) — medido em
+  // 06/08: trocar subtipo são ~51 casos/dia (atrito aceitável, e é o sinal que
+  // aponta template errado); trocar responsável seriam ~224/dia, que é rotina
+  // de distribuição de carga e não dúvida — ali NÃO se pergunta nada.
+  const [originalSubtypeByIndex, setOriginalSubtypeByIndex] = useState<Map<number, number | null>>(new Map());
+  const [subtypeReasonByIndex, setSubtypeReasonByIndex] = useState<Map<number, string>>(new Map());
+  // pub008 — os outros três pontos de captura.
+  const [originalDateByIndex, setOriginalDateByIndex] = useState<Map<number, string | null>>(new Map());
+  const [dateReasonByIndex, setDateReasonByIndex] = useState<Map<number, string>>(new Map());
+  const [openTaskReasonByIndex, setOpenTaskReasonByIndex] = useState<Map<number, string>>(new Map());
+  const [removeReasonByIndex, setRemoveReasonByIndex] = useState<Map<number, string>>(new Map());
+  // "Precisei abrir o processo pra decidir" — vale pro grupo todo.
+  const [consultouAutos, setConsultouAutos] = useState(false);
   const [scheduling, setScheduling] = useState(false);
   // Checagem de duplicatas (tarefa pendente no L1) — Onda 1.
   // Estrutura: { [subTypeId]: [{task_id, description, status_label, end_date_time, l1_url}] }
@@ -1280,6 +1415,69 @@ const PublicationsPage = () => {
     }
   };
 
+  // ── Fallback manual: planilha exportada do Legal One ────────────────
+  //
+  // Terceira camada de captura, atras da API do L1 e do DJEN. Como nao
+  // depende de rede nenhuma, e o caminho que continua funcionando com tudo
+  // fora do ar. O arquivo passa por uma previa (backend so le e devolve o
+  // resumo) e so grava quando o operador confirma.
+
+  const handleImportFile = async (file: File | null) => {
+    setImportFile(file);
+    setImportPreview(null);
+    setImportError(null);
+    if (!file) return;
+    setImportBusy(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await apiFetch(`${API}/import-spreadsheet/preview`, {
+        method: "POST",
+        body: form,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Nao foi possivel ler a planilha");
+      setImportPreview(data);
+    } catch (err: any) {
+      setImportError(err.message);
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const handleImportConfirm = async () => {
+    if (!importFile) return;
+    setImportBusy(true);
+    setImportError(null);
+    try {
+      const form = new FormData();
+      form.append("file", importFile);
+      form.append("auto_classify", "true");
+      const res = await apiFetch(`${API}/import-spreadsheet`, {
+        method: "POST",
+        body: form,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Erro ao importar a planilha");
+      toast({
+        title: "Importacao iniciada",
+        description: data.message || "Acompanhe o progresso no historico de buscas.",
+      });
+      setImportOpen(false);
+      setImportFile(null);
+      setImportPreview(null);
+      // Mesmo escalonamento do disparo de busca: a importacao roda em
+      // background e vai preenchendo o historico.
+      [3000, 8000, 15000, 30000].forEach((delay) => {
+        setTimeout(() => { loadSearches(); loadStats(); }, delay);
+      });
+    } catch (err: any) {
+      setImportError(err.message);
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
   const handleFilterChange = (
     status: string, officeId: string, dateFrom?: string, dateTo?: string, category?: string, ufParam?: string, vinculoParam?: string, naturezaParam?: string, poloParam?: string, cnjParam?: string, scheduledByParam?: string,
   ) => {
@@ -1320,17 +1518,73 @@ const PublicationsPage = () => {
     loadGrouped(newPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
   };
 
-  const handleIgnoreRecord = async (recordId: number) => {
-    try {
-      await apiFetch(`${API}/records/${recordId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "IGNORADO" }),
+  // ── Ciência com MOTIVO (pub006) ──────────────────────────────────────────
+  // Estudo de 06/08/2026: 12.773 ignoradas sem nenhum motivo registrado, e a
+  // taxa de ignore varia 20%→41% entre operadores do MESMO escritório. O modal
+  // pede o motivo (um clique) e isso vira o gabarito da automação — e o
+  // espelho da consistência da própria equipe.
+  const IGNORE_REASONS: { value: string; label: string; hint: string }[] = [
+    { value: "ja_agendado", label: "Já agendado / em tarefa aberta",
+      hint: "Já existe tarefa ou agendamento cobrindo esta providência." },
+    { value: "parte_adversa", label: "Providência da parte adversa",
+      hint: "O ato é dirigido à parte que não representamos." },
+    { value: "informativa", label: "Apenas informativa",
+      hint: "Não enseja ação imediata (ciência, decurso, expediente)." },
+    { value: "classificacao_incorreta", label: "Classificação incorreta",
+      hint: "A publicação não é o que a classificação diz." },
+    { value: "outro", label: "Outro motivo", hint: "Descreva no campo abaixo." },
+  ];
+  const [ignoreDialog, setIgnoreDialog] = useState<{ recordIds: number[]; origem: string } | null>(null);
+  const [ignoreReason, setIgnoreReason] = useState<string>("");
+  const [ignoreNote, setIgnoreNote] = useState<string>("");
+  const [ignoreSubmitting, setIgnoreSubmitting] = useState(false);
+  const [ignoreConsultouAutos, setIgnoreConsultouAutos] = useState(false);
+
+  const openIgnoreDialog = (recordIds: number[], origem: string) => {
+    if (recordIds.length === 0) {
+      toast({
+        title: "Nada a ignorar",
+        description: "As publicações já estão agendadas ou ignoradas.",
+        variant: "destructive",
       });
-      toast({ title: "Registro ignorado" });
-      loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
-      loadStats();
-    } catch { /* ignore */ }
+      return;
+    }
+    setIgnoreReason("");
+    setIgnoreNote("");
+    setIgnoreConsultouAutos(false);
+    setIgnoreDialog({ recordIds, origem });
+  };
+
+  const confirmIgnore = async () => {
+    if (!ignoreDialog || !ignoreReason) return;
+    setIgnoreSubmitting(true);
+    const corpo = JSON.stringify({
+      status: "IGNORADO",
+      ignore_reason: ignoreReason,
+      ignore_reason_note: ignoreNote.trim() || null,
+      consultou_autos: ignoreConsultouAutos,
+    });
+    const results = await Promise.allSettled(
+      ignoreDialog.recordIds.map((id) =>
+        apiFetch(`${API}/records/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: corpo,
+        }),
+      ),
+    );
+    const ok = results.filter((r) => r.status === "fulfilled").length;
+    const failed = results.length - ok;
+    toast({
+      title: `${ok} publicação(ões) ignorada(s)`,
+      description: failed > 0 ? `${failed} falharam.` : undefined,
+      variant: failed > 0 ? "destructive" : "default",
+    });
+    setIgnoreSubmitting(false);
+    setIgnoreDialog(null);
+    clearSelection();
+    loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
+    loadStats();
   };
 
   const handleReclassifyGroup = async (
@@ -1775,6 +2029,17 @@ const PublicationsPage = () => {
       }
     }
     setEditedPayloads(dateAdjustedTasks.map((t) => ({ ...t })));
+    setOriginalSubtypeByIndex(
+      new Map(dateAdjustedTasks.map((t, i) => [i, (t as any).subTypeId ?? null])),
+    );
+    setSubtypeReasonByIndex(new Map());
+    setOriginalDateByIndex(
+      new Map(dateAdjustedTasks.map((t, i) => [i, (t as any).endDateTime ?? null])),
+    );
+    setDateReasonByIndex(new Map());
+    setOpenTaskReasonByIndex(new Map());
+    setRemoveReasonByIndex(new Map());
+    setConsultouAutos(false);
     // Reset do estado de duplicatas — a checagem roda via useEffect abaixo.
     setDuplicatesBySubtype({});
     setDuplicateCheckFailed(false);
@@ -1903,6 +2168,18 @@ const PublicationsPage = () => {
         toast({ title: `${label}: defina o prazo/data`, variant: "destructive" });
         return;
       }
+      // Motivo do desvio grande de data: obrigatório acima de 10 dias.
+      const realIdxVal = editedPayloads.findIndex((p) => p === t);
+      const desvio = desvioEmDias(originalDateByIndex.get(realIdxVal), t.endDateTime);
+      if (desvio !== null && Math.abs(desvio) > DESVIO_DATA_OBRIGA
+          && !dateReasonByIndex.get(realIdxVal)) {
+        toast({
+          title: `${label}: diga por que mudou a data em ${Math.abs(desvio)} dias`,
+          description: "Escolha um motivo no bloco azul da tarefa. É o que nos diz qual template corrigir.",
+          variant: "destructive",
+        });
+        return;
+      }
     }
 
     // Resolve quem recebe a tarefa pra cada task com target_role/target_squad
@@ -1934,6 +2211,15 @@ const PublicationsPage = () => {
       // Encontra o indice REAL no editedPayloads (activeTasks pula removed).
       const realIdx = editedPayloads.findIndex((p) => p === t);
       const originalId = originalResponsibleByIndex.get(realIdx) ?? null;
+      const motivoSub = subtypeReasonByIndex.get(realIdx);
+      if (motivoSub) {
+        (t as any)._subtipo_troca_motivo = motivoSub;
+      }
+      const motivoData = dateReasonByIndex.get(realIdx);
+      if (motivoData) (t as any)._data_troca_motivo = motivoData;
+      const motivoAberta = openTaskReasonByIndex.get(realIdx);
+      if (motivoAberta) (t as any)._agendou_com_tarefa_aberta_motivo = motivoAberta;
+      if (consultouAutos) (t as any)._consultou_autos = true;
       if (touchedResponsible.has(realIdx)) {
         // Operador mexeu no responsável (mesmo re-escolhendo a mesma
         // pessoa) — decisão final dele. Marcador avisa o backend pra
@@ -1990,6 +2276,17 @@ const PublicationsPage = () => {
         });
         resolvedTasks.push(t);
       }
+    }
+
+    // pub008 — o motivo da REMOÇÃO precisa pegar carona: a tarefa removida
+    // não é enviada, então ela não tem payload próprio pra carregar o dado.
+    // Anexamos ao PRIMEIRO payload enviado do grupo, que é o que vira a
+    // primeira linha de auditoria daquele agendamento.
+    const motivosRemocao = Array.from(removeReasonByIndex.entries())
+      .filter(([i]) => removedTaskIndices.has(i))
+      .map(([, motivo]) => motivo);
+    if (motivosRemocao.length > 0 && resolvedTasks.length > 0) {
+      (resolvedTasks[0] as any)._tarefa_removida_motivo = motivosRemocao[0];
     }
 
     // Remove campos de metadata (frontend-only) antes de enviar ao backend
@@ -2258,46 +2555,16 @@ const PublicationsPage = () => {
     loadStats();
   };
 
-  const handleBulkIgnore = async () => {
+  const handleBulkIgnore = () => {
     if (!grouped && bulkScopeAllGroups.length === 0) return;
     const sourceGroups = bulkScopeAllGroups.length > 0 ? bulkScopeAllGroups : (grouped?.groups || []);
     const selected = sourceGroups.filter((g) => selectedGroupKeys.has(groupKey(g)));
     const recordIds = selected.flatMap((g) =>
       g.records.filter((r) => r.status !== "AGENDADO" && r.status !== "IGNORADO").map((r) => r.id),
     );
-
-    if (recordIds.length === 0) {
-      toast({
-        title: "Nada a ignorar",
-        description: "As publicações selecionadas já estão agendadas ou ignoradas.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    setBulkProcessing(true);
-    const results = await Promise.allSettled(
-      recordIds.map((id) =>
-        apiFetch(`${API}/records/${id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "IGNORADO" }),
-        }),
-      ),
-    );
-    const ok = results.filter((r) => r.status === "fulfilled").length;
-    const failed = results.length - ok;
-
-    toast({
-      title: `${ok} publicação(ões) ignorada(s)`,
-      description: failed > 0 ? `${failed} falharam.` : undefined,
-      variant: failed > 0 ? "destructive" : "default",
-    });
-
-    clearSelection();
-    setBulkProcessing(false);
-    loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
-    loadStats();
+    // Mesmo modal da linha: UM motivo vale pro lote inteiro — quem ignora em
+    // lote está aplicando um critério só (ex.: tudo parte adversa).
+    openIgnoreDialog(recordIds, "lote");
   };
 
   // ─── Derived ─────────────────────────────────────────────────────────
@@ -2654,6 +2921,163 @@ const PublicationsPage = () => {
         </SheetContent>
       </Sheet>
 
+      {/* Importacao por planilha — fallback manual de captura */}
+      <Dialog
+        open={importOpen}
+        onOpenChange={(open) => {
+          setImportOpen(open);
+          if (!open) { setImportFile(null); setImportPreview(null); setImportError(null); }
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FileSpreadsheet className="h-5 w-5" />
+              Importar publicacoes por planilha
+            </DialogTitle>
+            <DialogDescription>
+              Ultimo recurso de captura, para quando a busca automatica no Legal
+              One falha. Exporte as publicacoes na tela do Legal One e suba o
+              arquivo aqui.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <Alert>
+              <AlertCircle className="h-4 w-4" />
+              <AlertTitle>A planilha precisa da coluna "Id"</AlertTitle>
+              <AlertDescription className="text-xs">
+                E o identificador do processo no Legal One, e o que garante que a
+                publicacao entre na pasta certa. Sem ela a importacao e recusada.
+                Publicacoes que ja entraram pela busca automatica sao descartadas
+                como duplicata — pode subir sem medo de duplicar.
+              </AlertDescription>
+            </Alert>
+
+            <div className="grid gap-1.5">
+              <Label htmlFor="importFile">Arquivo (.xlsx)</Label>
+              <Input
+                id="importFile"
+                type="file"
+                accept=".xlsx,.xlsm"
+                disabled={importBusy}
+                onChange={(e) => handleImportFile(e.target.files?.[0] ?? null)}
+              />
+            </div>
+
+            {importBusy && !importPreview && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Conferindo a planilha...
+              </div>
+            )}
+
+            {importError && (
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertTitle>Nao deu para importar</AlertTitle>
+                <AlertDescription className="text-xs">{importError}</AlertDescription>
+              </Alert>
+            )}
+
+            {importPreview && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-4 gap-2">
+                  <div className="rounded-lg border p-2">
+                    <p className="text-xs text-muted-foreground">Publicacoes</p>
+                    <p className="text-xl font-bold text-emerald-600">
+                      {importPreview.total_validas}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border p-2">
+                    <p className="text-xs text-muted-foreground">Processos</p>
+                    <p className="text-xl font-bold">{importPreview.processos_distintos}</p>
+                  </div>
+                  <div className="rounded-lg border p-2">
+                    <p className="text-xs text-muted-foreground">Ignoradas</p>
+                    <p className="text-xl font-bold text-amber-600">
+                      {importPreview.total_ignoradas}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border p-2">
+                    <p className="text-xs text-muted-foreground">Periodo</p>
+                    <p className="text-xs font-medium mt-1">
+                      {importPreview.data_inicial}
+                      {importPreview.data_final !== importPreview.data_inicial
+                        ? " a " + importPreview.data_final : ""}
+                    </p>
+                  </div>
+                </div>
+
+                {importPreview.escritorios_nao_encontrados?.length > 0 && (
+                  <Alert>
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertTitle className="text-sm">
+                      Escritorio nao reconhecido ({importPreview.escritorios_nao_encontrados.length})
+                    </AlertTitle>
+                    <AlertDescription className="text-xs">
+                      As publicacoes entram assim mesmo — o processo ja esta
+                      identificado pelo Id e o Legal One preenche o escritorio
+                      depois. {importPreview.escritorios_nao_encontrados.join("; ")}
+                    </AlertDescription>
+                  </Alert>
+                )}
+
+                <div>
+                  <p className="text-xs font-medium mb-1">Por escritorio</p>
+                  <ScrollArea className="h-[120px] rounded-md border">
+                    <div className="p-2 space-y-1">
+                      {Object.entries(importPreview.por_escritorio || {}).map(
+                        ([nome, qtd]) => (
+                          <div key={nome} className="flex justify-between text-xs">
+                            <span className="truncate pr-2">{nome}</span>
+                            <span className="font-medium tabular-nums">{qtd as number}</span>
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  </ScrollArea>
+                </div>
+
+                {importPreview.ignoradas?.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium mb-1">
+                      Linhas ignoradas (primeiras {importPreview.ignoradas.length})
+                    </p>
+                    <ScrollArea className="h-[80px] rounded-md border">
+                      <div className="p-2 space-y-1">
+                        {importPreview.ignoradas.map((ig: any) => (
+                          <div key={ig.linha} className="text-xs text-muted-foreground">
+                            linha {ig.linha}: {ig.motivo}
+                          </div>
+                        ))}
+                      </div>
+                    </ScrollArea>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setImportOpen(false)} disabled={importBusy}>
+              Cancelar
+            </Button>
+            <Button
+              onClick={handleImportConfirm}
+              disabled={importBusy || !importPreview || !importPreview.total_validas}
+            >
+              {importBusy
+                ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                : <Upload className="mr-2 h-4 w-4" />}
+              {importPreview
+                ? "Importar " + importPreview.total_validas + " publicacoes"
+                : "Importar"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Search Panel */}
       <Card>
         <CardHeader>
@@ -2718,6 +3142,16 @@ const PublicationsPage = () => {
             <Button onClick={handleSearch} disabled={isSearching || !dateFrom} className="self-end">
               {isSearching ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Search className="mr-2 h-4 w-4" />}
               Buscar
+            </Button>
+            {/* Fallback manual: usado quando a API do L1 nao responde. */}
+            <Button
+              variant="outline"
+              onClick={() => setImportOpen(true)}
+              className="self-end"
+              title="Importar publicacoes de uma planilha exportada do Legal One"
+            >
+              <Upload className="mr-2 h-4 w-4" />
+              Importar planilha
             </Button>
           </div>
           {/* Painel de índice só faz sentido com 1 escritório. Pra
@@ -3575,7 +4009,84 @@ const PublicationsPage = () => {
                   </div>
                 </div>
               )}
-              {/* Hint mobile: indica que a tabela scrolla horizontalmente */}
+              {/* Modal do MOTIVO da ciência (pub006) — um clique, sem digitação
+          obrigatória (exceto no "Outro"). */}
+      <Dialog open={!!ignoreDialog} onOpenChange={(o) => { if (!o) setIgnoreDialog(null); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              Ignorar {ignoreDialog?.recordIds.length === 1
+                ? "1 publicação"
+                : `${ignoreDialog?.recordIds.length ?? 0} publicações`}
+            </DialogTitle>
+            <DialogDescription>
+              Escolha o motivo — ele fica registrado na publicação e alimenta a
+              auditoria e o estudo de automação.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            {IGNORE_REASONS.map((r) => (
+              <label
+                key={r.value}
+                className={`flex cursor-pointer items-start gap-2.5 rounded-md border p-2.5 text-sm transition-colors hover:bg-muted/40 ${
+                  ignoreReason === r.value ? "border-primary bg-primary/5" : ""
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="ignore-reason"
+                  className="mt-1"
+                  checked={ignoreReason === r.value}
+                  onChange={() => setIgnoreReason(r.value)}
+                />
+                <span>
+                  <span className="font-medium">{r.label}</span>
+                  <span className="block text-xs text-muted-foreground">{r.hint}</span>
+                </span>
+              </label>
+            ))}
+            {ignoreReason === "outro" && (
+              <Textarea
+                value={ignoreNote}
+                onChange={(e) => setIgnoreNote(e.target.value)}
+                placeholder="Descreva o motivo…"
+                className="mt-1 min-h-[70px]"
+              />
+            )}
+          </div>
+          {/* pub008 — o sinal mais valioso do balde OPERADOR: hoje eu adivinho
+              por heurística de texto qual publicação é indecidível; com este
+              clique passo a saber. ~2 casos/dia de atrito. */}
+          <label className="flex cursor-pointer items-center gap-2 rounded-md border border-dashed p-2.5 text-sm hover:bg-muted/40">
+            <Checkbox
+              checked={ignoreConsultouAutos}
+              onCheckedChange={(c) => setIgnoreConsultouAutos(!!c)}
+            />
+            <span>
+              Precisei <b>abrir o processo</b> pra decidir
+              <span className="block text-xs text-muted-foreground">
+                A publicação sozinha não dizia o suficiente.
+              </span>
+            </span>
+          </label>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIgnoreDialog(null)} disabled={ignoreSubmitting}>
+              Cancelar
+            </Button>
+            <Button
+              onClick={confirmIgnore}
+              disabled={
+                ignoreSubmitting || !ignoreReason ||
+                (ignoreReason === "outro" && !ignoreNote.trim())
+              }
+            >
+              {ignoreSubmitting ? "Ignorando…" : "Ignorar"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Hint mobile: indica que a tabela scrolla horizontalmente */}
               <div className="mb-1 flex items-center gap-1 text-[11px] text-muted-foreground md:hidden">
                 <ChevronLeft className="h-3 w-3" />
                 <span>Arraste para o lado para ver todas as colunas</span>
@@ -3654,9 +4165,13 @@ const PublicationsPage = () => {
                                   })()}
                                 </div>
                                 <div className="text-muted-foreground">ID: {group.lawsuit_id}</div>
+                                <L1EtiquetaChips etiquetas={group.l1_etiquetas} />
                               </div>
                             ) : group.lawsuit_id ? (
-                              <span className="text-muted-foreground">{group.lawsuit_id}</span>
+                              <div>
+                                <span className="text-muted-foreground">{group.lawsuit_id}</span>
+                                <L1EtiquetaChips etiquetas={group.l1_etiquetas} />
+                              </div>
                             ) : (
                               <div>
                                 <span className="italic text-orange-600">sem processo</span>
@@ -3927,6 +4442,33 @@ const PublicationsPage = () => {
                                   </div>
                                 )}
                               </div>
+                            ) : status !== "AGENDADO" &&
+                              group.records.some((r) => r.category) ? (
+                              // Classificada mas sem template: o "Sem template"
+                              // vira atalho pra configurar — abre a página de
+                              // templates em NOVA ABA já posicionada nesta
+                              // classificação+escritório (edita se existir,
+                              // cria pré-preenchido se não), sem perder a fila.
+                              (() => {
+                                const rc = group.records.find((r) => r.category)!;
+                                const qs = new URLSearchParams({
+                                  category: rc.category ?? "",
+                                  subcategory: rc.subcategory ?? "",
+                                  office_id: group.office_id != null ? String(group.office_id) : "",
+                                });
+                                return (
+                                  <a
+                                    href={`/publications/templates?${qs.toString()}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    title="Configurar o template desta classificação (abre em nova aba)"
+                                    className="italic text-blue-600 underline-offset-2 hover:underline"
+                                  >
+                                    Sem template — configurar ↗
+                                  </a>
+                                );
+                              })()
                             ) : (
                               <span className="italic text-muted-foreground">
                                 {status === "AGENDADO" ? "Já agendado" : "Sem template"}
@@ -3947,8 +4489,10 @@ const PublicationsPage = () => {
                               {group.records.some((r) => r.status !== "AGENDADO" && r.status !== "IGNORADO") && (
                                 <Button size="sm" variant="ghost"
                                   className="h-7 px-2 text-xs text-muted-foreground"
-                                  onClick={() => group.records.filter((r) => r.status !== "AGENDADO" && r.status !== "IGNORADO")
-                                    .forEach((r) => handleIgnoreRecord(r.id))}>
+                                  onClick={() => openIgnoreDialog(
+                                    group.records.filter((r) => r.status !== "AGENDADO" && r.status !== "IGNORADO").map((r) => r.id),
+                                    "grupo",
+                                  )}>
                                   Ignorar
                                 </Button>
                               )}
@@ -4254,6 +4798,9 @@ const PublicationsPage = () => {
                     <Label className="text-sm font-semibold flex items-center gap-1.5">
                       <Calendar className="h-4 w-4 text-muted-foreground" />
                       Tarefas no Legal One
+                      <span className="font-normal text-[10px] text-muted-foreground">
+                        · lido do L1 agora · o #id é o mesmo da coluna Id de lá
+                      </span>
                     </Label>
                     {recentTasks?.truncated && (
                       <span className="text-[10px] text-amber-700">
@@ -4305,6 +4852,26 @@ const PublicationsPage = () => {
                                     <span className="rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-semibold text-amber-900">
                                       {t.status_label}
                                     </span>
+                                    {/* O Id é a MESMA coluna que a grade de
+                                        Compromissos e Tarefas do L1 mostra —
+                                        é por ele que o operador casa as duas
+                                        telas sem precisar comparar descrição.
+                                        Em 03/08/2026 uma operadora passou o dia
+                                        achando que os agendamentos não tinham
+                                        criado tarefa: a tarefa existia (id
+                                        415212), mas a aba do L1 estava velha e
+                                        não havia como cruzar. */}
+                                    {t.task_id && (
+                                      <a
+                                        href={t.l1_url || undefined}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        title="Abrir esta tarefa no Legal One"
+                                        className="rounded bg-amber-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-900 ring-1 ring-amber-300 hover:bg-amber-200"
+                                      >
+                                        #{t.task_id}
+                                      </a>
+                                    )}
                                     {t.subtype_name && (
                                       <span className="text-amber-900 font-medium">
                                         {t.subtype_name}
@@ -4357,6 +4924,17 @@ const PublicationsPage = () => {
                                     <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
                                       {t.status_label}
                                     </span>
+                                    {t.task_id && (
+                                      <a
+                                        href={t.l1_url || undefined}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        title="Abrir esta tarefa no Legal One"
+                                        className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground ring-1 ring-border hover:bg-accent"
+                                      >
+                                        #{t.task_id}
+                                      </a>
+                                    )}
                                     {t.subtype_name && (
                                       <span className="font-medium">{t.subtype_name}</span>
                                     )}
@@ -4440,7 +5018,7 @@ const PublicationsPage = () => {
                       Confirmar agendamento
                     </Button>
                     <Button size="sm" variant="outline"
-                      onClick={() => { handleIgnoreRecord(selectedRecord.id); setDetailOpen(false); }}>
+                      onClick={() => { setDetailOpen(false); openIgnoreDialog([selectedRecord.id], "detalhe"); }}>
                       <EyeOff className="mr-1 h-3.5 w-3.5" />
                       Ignorar publicação
                     </Button>
@@ -4721,13 +5299,55 @@ const PublicationsPage = () => {
                               className={`h-6 px-2 text-xs ${isRemoved ? "text-emerald-600" : "text-destructive hover:text-destructive"}`}
                               onClick={() => {
                                 const next = new Set(removedTaskIndices);
-                                if (isRemoved) next.delete(idx); else next.add(idx);
+                                if (isRemoved) {
+                                  next.delete(idx);
+                                  // Restaurou → o motivo da remoção não vale mais.
+                                  setRemoveReasonByIndex((prev) => {
+                                    const m = new Map(prev);
+                                    m.delete(idx);
+                                    return m;
+                                  });
+                                } else {
+                                  next.add(idx);
+                                }
                                 setRemovedTaskIndices(next);
                               }}
                             >
                               {isRemoved ? "Restaurar" : "Remover"}
                             </Button>
                           </div>
+
+                          {/* pub008 — por que removeu a tarefa que o template
+                              propôs. Calibra a regra de dupla tarefa: se o
+                              motivo mais frequente for "template propõe
+                              demais", o template é que precisa mudar, não a
+                              publicação. Só aparece no bloco removido. */}
+                          {isRemoved && !payload.is_custom && (
+                            <div className="border-b bg-rose-50/60 px-4 py-2.5">
+                              <p className="mb-1.5 text-[11px] font-medium text-rose-900">
+                                Por que esta tarefa não vai?
+                              </p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {REMOVE_TASK_REASONS.map((r) => {
+                                  const ativo = removeReasonByIndex.get(idx) === r.value;
+                                  return (
+                                    <button key={r.value} type="button" title={r.hint}
+                                      onClick={() => setRemoveReasonByIndex((prev) => {
+                                        const m = new Map(prev);
+                                        if (m.get(idx) === r.value) m.delete(idx);
+                                        else m.set(idx, r.value);
+                                        return m;
+                                      })}
+                                      className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                                        ativo ? "border-rose-600 bg-rose-600 text-white"
+                                              : "border-rose-300 bg-white text-rose-900 hover:bg-rose-100"}`}>
+                                      {r.label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
 
                           {/* Banner de duplicata (Onda 1): exibido quando o
                               check-duplicates encontrou tasks pendentes no L1
@@ -4859,8 +5479,52 @@ const PublicationsPage = () => {
                                       typeId: newType?.external_id ?? next[idx].typeId,
                                     };
                                     setEditedPayloads(next);
+                                    // Troca nova → motivo anterior não vale mais.
+                                    setSubtypeReasonByIndex((prev) => {
+                                      const m = new Map(prev);
+                                      m.delete(idx);
+                                      return m;
+                                    });
                                   }}
                                 />
+                                {/* Só aparece quando o subtipo REALMENTE mudou
+                                    em relação ao proposto pelo template. */}
+                                {(originalSubtypeByIndex.get(idx) ?? null) !== null &&
+                                 currentSubId !== (originalSubtypeByIndex.get(idx) ?? null) && (
+                                  <div className="rounded-md border border-amber-200 bg-amber-50/60 p-2.5">
+                                    <p className="mb-1.5 text-[11px] font-medium text-amber-900">
+                                      Por que trocou o subtipo?
+                                    </p>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {SUBTYPE_CHANGE_REASONS.map((r) => {
+                                        const ativo = subtypeReasonByIndex.get(idx) === r.value;
+                                        return (
+                                          <button
+                                            key={r.value}
+                                            type="button"
+                                            title={r.hint}
+                                            onClick={() => setSubtypeReasonByIndex((prev) => {
+                                              const m = new Map(prev);
+                                              if (m.get(idx) === r.value) m.delete(idx);
+                                              else m.set(idx, r.value);
+                                              return m;
+                                            })}
+                                            className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                                              ativo
+                                                ? "border-amber-500 bg-amber-500 text-white"
+                                                : "border-amber-300 bg-white text-amber-900 hover:bg-amber-100"
+                                            }`}
+                                          >
+                                            {r.label}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                    <p className="mt-1.5 text-[10px] text-amber-800/80">
+                                      Opcional — mas é o que nos diz qual template corrigir.
+                                    </p>
+                                  </div>
+                                )}
                                 {parentType && (
                                   <p className="text-[10px] text-muted-foreground -mt-1">
                                     Tipo: {parentType.name}
@@ -5047,6 +5711,97 @@ const PublicationsPage = () => {
                                       }}
                                     />
                                   </div>
+                                  {/* Chip: AGENDOU apesar de tarefa aberta na
+                                      pasta — o inverso do chip de ignorar. Diz
+                                      que a tarefa existente NÃO cobre esta
+                                      publicação: é a distinção semântica que
+                                      nenhum casamento estrutural alcança (foi a
+                                      hipótese que o backtest derrubou). */}
+                                  {payload.subTypeId &&
+                                   (duplicatesBySubtype[payload.subTypeId]?.length ?? 0) > 0 && (
+                                    <div className="col-span-12 rounded-md border border-violet-200 bg-violet-50/60 p-2.5">
+                                      <p className="mb-1.5 text-[11px] font-medium text-violet-900">
+                                        Já existe tarefa aberta desse tipo na pasta — por que agendar mesmo assim?
+                                      </p>
+                                      <div className="flex flex-wrap gap-1.5">
+                                        {OPEN_TASK_REASONS.map((r) => {
+                                          const ativo = openTaskReasonByIndex.get(idx) === r.value;
+                                          return (
+                                            <button key={r.value} type="button" title={r.hint}
+                                              onClick={() => setOpenTaskReasonByIndex((prev) => {
+                                                const m = new Map(prev);
+                                                if (m.get(idx) === r.value) m.delete(idx);
+                                                else m.set(idx, r.value);
+                                                return m;
+                                              })}
+                                              className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                                                ativo ? "border-violet-600 bg-violet-600 text-white"
+                                                      : "border-violet-300 bg-white text-violet-900 hover:bg-violet-100"}`}>
+                                              {r.label}
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  )}
+                                  {/* Chip do DESVIO DE DATA — só aparece quando
+                                      o operador desloca a data em mais de 3 dias
+                                      em relação ao template. O desvio pequeno é
+                                      rotina; o grande carrega regra não escrita. */}
+                                  {(() => {
+                                    const dias = desvioEmDias(
+                                      originalDateByIndex.get(idx), payload.endDateTime);
+                                    if (dias === null || Math.abs(dias) <= DESVIO_DATA_DIAS) return null;
+                                    const obriga = Math.abs(dias) > DESVIO_DATA_OBRIGA;
+                                    const escolhido = dateReasonByIndex.get(idx);
+                                    const pendente = obriga && !escolhido;
+                                    return (
+                                      <div className={`col-span-12 rounded-lg border-2 p-3 ${
+                                        pendente
+                                          ? "animate-pulse border-amber-400 bg-amber-50"
+                                          : escolhido
+                                            ? "border-emerald-300 bg-emerald-50/60"
+                                            : "border-sky-300 bg-sky-50"}`}>
+                                        <div className="mb-2 flex items-center gap-2">
+                                          <CalendarClock className={`h-4 w-4 shrink-0 ${
+                                            pendente ? "text-amber-700" : escolhido ? "text-emerald-700" : "text-sky-700"}`} />
+                                          <p className={`text-sm font-semibold ${
+                                            pendente ? "text-amber-900" : escolhido ? "text-emerald-900" : "text-sky-900"}`}>
+                                            {dias > 0 ? `Você adiou ${dias} dias` : `Você antecipou ${Math.abs(dias)} dias`}
+                                            {obriga && !escolhido && " — diga por quê para continuar"}
+                                            {obriga && escolhido && " — obrigado!"}
+                                            {!obriga && " — por quê? (opcional)"}
+                                          </p>
+                                        </div>
+                                        <div className="flex flex-wrap gap-1.5">
+                                          {DATE_CHANGE_REASONS.map((r) => {
+                                            const ativo = escolhido === r.value;
+                                            return (
+                                              <button key={r.value} type="button" title={r.hint}
+                                                onClick={() => setDateReasonByIndex((prev) => {
+                                                  const m = new Map(prev);
+                                                  if (m.get(idx) === r.value) m.delete(idx);
+                                                  else m.set(idx, r.value);
+                                                  return m;
+                                                })}
+                                                className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+                                                  ativo ? "border-emerald-600 bg-emerald-600 text-white"
+                                                        : pendente
+                                                          ? "border-amber-400 bg-white text-amber-900 hover:bg-amber-100"
+                                                          : "border-sky-300 bg-white text-sky-900 hover:bg-sky-100"}`}>
+                                                {r.label}
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                        <p className="mt-1.5 text-[10px] text-muted-foreground">
+                                          O prazo do template era{" "}
+                                          {formatDateShort(originalDateByIndex.get(idx) ?? null)} — sua resposta
+                                          diz se o template precisa mudar.
+                                        </p>
+                                      </div>
+                                    );
+                                  })()}
                                   <div className="col-span-4 grid gap-1.5">
                                     <Label className="text-xs font-medium">Prioridade</Label>
                                     <Select

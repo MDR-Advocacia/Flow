@@ -26,6 +26,7 @@ from app.models.distribuidos_bb import (
     BbEnvolvido,
     BbProcesso,
     BbRun,
+    CLIENTE_BB,
     CONTATO_NAO_RESOLVIDO,
     NIVEL_AVISO,
     NIVEL_ERRO,
@@ -36,10 +37,13 @@ from app.models.distribuidos_bb import (
     RUN_CONCLUIDO,
     RUN_EM_ANDAMENTO,
     RUN_ERRO,
+    SECAO_CADASTRO,
     SECAO_CIENCIA,
     SECAO_COLETA,
+    SECAO_DISTRIBUICAO,
     SECAO_ENVOLVIDOS,
     SECAO_EXTRACAO,
+    SECAO_PLANILHA,
     SECAO_SESSAO,
 )
 from app.services.distribuidos_bb import normalizacao as norm
@@ -238,9 +242,84 @@ def _processar_notificacao(
             processo_id=proc.id, run_id=run.id,
         )
 
-    distribuir_processo(db, proc, run_id=run.id)
+    # Vínculos: a parte tem OUTRAS ações ativas conduzidas pelo MDR? Se sim, o
+    # responsável vem da equipe especializada (o escritório segue o padrão).
+    # Best-effort: falha aqui NUNCA derruba a coleta — segue o rodízio normal.
+    responsavel_override = None
+    if settings.distribuidos_bb_vinculos_ativo:
+        try:
+            from app.services.distribuidos_bb.vinculos_service import pesquisar_e_decidir
+
+            decisao = pesquisar_e_decidir(db, run, proc, portal)
+            responsavel_override = decisao.get("responsavel_override_id")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Vínculos: pesquisa falhou (proc %s).", proc.id)
+            registrar_evento(
+                db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_AVISO, acao="Vínculos indisponíveis",
+                mensagem=f"Pesquisa de vínculos falhou ({exc}); processo seguiu o rodízio padrão.",
+                processo_id=proc.id, run_id=run.id,
+            )
+
+    distribuir_processo(db, proc, run_id=run.id, responsavel_override_id=responsavel_override)
     if proc.responsavel_user_id:
         run.total_distribuidos += 1
+    db.commit()
+
+
+def _auto_cadastrar(db: Session, run: BbRun) -> None:
+    """Gera a planilha do pool NOVO e importa no L1 (cria pastas + workflow).
+
+    Best-effort: quem chama já embrulha em try/except. Marca os processos como
+    PENDENTE_CADASTRO (via gerar_e_persistir) e dispara o import interno; o monitor
+    confirma cada pasta depois (→ CADASTRADO_L1).
+    """
+    from app.services.distribuidos_bb.import_l1_service import cadastrar_planilha
+    from app.services.distribuidos_bb.planilha_service import (
+        cnjs_liberados_da_planilha,
+        gerar_e_persistir,
+    )
+
+    # Só o pool do BB: senão varreria junto os Ativos pendentes (outro cliente,
+    # outro fluxo de entrada) e os misturaria nesta planilha e neste run.
+    planilha = gerar_e_persistir(db, cliente=CLIENTE_BB)
+    if planilha is None:
+        return
+    db.commit()
+    registrar_evento(
+        db, secao=SECAO_CADASTRO, nivel=NIVEL_INFO, acao="Auto-cadastro iniciado",
+        mensagem=(
+            f"Planilha '{planilha.nome_arquivo}' ({planilha.total_processos} processo[s]) "
+            f"gerada; importando no Legal One automaticamente…"
+        ),
+        dados={"planilha_id": planilha.id}, run_id=run.id,
+    )
+    db.commit()
+
+    rel = cadastrar_planilha(
+        bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False,
+        cnjs_liberados=cnjs_liberados_da_planilha(db, planilha.id),
+    )
+    novos = rel.get("novos", 0)
+    # Linha recusada pelo L1 NÃO pode sumir: grava o motivo no processo, senão
+    # ele fica "Pendente cadastro" mudo (caso 0801099-88.2026.8.14.0003 em
+    # 31/07/2026, descoberto só porque o operador reparou na tela).
+    from app.services.distribuidos_bb.cadastro_descartes import registrar_descartes
+
+    registrar_descartes(db, rel, run_id=run.id, planilha_id=planilha.id)
+    # O robô subiu a planilha → marca como subida (não fica pendente na tela).
+    planilha.subido_legalone = True
+    planilha.subido_em = datetime.now(timezone.utc)
+    # Contador do run (a UI mostra "cadastrados"): sem isto ficava 0 pra sempre,
+    # mesmo com as pastas criadas no L1 — parecia que a rodagem não cadastrou nada.
+    run.total_cadastrados += int(novos or 0)
+    registrar_evento(
+        db, secao=SECAO_CADASTRO, nivel=NIVEL_SUCESSO, acao="Auto-cadastro enviado",
+        mensagem=(
+            f"Import no Legal One enviado: {novos} pasta(s) nova(s) criada(s). "
+            f"{rel.get('resultado', '')} O monitor confirma cada uma nos próximos ciclos."
+        ),
+        dados={"novos": novos, "planilha_id": planilha.id}, run_id=run.id,
+    )
     db.commit()
 
 
@@ -295,6 +374,42 @@ def executar_coleta(
                     )
                     db.commit()
 
+            # Verificação pós-coleta: re-consulta a lista no BB pra confirmar
+            # que ZEROU (quando deu ciência) ou quanto sobrou (modo seguro).
+            try:
+                restantes = portal.consultar(run.data_inicial, run.data_final)
+                # Sinaliza pro wrapper de retentativa (atributo transiente, não
+                # persistido): sobrou pendência mesmo com ciência = inconsistência.
+                run._pos_coleta_restantes = restantes
+                if gate_ciencia:
+                    nivel_vf = NIVEL_SUCESSO if restantes == 0 else NIVEL_AVISO
+                    msg_vf = (
+                        "Verificação pós-coleta: lista de pendências ZERADA no BB."
+                        if restantes == 0
+                        else (
+                            f"Verificação pós-coleta: {restantes} notificação(ões) ainda "
+                            f"pendente(s) no BB (esperava 0 após a ciência) — revisar."
+                        )
+                    )
+                else:
+                    nivel_vf = NIVEL_INFO
+                    msg_vf = (
+                        f"Verificação pós-coleta: {restantes} notificação(ões) seguem "
+                        f"pendentes no BB (esperado — modo seguro, nada recebeu ciência)."
+                    )
+                registrar_evento(
+                    db, secao=SECAO_COLETA, nivel=nivel_vf, acao="Verificação pós-coleta",
+                    mensagem=msg_vf,
+                    dados={"restantes": restantes, "gate_ciencia": gate_ciencia},
+                    run_id=run.id,
+                )
+                db.commit()
+            except Exception as exc_vf:  # noqa: BLE001
+                logger.warning(
+                    "Distribuídos BB: verificação pós-coleta falhou (run %s): %s",
+                    run.id, exc_vf,
+                )
+
         run.status = RUN_CONCLUIDO
         run.concluido_em = datetime.now(timezone.utc)
         registrar_evento(
@@ -306,6 +421,66 @@ def executar_coleta(
             ),
             run_id=run.id,
         )
+        db.commit()
+
+        # Pool de planilha: NÃO gera planilha automática. Os distribuídos ficam
+        # como NOVO (default) aguardando o operador mandar gerar. Aqui só
+        # sinalizamos o que entrou no pool — e avisamos quando não veio nada.
+        try:
+            from app.services.distribuidos_bb.planilha_service import contar_pool_novos
+
+            novos_pool = contar_pool_novos(db, cliente=CLIENTE_BB)
+            if run.total_distribuidos > 0:
+                registrar_evento(
+                    db, secao=SECAO_PLANILHA, nivel=NIVEL_INFO, acao="Pool atualizado",
+                    mensagem=(
+                        f"{run.total_distribuidos} processo(s) novo(s) desta execução "
+                        f"entraram no pool. Pool total aguardando planilha: {novos_pool}. "
+                        f"O operador gera a planilha quando quiser."
+                    ),
+                    dados={"novos_execucao": run.total_distribuidos, "pool_total": novos_pool},
+                    run_id=run.id,
+                )
+            else:
+                registrar_evento(
+                    db, secao=SECAO_PLANILHA, nivel=NIVEL_AVISO, acao="Sem processos",
+                    mensagem=(
+                        "Esta execução não teve processos novos — nada entrou no pool "
+                        f"(pool total aguardando planilha segue em {novos_pool})."
+                    ),
+                    run_id=run.id,
+                )
+            db.commit()
+        except Exception as exc_pool:  # noqa: BLE001
+            logger.warning(
+                "Distribuídos BB: falha ao sinalizar o pool (run %s): %s", run.id, exc_pool,
+            )
+
+        # Cadastro 100% automático (best-effort, nunca derruba o run): se ligado e
+        # veio processo novo, gera a planilha do pool e importa no L1 (cria pastas
+        # + dispara workflow). O monitor confirma cada pasta depois.
+        if settings.distribuidos_bb_auto_cadastro_ativo and run.total_distribuidos > 0:
+            try:
+                _auto_cadastrar(db, run)
+            except Exception as exc_ac:  # noqa: BLE001
+                registrar_evento(
+                    db, secao=SECAO_CADASTRO, nivel=NIVEL_ERRO, acao="Falha no auto-cadastro",
+                    mensagem=f"Coleta ok, mas o cadastro automático no L1 falhou: {exc_ac}",
+                    run_id=run.id,
+                )
+                db.commit()
+                logger.exception("Distribuídos BB: auto-cadastro falhou (run %s).", run.id)
+                # Alerta por e-mail (mesmo mecanismo da classificação de
+                # publicações) — sem ele a falha ficava só no Log de tudo e os
+                # processos paravam em PENDENTE_CADASTRO sem ninguém saber.
+                from app.services.distribuidos_bb.alertas import alertar_falha_cadastro
+
+                alertar_falha_cadastro(
+                    contexto="auto-cadastro da coleta",
+                    erro=str(exc_ac),
+                    total_processos=run.total_distribuidos,
+                    run_id=run.id,
+                )
     except Exception as exc:  # noqa: BLE001
         run.status = RUN_ERRO
         run.erro = str(exc)
@@ -322,6 +497,29 @@ def executar_coleta(
     return run
 
 
+def _motivo_para_repetir(run: BbRun, *, erros_antes: int = 0) -> Optional[str]:
+    """Por que esta rodagem merece nova tentativa? None = está tudo certo.
+
+    Dois casos, ambos vistos em prod:
+    - ERRO: falha geral (ex.: o SPA do PAJ não montou) — o run morre com 0 tudo;
+    - INCONSISTÊNCIA: concluiu, mas alguma notificação falhou no meio, ou a
+      verificação pós-coleta achou pendência sobrando mesmo com a ciência ligada.
+
+    `erros_antes` = total_erros no início DESTA tentativa (o contador é cumulativo
+    entre tentativas, então só interessa o que falhou agora).
+    """
+    if run.status == RUN_ERRO:
+        return f"a rodagem falhou ({(run.erro or 'erro não detalhado')[:120]})"
+    novos_erros = run.total_erros - erros_antes
+    if novos_erros > 0:
+        return f"{novos_erros} notificação(ões) falharam no meio da rodagem"
+    gate_ciencia = bool(run.confirmar_ciencia and settings.distribuidos_bb_confirmar_ciencia)
+    restantes = int(getattr(run, "_pos_coleta_restantes", 0) or 0)
+    if gate_ciencia and restantes > 0:
+        return f"sobraram {restantes} pendência(s) no BB após a ciência (esperava 0)"
+    return None
+
+
 def executar_coleta_background(
     run_id: int,
     *,
@@ -329,7 +527,23 @@ def executar_coleta_background(
     data_final: Optional[str],
     coletar_envolvidos: bool = True,
 ) -> None:
-    """Entrada pro background: abre sessão própria e roda a coleta do run."""
+    """Entrada pro background: abre sessão própria e roda a coleta do run.
+
+    **Trava de resiliência**: o portal do BB é intermitente (falha numa rodagem e
+    passa na seguinte, sem mudar nada). Então em vez de deixar o run morrer no
+    erro esperando o operador mandar repetir na mão, repetimos automaticamente.
+
+    Por que repetir é seguro mesmo com a ciência sendo IRREVERSÍVEL:
+    - a ciência REMOVE a notificação da lista de pendências do BB, então a nova
+      tentativa só enxerga o que ainda não foi tratado (retomada, não repetição);
+    - o `fingerprint` faz upsert, então processo já capturado não duplica no banco;
+    - as falhas observadas em prod acontecem no `_localizar_frame`, ANTES de
+      qualquer ciência (run morre com 0 coletados).
+    Os contadores do run são cumulativos entre as tentativas — refletem o total
+    real da rodagem, já que o que foi feito não é refeito.
+    """
+    import time as _t
+
     from app.db.session import SessionLocal
 
     db = SessionLocal()
@@ -338,6 +552,80 @@ def executar_coleta_background(
         if run is None:
             logger.error("Distribuídos BB: run %s não encontrado no background.", run_id)
             return
-        executar_coleta(db, run, coletar_envolvidos=coletar_envolvidos)
+
+        tentativas = max(1, int(settings.distribuidos_bb_coleta_tentativas or 1))
+        espera = max(0, int(settings.distribuidos_bb_coleta_retry_espera_seg or 0))
+
+        for tentativa in range(1, tentativas + 1):
+            erros_antes = run.total_erros
+            executar_coleta(db, run, coletar_envolvidos=coletar_envolvidos)
+
+            motivo = _motivo_para_repetir(run, erros_antes=erros_antes)
+            if motivo is None:
+                if tentativa > 1:
+                    registrar_evento(
+                        db, secao=SECAO_SESSAO, nivel=NIVEL_SUCESSO, acao="Recuperado na retentativa",
+                        mensagem=(
+                            f"A rodagem se recuperou sozinha na tentativa {tentativa} de "
+                            f"{tentativas} — não precisou de repetição manual."
+                        ),
+                        dados={"tentativa": tentativa}, run_id=run.id,
+                    )
+                    db.commit()
+                return
+
+            if tentativa >= tentativas:
+                registrar_evento(
+                    db, secao=SECAO_SESSAO, nivel=NIVEL_ERRO, acao="Esgotou as tentativas",
+                    mensagem=(
+                        f"Desisti após {tentativas} tentativa(s): {motivo}. "
+                        f"Precisa de olhada manual."
+                    ),
+                    dados={"tentativas": tentativas, "motivo": motivo}, run_id=run.id,
+                )
+                db.commit()
+                # ALERTA: sem isto a coleta morre em SILÊNCIO. Quem passa a
+                # busca depois vê "zerada" e conclui que não havia processo —
+                # foi assim que o cadastro do BB ficou 3 dias parado
+                # (07→10/08/2026) sem ninguém perceber. O evento na tela só
+                # aparece pra quem vai olhar o painel; o e-mail vai atrás.
+                try:
+                    from app.services.distribuidos_bb.alertas import (
+                        alertar_falha_cadastro,
+                    )
+
+                    alertar_falha_cadastro(
+                        contexto=(
+                            f"coleta do portal BB — desistiu após "
+                            f"{tentativas} tentativa(s)"
+                        ),
+                        erro=motivo,
+                        run_id=run.id,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Distribuídos BB: falha ao alertar sobre a coleta do run %s.",
+                        run.id,
+                    )
+                return
+
+            registrar_evento(
+                db, secao=SECAO_SESSAO, nivel=NIVEL_AVISO, acao="Repetindo a rodagem",
+                mensagem=(
+                    f"Tentativa {tentativa} de {tentativas} não fechou limpa: {motivo}. "
+                    f"Repetindo automaticamente em {espera}s (o que já teve ciência "
+                    f"não é refeito — sai da lista do BB)."
+                ),
+                dados={"tentativa": tentativa, "motivo": motivo}, run_id=run.id,
+            )
+            # Reabre o run pra nova tentativa (o executar_coleta o fecha como ERRO/CONCLUIDO).
+            run.status = RUN_EM_ANDAMENTO
+            run.erro = None
+            run.concluido_em = None
+            run._pos_coleta_restantes = 0
+            db.commit()
+
+            if espera:
+                _t.sleep(espera)
     finally:
         db.close()

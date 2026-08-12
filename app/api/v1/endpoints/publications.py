@@ -4,6 +4,8 @@ Endpoints do motor de busca de publicações do Legal One.
 Rotas:
   GET    /statistics                     → Contagens para o dashboard
   POST   /search                         → Dispara uma nova busca
+  POST   /import-spreadsheet/preview     → Confere a planilha do L1 (nao grava)
+  POST   /import-spreadsheet             → Importa publicacoes da planilha do L1
   GET    /searches                       → Lista buscas anteriores
   GET    /searches/{id}                  → Detalhe de uma busca
   POST   /searches/{id}/cancel           → Cancela busca em andamento
@@ -16,7 +18,9 @@ Rotas:
 
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import (
+    APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile,
+)
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -28,6 +32,10 @@ from app.services.legal_one_client import LegalOneApiClient
 from app.services.publication_batch_classifier import PublicationBatchClassifier
 from app.services.publication_export_service import export_records_grouped_xlsx
 from app.services.publication_search_service import PublicationSearchService
+from app.services.publication_spreadsheet_import import (
+    ler_planilha,
+    montar_publicacoes,
+)
 
 router = APIRouter()
 
@@ -60,6 +68,12 @@ class SearchRequest(BaseModel):
 
 class UpdateRecordStatusRequest(BaseModel):
     status: str
+    # Motivo da ciência (obrigatório na UI quando status=IGNORADO; opcional na
+    # API pra não quebrar chamadas legadas/automação).
+    ignore_reason: Optional[str] = None
+    ignore_reason_note: Optional[str] = None
+    # pub008: "precisei abrir o processo pra decidir" — vale também no ignorar.
+    consultou_autos: bool = False
 
 
 class ScheduleGroupRequest(BaseModel):
@@ -158,6 +172,138 @@ def create_search(
 
     background_tasks.add_task(_run_search)
     return {"message": "Busca iniciada em background.", "status": "EXECUTANDO"}
+
+
+# ─── Fallback manual: planilha exportada do Legal One ──────────────────
+#
+# Terceira camada de captura, atras do GET /Updates. Quando a API do L1 esta
+# fora, o operador extrai as publicacoes na tela do Legal One e sobe o arquivo
+# aqui. Nao depende de rede nenhuma — e o unico caminho que funciona com tudo
+# fora do ar.
+#
+# A planilha NAO grava direto em publicacao_registros: e convertida pro mesmo
+# contrato que a API do L1 devolve e entregue a create_and_run_search, entao a
+# dedup, a deteccao de obsoleta e a enxugada antes da classificacao valem sem
+# nenhuma logica duplicada.
+
+# Extracao de um dia fica em ~1.200 linhas / poucos MB. 25MB cobre uma janela
+# larga e barra arquivo trocado (ex.: export da base inteira).
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+
+async def _ler_upload(file: UploadFile) -> bytes:
+    nome = (file.filename or "").lower()
+    if not nome.endswith((".xlsx", ".xlsm")):
+        raise HTTPException(
+            status_code=400,
+            detail="Envie o arquivo .xlsx exportado do Legal One.",
+        )
+    conteudo = await file.read()
+    if not conteudo:
+        raise HTTPException(status_code=400, detail="O arquivo chegou vazio.")
+    if len(conteudo) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Arquivo maior que {MAX_UPLOAD_BYTES // (1024 * 1024)}MB. "
+                "Divida a extracao em periodos menores."
+            ),
+        )
+    return conteudo
+
+
+def _resumo_planilha(resultado: dict) -> dict:
+    """Resposta enxuta pro operador — sem as linhas cruas."""
+    return {
+        "total_linhas": resultado["total_linhas"],
+        "total_validas": resultado["total_validas"],
+        "total_ignoradas": resultado["total_ignoradas"],
+        "processos_distintos": resultado["processos_distintos"],
+        "data_inicial": resultado["data_inicial"],
+        "data_final": resultado["data_final"],
+        "por_escritorio": resultado["por_escritorio"],
+        "escritorios_nao_encontrados": resultado["escritorios_nao_encontrados"],
+        # Amostra do que vai entrar: o operador confere antes de confirmar.
+        "amostra": [
+            {
+                "linha": v["linha"],
+                "cnj": v["cnj"],
+                "pasta": v["pasta"],
+                "escritorio": v["escritorio_path"],
+                "data": v["publication_date"][:10],
+                "descricao": (v["descricao"][:180] + "...")
+                if len(v["descricao"]) > 180 else v["descricao"],
+            }
+            for v in resultado["validas"][:10]
+        ],
+        # Primeiros motivos de descarte, pro operador saber o que revisar.
+        "ignoradas": resultado["ignoradas"][:20],
+    }
+
+
+@router.post("/import-spreadsheet/preview")
+async def preview_import_spreadsheet(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(auth_security.get_current_user),
+):
+    """Confere a planilha e devolve o que seria importado. NAO grava nada."""
+    conteudo = await _ler_upload(file)
+    try:
+        resultado = ler_planilha(conteudo, db)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _resumo_planilha(resultado)
+
+
+@router.post("/import-spreadsheet")
+async def import_spreadsheet(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    auto_classify: bool = Form(True),
+    db: Session = Depends(get_db),
+    service: PublicationSearchService = Depends(_get_service),
+    current_user=Depends(auth_security.get_current_user),
+):
+    """Importa as publicacoes da planilha usando o mesmo fluxo da busca no L1."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    conteudo = await _ler_upload(file)
+    # Parse SINCRONO: erro de planilha vira 400 na hora, com o motivo. So
+    # depois de validado e que a importacao vai pro background.
+    try:
+        resultado = ler_planilha(conteudo, db)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    publicacoes = montar_publicacoes(resultado["validas"])
+    data_inicial = resultado["data_inicial"]
+    data_final = resultado["data_final"]
+    email = getattr(current_user, "email", None)
+
+    def _run_import():
+        try:
+            service.create_and_run_search(
+                date_from=data_inicial,
+                date_to=data_final,
+                origin_type="OfficialJournalsCrawler",
+                auto_classify=auto_classify,
+                requested_by=email,
+                prefetched_publications=publicacoes,
+            )
+        except Exception as exc:
+            logger.error("Erro na importacao por planilha: %s", exc, exc_info=True)
+
+    background_tasks.add_task(_run_import)
+    return {
+        "message": (
+            f"Importacao iniciada: {resultado['total_validas']} publicacoes "
+            f"de {resultado['processos_distintos']} processos."
+        ),
+        "status": "EXECUTANDO",
+        **_resumo_planilha(resultado),
+    }
 
 
 @router.post("/reclassify")
@@ -801,7 +947,10 @@ def update_record_status(
     """
     try:
         return service.update_record_status(
-            record_id, payload.status, acted_by=current_user
+            record_id, payload.status, acted_by=current_user,
+            ignore_reason=payload.ignore_reason,
+            ignore_reason_note=payload.ignore_reason_note,
+            consultou_autos=payload.consultou_autos,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

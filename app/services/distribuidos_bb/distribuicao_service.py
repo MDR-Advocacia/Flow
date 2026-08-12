@@ -15,9 +15,12 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.models.distribuidos_bb import (
+    BbConfig,
     BbDistribuicaoEstado,
     BbEscritorio,
+    BbGrupoAjuizamento,
     BbProcesso,
+    BbRegraObservacao,
     BbResponsavel,
     NIVEL_AVISO,
     NIVEL_SUCESSO,
@@ -26,15 +29,27 @@ from app.models.distribuidos_bb import (
 )
 from app.services.distribuidos_bb.log_service import registrar_evento
 
+_CHAVE_PONTEIRO_AJUIZAMENTO = "ajuizamento_ultimo_indice"
+
 
 def _escolher_escritorio(db: Session, processo: BbProcesso) -> Optional[BbEscritorio]:
-    """Escolhe o escritório/fila pelo critério de natureza (1º) ou polo (2º)."""
-    escritorios = (
-        db.query(BbEscritorio)
-        .filter(BbEscritorio.ativo.is_(True))
-        .order_by(BbEscritorio.ordem, BbEscritorio.id)
-        .all()
-    )
+    """Escolhe o escritório/fila pelo cliente + natureza (1º) ou polo (2º).
+
+    O CLIENTE filtra antes de tudo: "Banco do Brasil - Réu" e "Ativos - Réu" têm o
+    mesmo polo (Passivo), então sem esse filtro o processo do Ativos cairia na fila
+    do BB (o do BB tem `ordem` menor e venceria).
+    """
+    cliente = (processo.cliente or "").strip().lower()
+    escritorios = [
+        e
+        for e in (
+            db.query(BbEscritorio)
+            .filter(BbEscritorio.ativo.is_(True))
+            .order_by(BbEscritorio.ordem, BbEscritorio.id)
+            .all()
+        )
+        if not e.criterio_cliente or e.criterio_cliente.strip().lower() == cliente
+    ]
 
     natureza = (processo.natureza or "").strip().lower()
     polo = (processo.polo or "").strip().lower()
@@ -79,18 +94,99 @@ def _proximo_responsavel_rr(db: Session, escritorio: BbEscritorio) -> Optional[i
     return escolhido.user_id
 
 
-def _observacao(processo: BbProcesso, escritorio: BbEscritorio) -> Optional[str]:
-    """Regras de observação (iguais ao script legado)."""
+def peek_responsavel_rr(db: Session, escritorio: BbEscritorio) -> Optional[int]:
+    """Quem SERIA o próximo do rodízio — sem avançar a fila (só leitura).
+
+    Usado pela sugestão do modal de pasta avulsa: mostra o próximo ao operador;
+    o avanço real acontece só no salvar (via `_proximo_responsavel_rr`), e apenas
+    se o operador mantiver a sugestão.
+    """
+    fila = (
+        db.query(BbResponsavel)
+        .filter(
+            BbResponsavel.escritorio_id == escritorio.id,
+            BbResponsavel.ativo.is_(True),
+        )
+        .order_by(BbResponsavel.ordem, BbResponsavel.id)
+        .all()
+    )
+    if not fila:
+        return None
+    estado = db.get(BbDistribuicaoEstado, escritorio.id)
+    ultimo = estado.ultimo_indice if estado is not None else -1
+    return fila[(ultimo + 1) % len(fila)].user_id
+
+
+def _avaliar_observacao(db: Session, processo: BbProcesso, escritorio: BbEscritorio) -> Optional[str]:
+    """Observação decidida pelas REGRAS editáveis (bbd_regras_observacao).
+
+    Avalia as regras ativas por `ordem`; a 1ª que casar (cliente, posição, natureza
+    e presença/ausência de CNJ) vence. Sem regra → cai na observação padrão do
+    escritório. Substitui o if/else hardcoded do script legado.
+
+    O `criterio_cliente` é o que separa os clientes: a regra "Réu → Cadastro" é do
+    Banco do Brasil e não pode casar com um processo do Ativos (que tem termo
+    próprio pra disparar o workflow dele no L1).
+    """
+    cliente = (processo.cliente or "").strip().lower()
     posicao = (processo.posicao or "").strip().lower()
-    if posicao == "autor":
-        return "Ajuizamento" if not processo.cnj else "Reterceirizado"
-    if posicao in ("réu", "reu") or (escritorio.criterio_natureza or "").strip().lower() == "trabalhista":
-        return "Cadastro"
+    natureza = (processo.natureza or "").strip().lower()
+    tem_cnj = bool(processo.cnj)
+
+    regras = (
+        db.query(BbRegraObservacao)
+        .filter(BbRegraObservacao.ativo.is_(True))
+        .order_by(BbRegraObservacao.ordem, BbRegraObservacao.id)
+        .all()
+    )
+    for r in regras:
+        if r.criterio_cliente and r.criterio_cliente.strip().lower() != cliente:
+            continue
+        if r.criterio_posicao and r.criterio_posicao.strip().lower() != posicao:
+            continue
+        if r.criterio_natureza and r.criterio_natureza.strip().lower() != natureza:
+            continue
+        if r.criterio_cnj == "com" and not tem_cnj:
+            continue
+        if r.criterio_cnj == "sem" and tem_cnj:
+            continue
+        return r.texto
     return escritorio.observacao_padrao
 
 
-def distribuir_processo(db: Session, processo: BbProcesso, *, run_id: Optional[int] = None) -> BbProcesso:
+def _proximo_grupo_ajuizamento(db: Session) -> Optional[int]:
+    """Rodízio dos grupos de ajuizamento (ponteiro persistido em bbd_config)."""
+    grupos = (
+        db.query(BbGrupoAjuizamento)
+        .filter(BbGrupoAjuizamento.ativo.is_(True))
+        .order_by(BbGrupoAjuizamento.ordem, BbGrupoAjuizamento.id)
+        .all()
+    )
+    if not grupos:
+        return None
+    ponteiro = db.get(BbConfig, _CHAVE_PONTEIRO_AJUIZAMENTO)
+    if ponteiro is None:
+        ponteiro = BbConfig(chave=_CHAVE_PONTEIRO_AJUIZAMENTO, valor="-1")
+        db.add(ponteiro)
+    try:
+        ultimo = int(ponteiro.valor)
+    except (TypeError, ValueError):
+        ultimo = -1
+    proximo = (ultimo + 1) % len(grupos)
+    ponteiro.valor = str(proximo)
+    return grupos[proximo].id
+
+
+def distribuir_processo(
+    db: Session, processo: BbProcesso, *,
+    run_id: Optional[int] = None,
+    responsavel_override_id: Optional[int] = None,
+) -> BbProcesso:
     """Define escritório, responsável (fixo ou round-robin) e observação.
+
+    `responsavel_override_id` (vínculos → equipe especializada) força o
+    responsável SEM consumir o rodízio do escritório padrão — o escritório e a
+    observação seguem a distribuição normal.
 
     Muta o `processo` e registra eventos de auditoria. Não commita.
     """
@@ -111,8 +207,11 @@ def distribuir_processo(db: Session, processo: BbProcesso, *, run_id: Optional[i
         )
         return processo
 
-    # Responsável: fixo do escritório, senão round-robin
-    if escritorio.responsavel_fixo_user_id:
+    # Responsável: override da equipe especializada (vínculos) > fixo > round-robin
+    if responsavel_override_id:
+        responsavel_id = responsavel_override_id
+        modo = "equipe especializada (vínculos)"
+    elif escritorio.responsavel_fixo_user_id:
         responsavel_id = escritorio.responsavel_fixo_user_id
         modo = "responsável fixo"
     else:
@@ -122,8 +221,14 @@ def distribuir_processo(db: Session, processo: BbProcesso, *, run_id: Optional[i
     processo.escritorio_id = escritorio.id
     processo.escritorio_path = escritorio.escritorio_path
     processo.responsavel_user_id = responsavel_id
-    processo.observacao = _observacao(processo, escritorio)
+    processo.observacao = _avaliar_observacao(db, processo, escritorio)
     processo.status = PROC_DISTRIBUIDO
+
+    # Ajuizamento → atribui o grupo da vez (rodízio), gravado no processo.
+    if (processo.observacao or "").strip().lower() == "ajuizamento":
+        processo.grupo_ajuizamento_id = _proximo_grupo_ajuizamento(db)
+    else:
+        processo.grupo_ajuizamento_id = None
 
     if responsavel_id is None:
         registrar_evento(

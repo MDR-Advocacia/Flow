@@ -16,7 +16,13 @@ import {
 } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
+import EquipesTab from "@/components/distribuidos-bb/EquipesTab";
+import RegrasObservacaoTab from "@/components/distribuidos-bb/RegrasObservacaoTab";
+import GruposAjuizamentoTab from "@/components/distribuidos-bb/GruposAjuizamentoTab";
+import ClassificacoesTab from "@/components/distribuidos-bb/ClassificacoesTab";
+import ValoresPadraoTab from "@/components/distribuidos-bb/ValoresPadraoTab";
 import {
   Escritorio,
   EscritorioPayload,
@@ -82,6 +88,14 @@ function UserCombo({
 }
 
 const POLOS = ["Passivo", "Ativo", "Neutro"];
+// O cliente vem da porta de entrada do processo (coleta RPA = BB; "Importar lista
+// (Ativos)" = ATIVOS). Sem ele o roteamento mandaria o Ativos pra fila do BB —
+// os dois têm escritório "Réu" com polo Passivo.
+const CLIENTES_ESC = [
+  { valor: "", rotulo: "Qualquer cliente" },
+  { valor: "BB", rotulo: "Banco do Brasil" },
+  { valor: "ATIVOS", rotulo: "Ativos" },
+];
 
 export default function DistribuidosBBConfigPage() {
   const navigate = useNavigate();
@@ -126,6 +140,7 @@ export default function DistribuidosBBConfigPage() {
     setForm({
       nome: esc.nome,
       escritorio_path: esc.escritorio_path,
+      criterio_cliente: esc.criterio_cliente,
       criterio_polo: esc.criterio_polo,
       criterio_natureza: esc.criterio_natureza,
       responsavel_fixo_user_id: esc.responsavel_fixo_user_id,
@@ -234,7 +249,7 @@ export default function DistribuidosBBConfigPage() {
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-bold">
             <Settings className="h-6 w-6 text-[hsl(var(--dunatech-blue))]" />
-            Distribuídos BB — Configuração
+            Cadastro de Processo — Configuração
           </h1>
           <p className="text-sm text-muted-foreground">
             Escritórios, filas de responsáveis e regras. Tudo o que era fixo no robô agora é editável aqui, com base no
@@ -260,6 +275,37 @@ export default function DistribuidosBBConfigPage() {
         </div>
       </div>
 
+      <Tabs defaultValue="escritorios">
+        <TabsList className="flex-wrap">
+          <TabsTrigger value="escritorios">Escritórios &amp; Filas</TabsTrigger>
+          <TabsTrigger value="equipes">Equipes / Envolvidos</TabsTrigger>
+          <TabsTrigger value="regras">Regras de Observação</TabsTrigger>
+          <TabsTrigger value="grupos">Grupos de Ajuizamento</TabsTrigger>
+          <TabsTrigger value="classificacoes">Classificações</TabsTrigger>
+          <TabsTrigger value="valores">Valores Padrão</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="equipes" className="mt-4">
+          <EquipesTab />
+        </TabsContent>
+
+        <TabsContent value="regras" className="mt-4">
+          <RegrasObservacaoTab />
+        </TabsContent>
+
+        <TabsContent value="grupos" className="mt-4">
+          <GruposAjuizamentoTab />
+        </TabsContent>
+
+        <TabsContent value="classificacoes" className="mt-4">
+          <ClassificacoesTab />
+        </TabsContent>
+
+        <TabsContent value="valores" className="mt-4">
+          <ValoresPadraoTab />
+        </TabsContent>
+
+        <TabsContent value="escritorios" className="mt-4">
       {loading && escritorios.length === 0 ? (
         <div className="py-16 text-center">
           <Loader2 className="mx-auto h-6 w-6 animate-spin text-muted-foreground" />
@@ -294,6 +340,18 @@ export default function DistribuidosBBConfigPage() {
                   </div>
                 </div>
                 <div className="mt-1 flex flex-wrap gap-1">
+                  {esc.criterio_cliente && (
+                    <Badge
+                      className={
+                        esc.criterio_cliente === "ATIVOS"
+                          ? "bg-violet-100 text-violet-700"
+                          : "bg-yellow-100 text-yellow-800"
+                      }
+                      variant="secondary"
+                    >
+                      {esc.criterio_cliente === "ATIVOS" ? "Ativos" : "Banco do Brasil"}
+                    </Badge>
+                  )}
                   {esc.criterio_polo && <Badge variant="secondary">Polo: {esc.criterio_polo}</Badge>}
                   {esc.criterio_natureza && <Badge variant="secondary">Natureza: {esc.criterio_natureza}</Badge>}
                   {esc.observacao_padrao && <Badge variant="outline">Obs: {esc.observacao_padrao}</Badge>}
@@ -351,6 +409,8 @@ export default function DistribuidosBBConfigPage() {
           ))}
         </div>
       )}
+        </TabsContent>
+      </Tabs>
 
       {/* Dialog de novo/editar escritório */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
@@ -371,6 +431,24 @@ export default function DistribuidosBBConfigPage() {
                 onChange={(e) => setForm((f) => ({ ...f, escritorio_path: e.target.value }))}
                 placeholder="MDR Advocacia / Área operacional / Banco do Brasil / Réu"
               />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Critério — Cliente</Label>
+              <select
+                className="h-9 w-full rounded-md border bg-background px-2 text-sm"
+                value={form.criterio_cliente ?? ""}
+                onChange={(e) => setForm((f) => ({ ...f, criterio_cliente: e.target.value || null }))}
+              >
+                {CLIENTES_ESC.map((c) => (
+                  <option key={c.valor} value={c.valor}>
+                    {c.rotulo}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-muted-foreground">
+                De qual cliente este escritório recebe. Banco do Brasil e Ativos têm escritórios
+                com o mesmo polo — sem este critério os processos se misturariam entre as filas.
+              </p>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">

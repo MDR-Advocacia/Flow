@@ -20,6 +20,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -72,6 +73,53 @@ SECAO_CONTATOS = "Contatos"
 SECAO_CADASTRO = "Cadastro"
 SECAO_CONFIGURACAO = "Configuração"
 SECAO_SESSAO = "Sessão"  # login/OneLog
+SECAO_PLANILHA = "Planilha"  # geração/arquivamento da planilha de migração
+
+# Origem de uma planilha gerada
+PLANILHA_AUTOMATICA = "AUTOMATICA"  # gerada ao fim de uma coleta (manual ou agendada)
+PLANILHA_MANUAL = "MANUAL"          # gerada pelo botão "Gerar planilha"
+
+# Cliente dono do processo (mesma interface, motores de ingestão diferentes):
+# BB vem do portal do Banco do Brasil (coleta+ciência); ATIVOS vem de lista seca
+# enriquecida via DataJud. Default BB (os existentes são todos do Banco do Brasil).
+CLIENTE_BB = "BB"
+CLIENTE_ATIVOS = "ATIVOS"
+# Pasta avulsa de outro cliente (modal de criação manual): a tag fica OUTRO e o
+# nome/CNPJ reais vão em cliente_nome/cliente_cpf_cnpj do processo.
+CLIENTE_OUTRO = "OUTRO"
+
+# Marca a parte contrária quando a planilha da Ativos não traz o nome (só 16%
+# das linhas vêm preenchidas). O operador completa depois.
+PARTE_A_CLASSIFICAR = "À CLASSIFICAR"
+
+# Vínculos (processos em comum da parte com o BB, conduzidos pelo MDR):
+#   CENARIO_1 = a parte tinha processo(s) conosco FORA da equipe especializada —
+#     o novo vai pra Equipe Mista e os antigos ficam sinalizados no painel pra
+#     transição manual pelo supervisor;
+#   CENARIO_2 = a parte já é tratada pela equipe especializada — o novo vai pro
+#     MESMO responsável que já cuida dos processos dela.
+VINCULO_CENARIO_1 = "CENARIO_1"
+VINCULO_CENARIO_2 = "CENARIO_2"
+# Nome do escritório-fila da equipe especializada (só fila de responsáveis; o
+# escritório responsável do processo segue a distribuição padrão Réu/Autor).
+EQUIPE_MISTA_NOME = "Equipe Mista Especializada"
+
+# Status da consulta DataJud (Ativos) — feita UMA vez, na ingestão (sem worker
+# recorrente depois, por decisão do operador):
+#   OK = capa encontrada e aplicada; SEM_CAPA = não achou (segue com a planilha).
+#   PENDENTE ficou legado (processos de antes da mudança).
+DATAJUD_PENDENTE = "pendente"
+DATAJUD_OK = "ok"
+DATAJUD_SEM_CAPA = "sem_capa"
+
+# Ciclo do processo no POOL até o cadastro confirmar no Legal One:
+#   NOVO = distribuído, aguardando o operador gerar a planilha;
+#   PENDENTE_CADASTRO = planilha gerada, aguardando o cadastro aparecer no L1
+#     (o monitor bate na API do L1 de 2 em 2 min procurando por CNJ+escritório);
+#   CADASTRADO_L1 = o monitor achou a pasta no Legal One = cadastro confirmado.
+POOL_NOVO = "NOVO"
+POOL_PENDENTE_CADASTRO = "PENDENTE_CADASTRO"
+POOL_CADASTRADO_L1 = "CADASTRADO_L1"
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -88,6 +136,8 @@ class BbEscritorio(Base):
     """
 
     __tablename__ = "bbd_escritorios"
+    # NOTA: `criterio_cliente` (abaixo) é o que impede o processo do Ativos de cair
+    # na fila do Banco do Brasil — os dois têm escritório "Réu" com polo Passivo.
 
     id = Column(Integer, primary_key=True, index=True)
     nome = Column(String(120), nullable=False)  # ex.: "Réu", "Autor", "Trabalhista"
@@ -95,6 +145,7 @@ class BbEscritorio(Base):
     escritorio_path = Column(Text, nullable=False)
 
     # Critérios de roteamento (o motor escolhe este escritório quando batem)
+    criterio_cliente = Column(String(20), nullable=True)   # BB | ATIVOS | None(qualquer)
     criterio_polo = Column(String(20), nullable=True)      # Passivo | Ativo | Neutro
     criterio_natureza = Column(String(80), nullable=True)  # ex.: "Trabalhista"
 
@@ -247,6 +298,12 @@ class BbProcesso(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
+    cliente = Column(String(20), nullable=False, server_default=CLIENTE_BB, index=True)
+    # Cliente POR PROCESSO (pasta avulsa): quando preenchido, a planilha de
+    # migração usa estes valores em vez da config global do cliente (BB/Ativos).
+    cliente_nome = Column(String(200), nullable=True)
+    cliente_cpf_cnpj = Column(String(30), nullable=True)
+    cliente_tipo = Column(String(5), nullable=True)  # PF | PJ
     run_id = Column(Integer, ForeignKey("bbd_runs.id", ondelete="SET NULL"), nullable=True, index=True)
 
     # Identidade / dedup (fingerprint = cnj or npj)
@@ -276,6 +333,11 @@ class BbProcesso(Base):
     )
     escritorio_path = Column(Text, nullable=True)
     observacao = Column(String(40), nullable=True)  # Cadastro | Ajuizamento | Reterceirizado
+    # Grupo de ajuizamento atribuído (rodízio) quando a observação é Ajuizamento
+    grupo_ajuizamento_id = Column(
+        Integer, ForeignKey("bbd_grupos_ajuizamento.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
 
     # Ciclo de vida
     status = Column(String, nullable=False, server_default=PROC_COLETADO, index=True)
@@ -283,6 +345,30 @@ class BbProcesso(Base):
     l1_lawsuit_id = Column(Integer, nullable=True, index=True)
     l1_workflow_task_id = Column(Integer, nullable=True)
     erro = Column(Text, nullable=True)
+
+    # Pool: NOVO → (gera planilha) PENDENTE_CADASTRO → (monitor L1) CADASTRADO_L1.
+    planilha_status = Column(
+        String(20), nullable=False, server_default=POOL_NOVO, index=True,
+    )
+    planilha_id = Column(
+        Integer, ForeignKey("bbd_planilhas.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    planilha_gerada_em = Column(DateTime(timezone=True), nullable=True)
+    # Monitor de cadastro no Legal One
+    cadastro_confirmado_em = Column(DateTime(timezone=True), nullable=True)
+    l1_verificado_em = Column(DateTime(timezone=True), nullable=True)
+    l1_folder = Column(String(40), nullable=True)
+
+    # Vínculos da parte (processos em comum com o MDR no portal BB)
+    vinculo_cenario = Column(String(12), nullable=True, index=True)  # CENARIO_1 | CENARIO_2 | None
+    vinculos_qtd = Column(Integer, nullable=False, server_default="0")
+    vinculos_verificado_em = Column(DateTime(timezone=True), nullable=True)
+
+    # Enriquecimento DataJud (Ativos): a planilha é a fonte primária; o DataJud
+    # complementa de forma ASSÍNCRONA (reconsulta os pendentes, pois o processo
+    # recém-distribuído pode ainda não estar indexado na base pública).
+    datajud_status = Column(String(20), nullable=True, index=True)  # pendente | ok | sem_capa
+    datajud_verificado_em = Column(DateTime(timezone=True), nullable=True)
 
     # Auditoria bruta (capa do NPJ / HTML de origem)
     raw = Column(jsonb(), nullable=True)
@@ -329,6 +415,68 @@ class BbEnvolvido(Base):
     processo = relationship("BbProcesso", back_populates="envolvidos")
 
 
+class BbVinculo(Base):
+    """Um processo EXISTENTE no portal BB em que a parte do processo capturado
+    também é parte — ativo e conduzido pelo MDR (vínculo confirmado).
+
+    Alimenta o painel "Acompanhamento Réu/Autor" e a distribuição especializada.
+    `transicao_pendente` marca o cenário 1: o processo antigo ainda está com o
+    responsável original e o supervisor precisa conduzir a transição manual.
+    """
+
+    __tablename__ = "bbd_vinculos"
+
+    id = Column(Integer, primary_key=True, index=True)
+    processo_id = Column(
+        Integer, ForeignKey("bbd_processos.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    envolvido_id = Column(
+        Integer, ForeignKey("bbd_envolvidos.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+
+    # Parte pesquisada
+    doc_parte = Column(String(20), nullable=True, index=True)
+    nome_parte = Column(Text, nullable=True)
+    numero_pessoa = Column(Integer, nullable=True)
+
+    # O processo vinculado (como veio do portal)
+    npj = Column(String(30), nullable=False, index=True)   # 2024/0323492-000
+    numero_processo = Column(String(20), nullable=True)    # 20240323492 (cru)
+    cnj = Column(String(30), nullable=True, index=True)    # dígitos, quando houver
+    contrario_nome = Column(Text, nullable=True)
+    advogado_bb = Column(String(120), nullable=True)
+    situacao = Column(String(60), nullable=True)           # Distribuído, Cumprimento…
+    natureza = Column(String(40), nullable=True)
+    uja = Column(Integer, nullable=True)
+    polo = Column(String(10), nullable=True)               # Ativo | Passivo (lado do banco)
+    posicao_banco = Column(String(10), nullable=True)      # Autor | Réu
+
+    # Pasta no Legal One, quando o vinculado também está na nossa base (casado
+    # por CNJ/NPJ) — dá o link direto pro processo no L1 a partir do painel.
+    l1_lawsuit_id = Column(Integer, nullable=True, index=True)
+    l1_folder = Column(String(40), nullable=True)
+
+    # Situação da condução interna (pra decidir cenário 1 × 2)
+    responsavel_atual_user_id = Column(
+        Integer, ForeignKey("legal_one_users.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    responsavel_atual_nome = Column(String(160), nullable=True)
+    na_equipe_mista = Column(Boolean, nullable=False, server_default="false")
+    # Cenário 1: antigo aguardando a transição manual pro especializado
+    transicao_pendente = Column(Boolean, nullable=False, server_default="false", index=True)
+    transicao_concluida_em = Column(DateTime(timezone=True), nullable=True)
+
+    raw = Column(jsonb(), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+    processo = relationship("BbProcesso", foreign_keys=[processo_id])
+    responsavel_atual = relationship("LegalOneUser", foreign_keys=[responsavel_atual_user_id])
+
+
 class BbEvento(Base):
     """LOG universal + auditoria: cada seção, cada dado, cada passo.
 
@@ -353,3 +501,278 @@ class BbEvento(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
 
     processo = relationship("BbProcesso", back_populates="eventos")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Configuração editável — regras que estavam hardcoded no gerar_planilha.py
+# (tabeladas pra edição na tela administrativa do módulo)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class BbClassificacao(Base):
+    """Catálogo de classificações/posições de envolvido (Advogado, Assistente…).
+
+    Serve pra planilha (coluna "Posição" + "Situação") e pro cadastro via API
+    (mapeia pro tipo de participante e positionId do Legal One).
+    """
+
+    __tablename__ = "bbd_classificacoes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String(80), nullable=False)               # ex.: "Advogado", "Assistente"
+    situacao = Column(String(40), nullable=True, server_default="Outros")  # col "Situação" da planilha
+    # Mapa pro cadastro via API do L1
+    participante_tipo = Column(String(20), nullable=True)   # Customer | PersonInCharge | OtherParty
+    position_id_l1 = Column(Integer, nullable=True)         # LitigationParticipantPositions
+
+    ativo = Column(Boolean, nullable=False, server_default="true")
+    ordem = Column(Integer, nullable=False, server_default="0")
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+
+class BbRegraObservacao(Base):
+    """Regra que decide o TEXTO do campo Observações (Ajuizamento/Reterceirizado/
+    Cadastro…). Avaliadas por `ordem`; a primeira que casar vence.
+    """
+
+    __tablename__ = "bbd_regras_observacao"
+
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String(120), nullable=False)
+    # Critérios (todos opcionais; None = "qualquer")
+    # O cliente vem carimbado pela PORTA DE ENTRADA do processo (coleta RPA = BB;
+    # "Importar lista (Ativos)" = ATIVOS), então é um critério confiável — e é o
+    # que impede a regra do BB ("Réu → Cadastro") de vazar pro Ativos e vice-versa.
+    criterio_cliente = Column(String(20), nullable=True)     # BB | ATIVOS | None
+    criterio_posicao = Column(String(20), nullable=True)     # Réu | Autor | Interessado
+    criterio_natureza = Column(String(80), nullable=True)    # ex.: "Trabalhista"
+    criterio_cnj = Column(String(10), nullable=True)         # "com" | "sem" | None
+    texto = Column(String(120), nullable=False)              # o valor gravado na Observação
+
+    ativo = Column(Boolean, nullable=False, server_default="true")
+    ordem = Column(Integer, nullable=False, server_default="0")
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+
+class BbGrupoAjuizamento(Base):
+    """Grupo (dupla) de ajuizamento — advogado + assistente aplicados como
+    envolvidos quando a observação é "Ajuizamento". Os grupos ativos são
+    alternados (rodízio) entre os processos de ajuizamento.
+    """
+
+    __tablename__ = "bbd_grupos_ajuizamento"
+
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String(120), nullable=False)
+    ativo = Column(Boolean, nullable=False, server_default="true")
+    ordem = Column(Integer, nullable=False, server_default="0")
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+    membros = relationship(
+        "BbGrupoAjuizamentoMembro", back_populates="grupo",
+        cascade="all, delete-orphan", order_by="BbGrupoAjuizamentoMembro.ordem",
+    )
+
+
+class BbGrupoAjuizamentoMembro(Base):
+    """Membro de um grupo de ajuizamento (com sua classificação)."""
+
+    __tablename__ = "bbd_grupo_ajuizamento_membros"
+
+    id = Column(Integer, primary_key=True, index=True)
+    grupo_id = Column(
+        Integer, ForeignKey("bbd_grupos_ajuizamento.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    membro_user_id = Column(
+        Integer, ForeignKey("legal_one_users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    classificacao = Column(String(80), nullable=False)  # "Advogado Ajuizamento", "Assistente Ajuizamento"
+    ordem = Column(Integer, nullable=False, server_default="0")
+    ativo = Column(Boolean, nullable=False, server_default="true")
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    grupo = relationship("BbGrupoAjuizamento", back_populates="membros")
+    membro = relationship("LegalOneUser", foreign_keys=[membro_user_id])
+
+
+class BbConfig(Base):
+    """Valores padrão do módulo (chave/valor) — os constantes do script antigo.
+
+    Ex.: cliente_nome=Banco do Brasil S.A., cliente_contact_id=21,
+    cliente_cpf_cnpj=00.000.000/0001-91, cliente_tipo=PJ, tipo_registro=Processo,
+    tipo=Judicial, status=Ativo, escritorio_origem=MDR Advocacia,
+    situacao_envolvido=Outros, ajuizamento_ultimo_indice=-1 (rodízio).
+    """
+
+    __tablename__ = "bbd_config"
+
+    chave = Column(String(60), primary_key=True)
+    valor = Column(Text, nullable=True)
+    descricao = Column(Text, nullable=True)
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False,
+    )
+
+
+class BbPlanilha(Base):
+    """Planilha de migração do Legal One gerada e arquivada.
+
+    Cada passagem do RPA (agendada ou manual) gera uma planilha ao final e a
+    guarda aqui (o xlsx inteiro fica no banco em `conteudo`). O operador vê o
+    histórico, baixa e marca `subido_legalone` quando já importou no L1.
+    """
+
+    __tablename__ = "bbd_planilhas"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(
+        Integer, ForeignKey("bbd_runs.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    nome_arquivo = Column(String(200), nullable=False)
+    conteudo = Column(LargeBinary, nullable=False)              # xlsx completo
+    total_processos = Column(Integer, nullable=False, server_default="0")
+    tamanho_bytes = Column(Integer, nullable=False, server_default="0")
+    origem = Column(String(20), nullable=False, server_default=PLANILHA_MANUAL)
+    status_origem = Column(String(20), nullable=True)          # ex.: DISTRIBUIDO
+
+    # Marcação do operador: já subi essa planilha no Legal One?
+    subido_legalone = Column(
+        Boolean, nullable=False, server_default="false", index=True,
+    )
+    subido_em = Column(DateTime(timezone=True), nullable=True)
+    subido_por_user_id = Column(
+        Integer, ForeignKey("legal_one_users.id", ondelete="SET NULL"), nullable=True,
+    )
+
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True,
+    )
+
+    run = relationship("BbRun")
+    subido_por = relationship("LegalOneUser", foreign_keys=[subido_por_user_id])
+
+
+# Status de um lote de ingestão Ativos
+LOTE_EM_ANDAMENTO = "EM_ANDAMENTO"
+LOTE_CONCLUIDO = "CONCLUIDO"
+LOTE_ERRO = "ERRO"
+
+# Por que um CNJ da planilha Ativos foi pulado (não recadastrado). Os dois casos
+# hoje caem no mesmo contador `duplicados`; a lista de detalhe os distingue.
+DUP_JA_CADASTRADO = "JA_CADASTRADO"   # veio na aba "JÁ CADASTRADO" da própria planilha
+DUP_REPETIDO_LOTE = "REPETIDO_LOTE"   # já existia como BbProcesso (lote anterior)
+DUP_MOTIVO_LABEL = {
+    DUP_JA_CADASTRADO: 'Já marcado como cadastrado na planilha',
+    DUP_REPETIDO_LOTE: 'Repetido de importação anterior',
+}
+
+
+class BbAtivosLote(Base):
+    """Um upload de lista seca da Ativos (números de processo).
+
+    Rastreia o enriquecimento via DataJud com progresso (server-backed): cada CNJ
+    vira um processo (cliente=ATIVOS) com a capa preenchida; partes e valor ficam
+    de lacuna manual.
+    """
+
+    __tablename__ = "bbd_ativos_lotes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    nome_arquivo = Column(String(200), nullable=True)
+    total = Column(Integer, nullable=False, server_default="0")
+    processados = Column(Integer, nullable=False, server_default="0")
+    encontrados = Column(Integer, nullable=False, server_default="0")     # DataJud achou a capa
+    nao_encontrados = Column(Integer, nullable=False, server_default="0")  # sem capa no DataJud
+    criados = Column(Integer, nullable=False, server_default="0")          # processos novos
+    duplicados = Column(Integer, nullable=False, server_default="0")       # já existiam
+    invalidos = Column(Integer, nullable=False, server_default="0")        # número inválido
+
+    status = Column(String(20), nullable=False, server_default=LOTE_EM_ANDAMENTO, index=True)
+    erro = Column(Text, nullable=True)
+    disparado_por_user_id = Column(
+        Integer, ForeignKey("legal_one_users.id", ondelete="SET NULL"), nullable=True,
+    )
+    iniciado_em = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    concluido_em = Column(DateTime(timezone=True), nullable=True)
+
+
+class BbAtivosDuplicado(Base):
+    """CNJ da planilha Ativos que foi PULADO na ingestão (não recadastrado).
+
+    Antes o duplicado só incrementava um contador volátil no lote; aqui ele fica
+    persistido e rastreável — pro operador ver QUAIS voltaram, de qual lote, por
+    qual motivo, e (resolvido sob demanda) em qual pasta do L1 ele já vive. É
+    dessa lista que sai o agendamento de tarefa em lote.
+    """
+
+    __tablename__ = "bbd_ativos_duplicados"
+    __table_args__ = (
+        # O mesmo CNJ pode reaparecer em lotes diferentes; único por (lote, cnj).
+        UniqueConstraint("lote_id", "cnj_digitos", name="uq_bbd_ativos_dup_lote_cnj"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    lote_id = Column(
+        Integer, ForeignKey("bbd_ativos_lotes.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    cnj = Column(String(30), nullable=False)            # formatado (com máscara)
+    cnj_digitos = Column(String(20), nullable=False, index=True)  # só dígitos (join/dedupe)
+    motivo = Column(String(20), nullable=False)         # DUP_JA_CADASTRADO | DUP_REPETIDO_LOTE
+    parte = Column(String(200), nullable=True)          # adverso da planilha, se veio
+
+    # Resolvidos sob demanda contra o L1 (pra dar o link e permitir a tarefa):
+    l1_lawsuit_id = Column(Integer, nullable=True, index=True)
+    l1_folder = Column(String(60), nullable=True)
+    l1_resolvido_em = Column(DateTime(timezone=True), nullable=True)
+
+    criado_em = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    lote = relationship("BbAtivosLote")
+
+
+# Status de um job de agendamento de tarefa em lote (sobre os duplicados)
+AGEND_EM_ANDAMENTO = "EM_ANDAMENTO"
+AGEND_CONCLUIDO = "CONCLUIDO"
+AGEND_ERRO = "ERRO"
+
+
+class BbAtivosAgendamentoJob(Base):
+    """Um disparo de 'agendar tarefa em lote' sobre duplicados Ativos selecionados.
+
+    Server-backed com progresso (padrão da casa): a UI dispara, um worker cria as
+    tarefas no L1 uma a uma (create_task + vínculo à pasta) e a barra acompanha
+    por polling. `dry_run=True` NÃO escreve no L1 — só simula o plano (quantas
+    tarefas, pra quem). `itens` guarda o resultado por pasta (task_id/erro).
+    """
+
+    __tablename__ = "bbd_ativos_agend_jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    status = Column(String(20), nullable=False, server_default=AGEND_EM_ANDAMENTO, index=True)
+    dry_run = Column(Boolean, nullable=False, server_default="false")
+
+    total = Column(Integer, nullable=False, server_default="0")
+    processados = Column(Integer, nullable=False, server_default="0")
+    criados = Column(Integer, nullable=False, server_default="0")
+    falhas = Column(Integer, nullable=False, server_default="0")
+    pulados = Column(Integer, nullable=False, server_default="0")  # já tinham a tarefa
+
+    config = Column(jsonb(), nullable=True)   # campos da tarefa (subtipo, prazo, etc.)
+    itens = Column(jsonb(), nullable=True)     # [{duplicado_id, cnj, lawsuit_id, responsavel_id, status, task_id, erro}]
+    erro = Column(Text, nullable=True)
+
+    disparado_por_user_id = Column(
+        Integer, ForeignKey("legal_one_users.id", ondelete="SET NULL"), nullable=True,
+    )
+    iniciado_em = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    concluido_em = Column(DateTime(timezone=True), nullable=True)

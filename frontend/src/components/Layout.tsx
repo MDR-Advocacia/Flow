@@ -1,6 +1,7 @@
 import { PropsWithChildren, useMemo, useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import {
+  Archive,
   Building2,
   CalendarClock,
   ChevronDown,
@@ -27,7 +28,7 @@ import {
 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
-import { TEAMS } from "@/lib/teams";
+import { gruposDeEquipes, useTeams } from "@/lib/teams";
 import { Button } from "./ui/button";
 import {
   DropdownMenu,
@@ -40,7 +41,7 @@ import {
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "./ui/sheet";
 import { DunaFlowMark } from "./DunaFlowMark";
 
-type Permission = 'canScheduleBatch' | 'canUsePublications' | 'canUsePrazosIniciais' | 'canUseOnerequest' | 'canUseMinhaEquipe' | 'isAdmin';
+type Permission = 'canScheduleBatch' | 'canUsePublications' | 'canUsePrazosIniciais' | 'canUseOnerequest' | 'canUseEncerramentos' | 'canUseMinhaEquipe' | 'canManageDistribuidosBB' | 'isAdmin';
 
 interface NavItem {
   to: string;
@@ -69,11 +70,16 @@ export default function Layout({ children }: PropsWithChildren) {
     canUsePublications,
     canUsePrazosIniciais,
     canUseOnerequest,
+    canUseEncerramentos,
     canUseMinhaEquipe,
     minhaEquipeEquipes,
+    canManageDistribuidosBB,
     isAdmin,
   } = useAuth();
   const navigate = useNavigate();
+  // Catálogo de equipes vem do backend (admin cria/renomeia sem deploy); até
+  // chegar, o hook devolve o fallback embutido e re-renderiza quando carrega.
+  const teams = useTeams();
 
   // Seções recolhíveis da sidebar — estado por seção, persistido em localStorage
   // (cada usuário lembra o que deixou fechado). Default: tudo aberto.
@@ -103,7 +109,9 @@ export default function Layout({ children }: PropsWithChildren) {
     // Admin vê o item mesmo sem a flag explícita (bypass alinhado com o backend).
     if (perm === 'canUsePrazosIniciais') return canUsePrazosIniciais || isAdmin;
     if (perm === 'canUseOnerequest') return canUseOnerequest || isAdmin;
+    if (perm === 'canUseEncerramentos') return canUseEncerramentos || isAdmin;
     if (perm === 'canUseMinhaEquipe') return canUseMinhaEquipe || isAdmin;
+    if (perm === 'canManageDistribuidosBB') return canManageDistribuidosBB || isAdmin;
     if (perm === 'isAdmin') return isAdmin;
     return false;
   };
@@ -119,7 +127,7 @@ export default function Layout({ children }: PropsWithChildren) {
         { to: "/ged-legalone", icon: Upload, label: "Envio em Lote ao GED", requirePermission: 'canScheduleBatch' },
         { to: "/contatos-legalone", icon: Contact, label: "Atualização de Contatos", requirePermission: 'canScheduleBatch' },
         { to: "/cancelamento-duplicadas", icon: CopyX, label: "Cancelar Duplicadas", requirePermission: 'isAdmin' },
-        { to: "/distribuidos-bb/dashboard", icon: Building2, label: "Distribuídos BB", requirePermission: 'isAdmin' },
+        { to: "/distribuidos-bb/dashboard", icon: Building2, label: "Cadastro de Processo", requirePermission: 'canManageDistribuidosBB' },
       ],
     },
     {
@@ -151,6 +159,12 @@ export default function Layout({ children }: PropsWithChildren) {
       ],
     },
     {
+      title: "Encerramentos",
+      items: [
+        { to: "/encerramentos-legalone", icon: Archive, label: "Encerramentos no Legal One", requirePermission: 'canUseEncerramentos' },
+      ],
+    },
+    {
       title: "OneRequest",
       items: [
         { to: "/onerequest", icon: Inbox, label: "DMIs Banco do Brasil", requirePermission: 'canUseOnerequest' },
@@ -159,9 +173,9 @@ export default function Layout({ children }: PropsWithChildren) {
     },
     {
       title: "Minha Equipe",
-      subgroups: ["Contencioso Passivo", "Recuperação de Crédito"].map((grupo) => ({
+      subgroups: gruposDeEquipes(teams).map((grupo) => ({
         title: grupo,
-        items: TEAMS.filter((t) => t.grupo === grupo).map((t) => ({
+        items: teams.filter((t) => t.grupo === grupo).map((t) => ({
           to: `/minha-equipe/${t.key}`,
           icon: Gauge,
           label: t.label,
@@ -190,7 +204,9 @@ export default function Layout({ children }: PropsWithChildren) {
         return { ...sec, items: (sec.items ?? []).filter(okItem) };
       })
       .filter((sec) => (sec.subgroups ? sec.subgroups.length > 0 : (sec.items?.length ?? 0) > 0));
-  }, [canScheduleBatch, canUsePublications, canUsePrazosIniciais, canUseOnerequest, canUseMinhaEquipe, minhaEquipeEquipes, isAdmin]);
+    // `teams` entra nas deps: o catálogo chega DEPOIS do primeiro paint (fetch)
+    // e sem isto o menu ficaria congelado no fallback embutido.
+  }, [canScheduleBatch, canUsePublications, canUsePrazosIniciais, canUseOnerequest, canUseEncerramentos, canUseMinhaEquipe, minhaEquipeEquipes, isAdmin, teams]);
 
   const handleLogout = () => {
     logout();

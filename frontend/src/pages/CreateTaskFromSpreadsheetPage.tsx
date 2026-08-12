@@ -34,6 +34,7 @@ import {
   pauseBatchExecution,
   resumeBatchExecution,
 } from "@/services/api";
+import AcessoriosMenu from "@/components/tarefas-planilha/AcessoriosMenu";
 import BatchExecutionsPage from "./BatchExecutionsPage";
 
 
@@ -336,6 +337,7 @@ const CreateTaskFromSpreadsheetPage = () => {
         </div>
         {tab === "criar" && (
         <div className="flex gap-2">
+          <AcessoriosMenu />
           <Dialog>
             <DialogTrigger asChild>
               <Button variant="outline" size="sm">

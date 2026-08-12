@@ -1,8 +1,7 @@
 """Create OneNotify BB notification intake table
 
 Revision ID: onb001_onenotify_bb
-Revises: bbd001_distribuidos_bb, bp001, bp002, con001, not001_admin_notices,
-    pha005, pin006, usr003_onerequest_notifications, var003
+Revises: pub008_captura_conhecimento
 Create Date: 2026-08-11
 """
 
@@ -11,17 +10,7 @@ import sqlalchemy as sa
 
 
 revision = "onb001_onenotify_bb"
-down_revision = (
-    "bbd001_distribuidos_bb",
-    "bp001",
-    "bp002",
-    "con001",
-    "not001_admin_notices",
-    "pha005",
-    "pin006",
-    "usr003_onerequest_notifications",
-    "var003",
-)
+down_revision = "pub008_captura_conhecimento"
 branch_labels = None
 depends_on = None
 

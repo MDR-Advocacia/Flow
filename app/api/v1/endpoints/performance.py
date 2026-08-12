@@ -18,7 +18,7 @@ from app.models.legal_one import LegalOneUser
 from app.services.performance import relatorios as rel_jobs
 from app.services.performance.report import build_individual_pdf, build_sector_pdf
 from app.services.performance.service import PerformanceService
-from app.services.performance.teams import TEAM_KEYS
+from app.services.performance.teams import team_keys
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def require_team_access(
     current_user: LegalOneUser = Depends(get_current_user),
 ) -> str:
     """Gate por time: admin vê todos; demais precisam do time liberado na árvore."""
-    if team not in TEAM_KEYS:
+    if team not in team_keys():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
     if getattr(current_user, "role", "user") == "admin":
         return team
@@ -61,13 +61,34 @@ _team = Depends(require_team_access)
 
 
 def _require_admin_only(current_user: LegalOneUser = Depends(get_current_user)) -> LegalOneUser:
-    """Manutenção do roster é só pra admin (muda atribuição de todos os times)."""
+    """Restrito a admin (sobrou só pra rotinas globais, ex.: cancel-whitelist)."""
     if getattr(current_user, "role", "user") != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Restrito a administradores.")
     return current_user
 
 
 _adminonly = Depends(_require_admin_only)
+
+
+def _exigir_acesso_ao_time(current_user: LegalOneUser, team: str) -> None:
+    """Mesma regra do require_team_access, mas pra quando o time não vem na query
+    (vem do corpo ou da própria pessoa). Admin passa; demais precisam do menu do
+    módulo + o time liberado na árvore."""
+    if getattr(current_user, "role", "user") == "admin":
+        return  # admin passa mesmo com equipe legada fora do catálogo
+    if team not in team_keys():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
+    if not getattr(current_user, "can_use_minha_equipe", False):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sem permissão para o Minha Equipe.")
+    if team not in _user_teams(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sem acesso a este time.")
+
+
+def _equipe_da_pessoa(db: Session, pessoa_id: int) -> Optional[str]:
+    from sqlalchemy import text
+
+    row = db.execute(text("SELECT equipe FROM perf_pessoa WHERE id = :id"), {"id": pessoa_id}).fetchone()
+    return row[0] if row else None
 
 
 @router.get("/equipe", summary="Lista o time com métricas + KPIs", dependencies=[_team])
@@ -98,9 +119,53 @@ def pessoa(
     return out
 
 
+@router.get(
+    "/pessoa/{pessoa_id}/atrasadas-por-tipo",
+    summary="Quebra por subtipo do pool de uma pessoa (pizza do painel)",
+    dependencies=[_team],
+)
+def pessoa_atrasadas_por_tipo(
+    pessoa_id: int,
+    team: str = Query(...),
+    escopo: str = Query("atrasado", pattern="^(atrasado|pendente)$"),
+    db: Session = Depends(get_db),
+):
+    out = PerformanceService(db).atrasadas_por_tipo(pessoa_id, escopo=escopo)
+    if out is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pessoa não encontrada.")
+    return out
+
+
 @router.get("/tipos", summary="Mapa de impacto por subtipo (do time)", dependencies=[_team])
 def tipos(team: str = Query(...), days: int = Query(30, ge=1, le=365), db: Session = Depends(get_db)):
     return {"tipos": PerformanceService(db).tipos(days=days, team=team)}
+
+
+# ── Reagendamentos (adiamentos de prazo) — board por time ─────────────────
+@router.get("/reagendamentos", summary="Board de reagendamentos (adiamentos) do time", dependencies=[_team])
+def reagendamentos(team: str = Query(...), days: int = Query(30, ge=1, le=180), db: Session = Depends(get_db)):
+    from app.services.performance import reagendamento_service as reag
+
+    return reag.resumo(db, equipe=team, dias=days)
+
+
+@router.get("/reagendamentos/eventos", summary="Lista paginada dos adiamentos (drill)", dependencies=[_team])
+def reagendamentos_eventos(
+    team: str = Query(...),
+    pessoa_id: Optional[int] = Query(None),
+    dia: Optional[str] = Query(None, description="YYYY-MM-DD — clicou na barra do dia"),
+    subtipo: Optional[str] = Query(None, description="clicou na barra do tipo"),
+    days: int = Query(30, ge=1, le=180),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    from app.services.performance import reagendamento_service as reag
+
+    return reag.lista_eventos(
+        db, equipe=team, pessoa_id=pessoa_id, dia=dia, subtipo=subtipo,
+        dias=days, limit=limit, offset=offset,
+    )
 
 
 @router.get("/dashboard", summary="Painel do time: vazão, pool/atrasado, jornada, top tipos", dependencies=[_team])
@@ -296,7 +361,7 @@ def criar_relatorio(
     current_user: LegalOneUser = Depends(_require_minha_equipe),
     db: Session = Depends(get_db),
 ):
-    if req.team not in TEAM_KEYS:
+    if req.team not in team_keys():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
     if getattr(current_user, "role", "user") != "admin" and req.team not in _user_teams(current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sem acesso a este time.")
@@ -335,35 +400,108 @@ def baixar_relatorio(
 # ── Ingestão dos dados (download do relatório do L1) ──────────────────────
 @router.get("/sync", summary="Último sync da ingestão (download do relatório do L1)", dependencies=[_admin])
 def sync_status(db: Session = Depends(get_db)):
-    from app.services.performance.report_ingest import get_last_sync, ja_sincronizou_hoje
+    import datetime as _dt
 
-    return {"last_sync": get_last_sync(), "ja_sincronizou_hoje": ja_sincronizou_hoje()}
+    from app.services.performance.report_ingest import (
+        get_last_sync, get_sync_running, ja_sincronizou_hoje,
+    )
+
+    return {
+        "last_sync": get_last_sync(),
+        "ja_sincronizou_hoje": ja_sincronizou_hoje(),
+        # Estado da atualização em andamento (pro banner/barra global + trava).
+        "running": get_sync_running(),
+        "server_now": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
 
 
 def _run_sync_bg() -> None:
     from app.db.session import SessionLocal
-    from app.services.performance.report_ingest import baixar_e_ingerir
+    from app.services.onerequest._concurrency import single_worker_lock
+    from app.services.performance.ingest_worker import _LOCK_KEY
+    from app.services.performance.report_ingest import (
+        atualizar_fase_sync, baixar_e_ingerir, gerar_e_ingerir, limpar_sync_rodando,
+    )
 
-    db = SessionLocal()
-    try:
-        baixar_e_ingerir(db, force=True)
-    except Exception:  # noqa: BLE001
-        logger.exception("Minha Equipe: falha na ingestão manual.")
-    finally:
-        db.close()
+    # MESMO advisory lock do scheduler: sem ele, cliques repetidos no
+    # "Atualizar agora" (ou o botão + o job das 9h juntos) rodavam ingestões
+    # CONCORRENTES — cada uma deleta o que enxerga e insere a própria cópia,
+    # triplicando o snapshot (caso real 22/07: 3 runs às 08:58/09:00/09:00,
+    # 641k linhas pra 213k tarefas; painel contava 111 atrasadas onde eram 37).
+    with single_worker_lock(_LOCK_KEY) as got:
+        if not got:
+            logger.info("Minha Equipe: ingestão manual pulada — já há uma rodando.")
+            limpar_sync_rodando()
+            return
+        db = SessionLocal()
+        try:
+            # FORÇA um relatório FRESCO (gerar_e_ingerir), não o último que o L1
+            # já tinha. `baixar_e_ingerir` pega o relatório existente — que pode
+            # ter sido gerado horas antes, com prazos/status defasados: caso real
+            # 22/07, a Hellen aparecia com 20 "fatais hoje" que no L1 já tinham
+            # sido dilatadas pra 23-27/07 (e 1 já concluída), porque o relatório
+            # baixado era o das 13h. Gerar na hora reflete o estado ATUAL do L1.
+            # Fallback pro download do existente se a geração falhar (ex.: runner
+            # indisponível) — melhor um dado um pouco velho que dado nenhum.
+            atualizar_fase_sync("gerando relatório no L1")
+            res = gerar_e_ingerir(db)
+            if not res.get("ok"):
+                logger.warning(
+                    "Minha Equipe: geração fresca falhou (%s) — baixando o relatório existente.",
+                    res.get("motivo"),
+                )
+                atualizar_fase_sync("baixando relatório existente")
+                baixar_e_ingerir(db, force=True)
+        except Exception:  # noqa: BLE001
+            logger.exception("Minha Equipe: falha na ingestão manual.")
+        finally:
+            limpar_sync_rodando()
+            db.close()
 
 
-@router.post("/sync", summary="Dispara a ingestão agora (baixa o relatório mais recente do L1)", dependencies=[_admin])
-def sync_now(background: BackgroundTasks):
+@router.post("/sync", summary="Gera um relatório FRESCO no L1 e ingere (reflete o estado atual)", dependencies=[_admin])
+def sync_now(background: BackgroundTasks, current_user: LegalOneUser = Depends(get_current_user)):
+    from app.services.performance.report_ingest import (
+        get_sync_running, marcar_sync_rodando,
+    )
+
+    # Trava de clique múltiplo: se já há uma atualização em andamento, NÃO
+    # enfileira outra (o advisory lock já barra a execução concorrente, mas isto
+    # dá o feedback e evita pilha de background tasks quando todo mundo aperta).
+    ja = get_sync_running()
+    if ja:
+        return {
+            "ok": False, "running": True, "ja_rodando": ja,
+            "mensagem": f"Já há uma atualização em andamento (iniciada por {ja.get('por') or 'alguém'}). Aguarde concluir.",
+        }
+    # Marca ANTES de enfileirar pra o próximo clique já ver 'rodando'.
+    marcar_sync_rodando(getattr(current_user, "name", None) or getattr(current_user, "email", None))
     background.add_task(_run_sync_bg)
-    return {"ok": True, "mensagem": "Ingestão disparada — baixando o relatório do L1 e atualizando os dados."}
+    return {
+        "ok": True,
+        "mensagem": (
+            "Atualização disparada — gerando um relatório novo no L1 e reingerindo. "
+            "Leva alguns minutos (o L1 monta o relatório do zero); o painel atualiza ao concluir."
+        ),
+    }
 
 
-# ── Manutenção do roster (editor de equipe, admin-only) ───────────────────
-@router.get("/roster", summary="Roster editável do time (manutenção)", dependencies=[_adminonly])
+@router.post("/reagendamentos/capturar", summary="Dispara o passo do bracket sobre o snapshot atual (teste/admin)", dependencies=[_admin])
+def reagendamentos_capturar(momento: str = Query(..., pattern="^(manha|noite)$"), db: Session = Depends(get_db)):
+    """Roda o passo do bracket SOBRE O SNAPSHOT ATUAL (não gera relatório novo —
+    isso é o cron). 'manha' grava a baseline; 'noite' detecta os adiamentos."""
+    from app.services.performance import reagendamento_service as reag
+
+    return reag.capturar_manha(db) if momento == "manha" else reag.detectar_noite(db)
+
+
+# ── Manutenção do roster (editor de equipe) ────────────────────────────────
+# Antes era admin-only; agora qualquer colaborador com o TIME liberado na
+# árvore do Minha Equipe pode ajustar a própria equipe (decisão do operador,
+# 2026-07-21). O escopo continua POR TIME: mexer em pessoa de outro time (ou
+# mover pessoa PARA outro time) exige acesso àquele time também.
+@router.get("/roster", summary="Roster editável do time (manutenção)", dependencies=[_team])
 def roster(team: str = Query(...), db: Session = Depends(get_db)):
-    if team not in TEAM_KEYS:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
     return {"pessoas": PerformanceService(db).roster(team)}
 
 
@@ -374,10 +512,22 @@ class RosterUpdateReq(BaseModel):
     ativo: Optional[bool] = None
 
 
-@router.patch("/roster/{pessoa_id}", summary="Atualiza uma pessoa do roster", dependencies=[_adminonly])
-def update_roster(pessoa_id: int, req: RosterUpdateReq, db: Session = Depends(get_db)):
-    if req.equipe is not None and req.equipe not in TEAM_KEYS:
+@router.patch("/roster/{pessoa_id}", summary="Atualiza uma pessoa do roster")
+def update_roster(
+    pessoa_id: int,
+    req: RosterUpdateReq,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(get_current_user),
+):
+    if req.equipe is not None and req.equipe not in team_keys():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
+    equipe_atual = _equipe_da_pessoa(db, pessoa_id)
+    if equipe_atual is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pessoa não encontrada.")
+    _exigir_acesso_ao_time(current_user, equipe_atual)
+    if req.equipe is not None and req.equipe != equipe_atual:
+        # Mover pra OUTRO time exige acesso ao destino também.
+        _exigir_acesso_ao_time(current_user, req.equipe)
     out = PerformanceService(db).update_pessoa(
         pessoa_id, cargo=req.cargo, equipe=req.equipe,
         is_supervisor=req.is_supervisor, ativo=req.ativo,
@@ -387,10 +537,8 @@ def update_roster(pessoa_id: int, req: RosterUpdateReq, db: Session = Depends(ge
     return out
 
 
-@router.get("/roster/candidatos", summary="Candidatos a adicionar ao time (usuários do L1)", dependencies=[_adminonly])
+@router.get("/roster/candidatos", summary="Candidatos a adicionar ao time (usuários do L1)", dependencies=[_team])
 def roster_candidatos(team: str = Query(...), busca: Optional[str] = Query(None), db: Session = Depends(get_db)):
-    if team not in TEAM_KEYS:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
     return {"candidatos": PerformanceService(db).candidatos(team, busca=busca)}
 
 
@@ -399,18 +547,31 @@ class AddPessoaReq(BaseModel):
     team: str
 
 
-@router.post("/roster/adicionar", summary="Adiciona uma pessoa ao time", dependencies=[_adminonly])
-def roster_adicionar(req: AddPessoaReq, db: Session = Depends(get_db)):
-    if req.team not in TEAM_KEYS:
+@router.post("/roster/adicionar", summary="Adiciona uma pessoa ao time")
+def roster_adicionar(
+    req: AddPessoaReq,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(get_current_user),
+):
+    if req.team not in team_keys():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time inexistente.")
+    _exigir_acesso_ao_time(current_user, req.team)
     out = PerformanceService(db).adicionar_pessoa(req.nome, req.team)
     if out is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nome inválido.")
     return out
 
 
-@router.delete("/roster/{pessoa_id}", summary="Exclui a pessoa do sistema (saiu do escritório)", dependencies=[_adminonly])
-def roster_excluir(pessoa_id: int, db: Session = Depends(get_db)):
+@router.delete("/roster/{pessoa_id}", summary="Exclui a pessoa do sistema (saiu do escritório)")
+def roster_excluir(
+    pessoa_id: int,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(get_current_user),
+):
+    equipe_atual = _equipe_da_pessoa(db, pessoa_id)
+    if equipe_atual is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pessoa não encontrada.")
+    _exigir_acesso_ao_time(current_user, equipe_atual)
     out = PerformanceService(db).excluir_pessoa(pessoa_id)
     if out is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pessoa não encontrada.")

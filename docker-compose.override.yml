@@ -1,13 +1,20 @@
 # Override automático pra desenvolvimento local.
 # docker compose up usa docker-compose.yml + este arquivo por padrão.
 # No Coolify, só o docker-compose.yml é lido (este é ignorado).
+#
+# `restart: "no"` em todos os serviços: em dev os containers NÃO devem
+# subir sozinhos quando o Docker Desktop abre — a stack só roda quando o
+# operador manda. Em produção continua valendo o `unless-stopped` do
+# docker-compose.yml (o Coolify não lê este arquivo).
 
 services:
   postgres:
+    restart: "no"
     ports:
       - "5433:5432"
 
   api:
+    restart: "no"
     # Em dev local, injeta TODO o .env dentro do container (Coolify
     # injeta automaticamente via painel; aqui o compose precisa de
     # env_file explícito). Sem isso, AJUS_FERNET_KEY, SECRET_KEY,
@@ -33,6 +40,7 @@ services:
       --reload --reload-dir /app/app --reload-dir /app
 
   ajus-runner:
+    restart: "no"
     # Mesma razão do `api` — runner precisa de AJUS_FERNET_KEY pra
     # decodificar senhas das contas, AJUS_SESSION_PATH, etc.
     env_file:
@@ -41,6 +49,7 @@ services:
   # Em dev roda o Vite dev server direto, sem passar pelo nginx.
   # Pra testar o build de produção localmente: docker compose -f docker-compose.yml up --build
   frontend:
+    restart: "no"
     image: node:20-alpine
     working_dir: /app
     build: !reset null

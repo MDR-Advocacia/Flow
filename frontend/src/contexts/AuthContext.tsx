@@ -12,8 +12,10 @@ interface User {
   can_use_publications?: boolean;
   can_use_prazos_iniciais?: boolean;
   can_use_onerequest?: boolean;
+  can_use_encerramentos?: boolean;
   can_use_minha_equipe?: boolean;
   minha_equipe_equipes?: string[];
+  can_manage_distribuidos_bb?: boolean;
   must_change_password?: boolean;
   is_active?: boolean;
 }
@@ -25,6 +27,8 @@ interface TokenData {
   can_use_publications: boolean;
   can_use_prazos_iniciais?: boolean;
   can_use_onerequest?: boolean;
+  can_use_encerramentos?: boolean;
+  can_manage_distribuidos_bb?: boolean;
   must_change_password: boolean;
   exp: number;
 }
@@ -34,7 +38,6 @@ interface AuthContextType {
   user: User | null;
   token: string | null;
   tokenData: TokenData | null;
-  mustChangePassword: boolean;
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
   isLoading: boolean;
@@ -42,10 +45,17 @@ interface AuthContextType {
   canUsePublications: boolean;
   canUsePrazosIniciais: boolean;
   canUseOnerequest: boolean;
+  canUseEncerramentos: boolean;
   canUseMinhaEquipe: boolean;
   minhaEquipeEquipes: string[];
+  canManageDistribuidosBB: boolean;
   isAdmin: boolean;
   refreshMe: () => Promise<void>;
+  // Erro do estabelecimento de sessão SSO (ex.: "Conta inativa"). Sem isto o
+  // 403 era engolido e a pessoa via o botão "não fazer nada" — clicava, o
+  // Entra devolvia na hora (sessão Microsoft já válida) e a tela de login
+  // voltava sem explicação nenhuma. Caso real: Maria Vitória, 06/08/2026.
+  ssoError: string | null;
 }
 
 // Exporta o contexto para que o hook externo possa usá-lo
@@ -68,6 +78,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [token, setToken] = useState<string | null>(null);
   const [tokenData, setTokenData] = useState<TokenData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [ssoError, setSsoError] = useState<string | null>(null);
 
   const refreshMe = async () => {
     const storedToken = localStorage.getItem('authToken');
@@ -125,6 +136,16 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           if (access_token && (await applyToken(access_token))) {
             setIsLoading(false);
             return;
+          }
+        } else if (sso.status === 403) {
+          // Identidade Microsoft OK, mas a conta está barrada no Flow (ex.:
+          // inativa). Precisa aparecer pra pessoa — engolir isto fazia o
+          // clique no botão parecer quebrado.
+          try {
+            const corpo = await sso.json();
+            setSsoError(corpo?.detail || 'Acesso negado. Contate o administrador.');
+          } catch {
+            setSsoError('Acesso negado. Contate o administrador.');
           }
         }
       } catch {
@@ -194,9 +215,6 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     user,
     token,
     tokenData,
-    // Usa o estado do /me (banco) como fonte de verdade — o JWT pode estar
-    // defasado se a senha foi trocada sem reemissão de token.
-    mustChangePassword: user?.must_change_password ?? tokenData?.must_change_password ?? false,
     login,
     logout,
     isLoading,
@@ -213,10 +231,15 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       user?.can_use_prazos_iniciais ?? tokenData?.can_use_prazos_iniciais ?? false,
     canUseOnerequest:
       user?.can_use_onerequest ?? tokenData?.can_use_onerequest ?? false,
+    canUseEncerramentos:
+      user?.can_use_encerramentos ?? tokenData?.can_use_encerramentos ?? false,
     canUseMinhaEquipe: user?.can_use_minha_equipe ?? false,
     minhaEquipeEquipes: user?.minha_equipe_equipes ?? [],
+    canManageDistribuidosBB:
+      user?.can_manage_distribuidos_bb ?? tokenData?.can_manage_distribuidos_bb ?? false,
     isAdmin: (user?.role ?? tokenData?.role) === 'admin',
     refreshMe,
+    ssoError,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -155,6 +155,17 @@ class PublicationRecord(Base):
     ignored_by_email = Column(String, nullable=True)
     ignored_by_name = Column(String, nullable=True)
     ignored_at = Column(DateTime(timezone=True), nullable=True)
+    # Motivo estruturado da ciência (pub006): escolhido pelo operador no modal
+    # de ignorar. Slugs: ja_agendado | parte_adversa | informativa |
+    # classificacao_incorreta | outro. Nulo no histórico e na ciência
+    # automática. É o gabarito que faltava pro estudo de automação — 12.773
+    # ignoradas sem nenhum motivo registrado até 06/08/2026.
+    ignore_reason = Column(String(40), nullable=True, index=True)
+    ignore_reason_note = Column(Text, nullable=True)
+    # "Precisei abrir o processo pra decidir" também no ignorar (pub008): o
+    # operador consultou os autos e concluiu que não há providência. Sem isto
+    # o sinal ficaria só do lado do agendamento.
+    consultou_autos = Column(Boolean, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
@@ -165,3 +176,19 @@ class PublicationRecord(Base):
         back_populates="record",
         uselist=False,
     )
+
+
+class PublicationL1EtiquetaCache(Base):
+    """Cache das etiquetas (tags) do L1 por processo — a API REST não expõe
+    etiquetas, então a leitura é pelo caminho web (página de edição, ~200KB por
+    processo). O cache evita repetir esse GET: o job de enriquecimento busca só
+    os lawsuits com publicação recente que estão fora do cache ou vencidos.
+
+    `etiquetas`: lista [{"id", "name", "class_name", "color_id"}] — [] = o
+    processo foi consultado e NÃO tem etiqueta (também é informação)."""
+
+    __tablename__ = "pub_l1_etiqueta_cache"
+
+    lawsuit_id = Column(Integer, primary_key=True)
+    etiquetas = Column(JSON, nullable=False, default=list)
+    fetched_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

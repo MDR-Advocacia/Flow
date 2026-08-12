@@ -22,7 +22,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from app.db.types import jsonb
 from sqlalchemy.sql import func
 
 from app.db.session import Base
@@ -59,6 +59,26 @@ class PerfPessoa(Base):
     ativo = Column(Boolean, nullable=False, server_default="true")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PerfEquipe(Base):
+    """Equipe/setor do Minha Equipe — fonte da verdade do menu, das rotas e das
+    permissões (antes hardcoded em 3 listas; ver migration perf012).
+
+    `key` é imutável: é o slug que vive em `perf_pessoa.equipe` e no CSV de
+    `legal_one_users.minha_equipe_equipes`. O admin edita rótulo/grupo/ordem.
+    Exclusão é SOFT (`ativo=False`) pra não revogar acesso nem orfanar gente.
+    """
+
+    __tablename__ = "perf_equipe"
+
+    id = Column(Integer, primary_key=True)
+    key = Column(String(60), nullable=False, unique=True)
+    label = Column(String(120), nullable=False)
+    grupo = Column(String(80), nullable=False)
+    ordem = Column(Integer, nullable=False, server_default="999")
+    ativo = Column(Boolean, nullable=False, server_default="true")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class PerfTarefa(Base):
@@ -127,7 +147,7 @@ class PerfCancelJob(Base):
     cancelled = Column(Integer, nullable=False, server_default="0")
     preservadas = Column(Integer, nullable=False, server_default="0")  # já encerradas/canceladas
     falhas = Column(Integer, nullable=False, server_default="0")
-    erros = Column(JSONB, nullable=True)
+    erros = Column(jsonb(), nullable=True)
     iniciado_em = Column(DateTime(timezone=True), server_default=func.now())
     terminado_em = Column(DateTime(timezone=True), nullable=True)
 
@@ -164,7 +184,7 @@ class PerfCancelMassaLog(Base):
     cancelled = Column(Integer, nullable=False, server_default="0")
     preservadas = Column(Integer, nullable=False, server_default="0")
     falhas = Column(Integer, nullable=False, server_default="0")
-    detalhe = Column(JSONB, nullable=True)
+    detalhe = Column(jsonb(), nullable=True)
 
 
 class PerfRelatorio(Base):
@@ -207,7 +227,7 @@ class BalanceadorLog(Base):
     total_movimentos = Column(Integer, nullable=False, server_default="0")
     total_tarefas = Column(Integer, nullable=False, server_default="0")
     origem = Column(String, nullable=False, server_default="mock")
-    detalhe = Column(JSONB, nullable=True)  # lista de movimentos (from/to/subtipo/qtd/tasks)
+    detalhe = Column(jsonb(), nullable=True)  # lista de movimentos (from/to/subtipo/qtd/tasks)
     criado_em = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -258,8 +278,68 @@ class BalanceadorReatribuirJob(Base):
     reatribuidas = Column(Integer, nullable=False, server_default="0")
     workflow_bloqueadas = Column(Integer, nullable=False, server_default="0")
     falhas = Column(Integer, nullable=False, server_default="0")
-    detalhe = Column(JSONB, nullable=True)  # lista por tarefa: {task_id, to_id, to_nome, reason, http}
+    detalhe = Column(jsonb(), nullable=True)  # lista por tarefa: {task_id, to_id, to_nome, reason, http}
     criado_por_id = Column(Integer, nullable=True)
     criado_por_nome = Column(String, nullable=True)
     iniciado_em = Column(DateTime(timezone=True), server_default=func.now())
     terminado_em = Column(DateTime(timezone=True), nullable=True)
+    # Tocado a CADA commit de progresso (o job commita por tarefa). É o que
+    # distingue "rodando devagar" de "morta" — sem isto a detecção de zumbi
+    # usava tempo desde o INÍCIO, que erra dos dois lados (migration perf013).
+    atualizado_em = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(),
+    )
+
+
+# ── Reagendamentos (adiamentos de prazo) — bracket 07h/19h ──────────────────
+# Detecta adiamento comparando duas fotos do MESMO dia: a foto da manhã (baseline
+# em perf_prazo_manha) vs. o estado da noite (perf_l1_tarefa recém-ingerida). Onde
+# a conclusão prevista da tarefa foi EMPURRADA pra frente durante o dia = adiamento.
+
+
+class PerfPrazoManha(Base):
+    """Baseline da MANHÃ: prazo de cada tarefa pendente às ~07h. Replace total
+    todo dia (o job da manhã limpa e regrava). A noite compara contra isto."""
+
+    __tablename__ = "perf_prazo_manha"
+
+    l1_task_id = Column(BigInteger, primary_key=True)
+    dia = Column(DateTime(timezone=True), nullable=False, index=True)  # dia do bracket (BRT, 00:00)
+    prazo = Column(DateTime(timezone=True), nullable=True)
+    pessoa_id = Column(Integer, nullable=True, index=True)
+    pessoa_nome = Column(String, nullable=True)
+    equipe = Column(String, nullable=True, index=True)
+    subtipo = Column(String, nullable=True)
+    pasta = Column(String, nullable=True)
+    cnj = Column(String, nullable=True)
+    capturado_em = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PerfReagendamento(Base):
+    """Um evento de ADIAMENTO detectado no bracket do dia (manhã → noite).
+
+    Só adiamentos (prazo_para > prazo_de). Antecipações são ignoradas na
+    detecção. `era_fatal_hoje` = na manhã o prazo vencia HOJE e à noite foi
+    empurrado — o pior caso ("empurrou com a barriga"). Idempotente por dia: o
+    job da noite apaga os eventos do dia antes de regravar."""
+
+    __tablename__ = "perf_reagendamento"
+
+    id = Column(Integer, primary_key=True)
+    dia = Column(DateTime(timezone=True), nullable=False, index=True)  # dia do bracket (BRT, 00:00)
+    l1_task_id = Column(BigInteger, nullable=True, index=True)
+    pessoa_id = Column(Integer, nullable=True, index=True)
+    pessoa_nome = Column(String, nullable=True)
+    equipe = Column(String, nullable=True, index=True)
+    subtipo = Column(String, nullable=True)
+    pasta = Column(String, nullable=True)
+    cnj = Column(String, nullable=True)
+    prazo_de = Column(DateTime(timezone=True), nullable=True)     # prazo da manhã
+    prazo_para = Column(DateTime(timezone=True), nullable=True)   # prazo da noite
+    dias_adiado = Column(Integer, nullable=True)                  # diferença em dias (BRT)
+    era_fatal_hoje = Column(Boolean, nullable=False, server_default="false")
+    detectado_em = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("dia", "l1_task_id", name="uq_perf_reag_dia_task"),
+    )

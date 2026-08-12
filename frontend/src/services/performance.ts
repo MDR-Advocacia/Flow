@@ -206,6 +206,31 @@ export async function getSubtipoDetalhe(team: string, subtipo: string, days = 30
   return json(await apiFetch(`${BASE}/subtipo-detalhe?${qs.toString()}`));
 }
 
+// Quebra por subtipo do pool de uma pessoa — alimenta a pizza do "Pool pendente".
+// O total bate com a barra clicada (mesma definição de atrasado no backend).
+export interface PoolPorTipoItem {
+  subtipo: string;
+  categoria: string;
+  total: number;
+  mais_antigo: string | null;
+}
+
+export interface PoolPorTipo {
+  pessoa: { id: number; nome: string; cargo: string | null };
+  escopo: "atrasado" | "pendente";
+  total: number;
+  itens: PoolPorTipoItem[];
+}
+
+export async function getPoolPorTipo(
+  team: string,
+  pessoaId: number,
+  escopo: "atrasado" | "pendente" = "atrasado",
+): Promise<PoolPorTipo> {
+  const qs = new URLSearchParams({ team, escopo });
+  return json(await apiFetch(`${BASE}/pessoa/${pessoaId}/atrasadas-por-tipo?${qs.toString()}`));
+}
+
 // Preview de duplicadas (mesma pasta + mesmo subtipo): mantém a mais antiga.
 export interface DupTarefa {
   task_id: number;
@@ -379,6 +404,13 @@ export async function downloadRelatorioById(id: number): Promise<void> {
 }
 
 // ── Ingestão dos dados (download do relatório do L1) ──
+export interface SyncRunning {
+  running: boolean;
+  iniciado_em?: string;
+  por?: string | null;
+  fase?: string;
+}
+
 export interface SyncStatus {
   last_sync: {
     ok: boolean;
@@ -389,13 +421,15 @@ export interface SyncStatus {
     bytes: number;
   } | null;
   ja_sincronizou_hoje: boolean;
+  running?: SyncRunning | null;
+  server_now?: string;
 }
 
 export async function getSyncStatus(): Promise<SyncStatus> {
   return json(await apiFetch(`${BASE}/sync`));
 }
 
-export async function triggerSync(): Promise<{ ok: boolean; mensagem: string }> {
+export async function triggerSync(): Promise<{ ok: boolean; mensagem: string; running?: boolean }> {
   return json(await apiFetch(`${BASE}/sync`, { method: "POST" }));
 }
 
@@ -454,4 +488,75 @@ export async function adicionarPessoa(nome: string, team: string): Promise<void>
 export async function excluirPessoa(id: number): Promise<void> {
   const res = await apiFetch(`${BASE}/roster/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`Erro ${res.status} ao excluir`);
+}
+
+// ── Reagendamentos (adiamentos de prazo) ──
+export interface ReagKpis {
+  total: number;
+  tarefas: number;
+  pessoas: number;
+  fatais_empurrados: number;
+  dias_medio: number;
+  dias_max: number;
+}
+export interface ReagPessoa {
+  pessoa_id: number | null;
+  nome: string;
+  total: number;
+  fatais: number;
+  dias_medio: number;
+  tarefas: number;
+}
+export interface ReagDia {
+  dia: string;
+  total: number;
+  fatais: number;
+}
+export interface ReagReincidente {
+  l1_task_id: number;
+  pessoa: string | null;
+  subtipo: string | null;
+  pasta: string | null;
+  cnj: string | null;
+  vezes: number;
+  primeiro_prazo: string | null;
+  ultimo_prazo: string | null;
+  dias_total: number;
+}
+export interface ReagResumo {
+  kpis: ReagKpis;
+  por_pessoa: ReagPessoa[];
+  por_dia: ReagDia[];
+  por_subtipo: { subtipo: string; total: number }[];
+  reincidentes: ReagReincidente[];
+}
+
+export async function getReagendamentos(team: string, days = 30): Promise<ReagResumo> {
+  const qs = new URLSearchParams({ team, days: String(days) });
+  return json(await apiFetch(`${BASE}/reagendamentos?${qs.toString()}`));
+}
+
+export interface ReagEvento {
+  dia: string;
+  l1_task_id: number;
+  pessoa: string | null;
+  subtipo: string | null;
+  pasta: string | null;
+  cnj: string | null;
+  prazo_de: string | null;
+  prazo_para: string | null;
+  dias_adiado: number | null;
+  era_fatal_hoje: boolean;
+}
+export async function getReagendamentoEventos(
+  team: string,
+  params: { pessoaId?: number; dia?: string; subtipo?: string; days?: number; limit?: number; offset?: number } = {},
+): Promise<{ total: number; items: ReagEvento[] }> {
+  const qs = new URLSearchParams({ team, days: String(params.days ?? 30) });
+  if (params.pessoaId != null) qs.set("pessoa_id", String(params.pessoaId));
+  if (params.dia) qs.set("dia", params.dia);
+  if (params.subtipo) qs.set("subtipo", params.subtipo);
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  return json(await apiFetch(`${BASE}/reagendamentos/eventos?${qs.toString()}`));
 }

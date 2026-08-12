@@ -25,8 +25,24 @@ _team = Depends(require_team_access)
 
 
 @router.get("/diagnostico", summary="Carga pendente por colaborador (atrasado/fatal hoje/futuro)", dependencies=[_team])
-def diagnostico(team: str = Query(...), db: Session = Depends(get_db)):
-    return {"colaboradores": BalanceadorService(db).diagnostico(team)}
+def diagnostico(
+    team: str = Query(...),
+    inicio: str | None = Query(None, description="filtro da tabela: conclusão prevista >= (YYYY-MM-DD)"),
+    fim: str | None = Query(None, description="filtro da tabela: conclusão prevista <= (YYYY-MM-DD)"),
+    cad_inicio: str | None = Query(None, description="filtro da tabela: data de CADASTRO >= (YYYY-MM-DD)"),
+    cad_fim: str | None = Query(None, description="filtro da tabela: data de CADASTRO <= (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+):
+    svc = BalanceadorService(db)
+    return {
+        "colaboradores": svc.diagnostico(
+            team, inicio=inicio, fim=fim,
+            cad_inicio=cad_inicio, cad_fim=cad_fim,
+        ),
+        # Limite do recorte de origem: agendamento mais antigo registrado. A
+        # tela avisa que tarefa de Publicações anterior a isso é invisível.
+        "publicacoes_desde": svc.origem_publicacoes_desde(),
+    }
 
 
 @router.get("/redistribuir", summary="Matriz subtipo × colaborador dos escolhidos", dependencies=[_team])
@@ -61,11 +77,37 @@ def descricoes(team: str = Query(...), ids: str = Query(...), db: Session = Depe
 def live_pessoa(
     team: str = Query(...),
     pessoa_id: int = Query(...),
-    dias: int = Query(0),
-    incluir_atrasadas: bool = Query(True),
+    dias: int = Query(0, description="legado: janela de N dias (usar inicio/fim)"),
+    incluir_atrasadas: bool = Query(
+        False, description="além da faixa, puxar também as vencidas (prazo < hoje)"
+    ),
+    inicio: str | None = Query(None, description="faixa exata: data de conclusão prevista inicial (YYYY-MM-DD)"),
+    fim: str | None = Query(None, description="faixa exata: data de conclusão prevista final (YYYY-MM-DD)"),
+    apenas_publicacoes: bool = Query(
+        False, description="recorta a seleção às tarefas originadas no módulo de Publicações"
+    ),
+    cad_inicio: str | None = Query(None, description="faixa por data de CADASTRO da tarefa: inicial (YYYY-MM-DD)"),
+    cad_fim: str | None = Query(None, description="faixa por data de CADASTRO da tarefa: final (YYYY-MM-DD)"),
     db: Session = Depends(get_db),
 ):
-    return BalanceadorService(db).live_pessoa(team, pessoa_id, dias, incluir_atrasadas)
+    return BalanceadorService(db).live_pessoa(
+        team, pessoa_id, dias, incluir_atrasadas, inicio=inicio, fim=fim,
+        apenas_publicacoes=apenas_publicacoes,
+        cad_inicio=cad_inicio, cad_fim=cad_fim,
+    )
+
+
+@router.get(
+    "/entradas",
+    summary="Prévia do que CHEGOU: cadastros de tarefa por dia (últimos N dias)",
+    dependencies=[_team],
+)
+def entradas(
+    team: str = Query(...),
+    dias: int = Query(7, ge=1, le=30),
+    db: Session = Depends(get_db),
+):
+    return {"entradas": BalanceadorService(db).entradas_recentes(team, dias)}
 
 
 @router.get("/usuarios", summary="Destinos da fila: setor primeiro + busca externa no L1", dependencies=[_team])
@@ -125,6 +167,7 @@ class ReatribuirItem(BaseModel):
     task_id: int
     to_id: int | None = None
     to_nome: str | None = None
+    origem: str | None = "tarefa"  # "tarefa" (/Tasks) | "compromisso" (/Appointments)
 
 
 class ReatribuirReq(BaseModel):
@@ -186,6 +229,86 @@ _REASON_LABELS = {
 }
 
 
+# Tempo SEM PROGRESSO que caracteriza execução morta. O job commita a cada
+# tarefa, então `atualizado_em` anda de ~8 em ~8 segundos enquanto ele vive;
+# parar de andar significa que quem o executava morreu (worker reciclado,
+# container reiniciado) e ninguém vai terminá-lo.
+#
+# 15 min dá folga larga pro pior caso conhecido — retry de rate limit do L1
+# (429 com Retry-After de até 1 min, 4 tentativas) — sem deixar a tela mentindo
+# por horas. O critério ANTERIOR era tempo desde o INÍCIO, e errava dos dois
+# lados: em 04/08/2026 a execução do Bruno morreu às 08:30 e seguiu "Em
+# andamento · 100%" até o corte de 2h, enquanto uma execução legítima de 541
+# tarefas (~68 min no throttle real) corria risco de ser morta injustamente.
+_SEM_PROGRESSO_MINUTOS = 15
+
+
+def _recuperar_zumbis(db, team: str) -> int:
+    """Encerra o job 'running' que parou de progredir.
+
+    Sem isto ele fica "Em andamento" para sempre na tela — o de 31/07 08:00
+    ficou assim por QUATRO DIAS, com 58/58 e 39 tarefas presas em
+    `web_pendente`, poluindo a lista e escondendo o estado real.
+
+    Best-effort: nunca levanta pro caller (a listagem tem que abrir de todo
+    jeito).
+    """
+    import logging
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import func
+
+    from app.models.performance import BalanceadorReatribuirJob
+
+    log = logging.getLogger("balanceador.zumbis")
+    try:
+        corte = datetime.now(timezone.utc) - timedelta(minutes=_SEM_PROGRESSO_MINUTOS)
+        # `atualizado_em` só é NULL em linha anterior à perf013 que nunca foi
+        # atualizada; nesse caso o início é o melhor sinal disponível.
+        ultimo_sinal = func.coalesce(
+            BalanceadorReatribuirJob.atualizado_em,
+            BalanceadorReatribuirJob.iniciado_em,
+        )
+        presos = (
+            db.query(BalanceadorReatribuirJob)
+            .filter(
+                BalanceadorReatribuirJob.team == team,
+                BalanceadorReatribuirJob.status.in_(("running", "aborting")),
+                ultimo_sinal < corte,
+            )
+            .all()
+        )
+        n = 0
+        for j in presos:
+            # O que ficou sem desfecho NÃO foi reatribuído — vai pro bucket
+            # manual, pra não inflar o número de sucesso.
+            restante = max(
+                0,
+                (j.total or 0) - (j.reatribuidas or 0)
+                - (j.workflow_bloqueadas or 0) - (j.falhas or 0),
+            )
+            if restante:
+                j.workflow_bloqueadas = (j.workflow_bloqueadas or 0) + restante
+            j.status = "done"
+            j.terminado_em = datetime.now(timezone.utc)
+            n += 1
+            log.warning(
+                "Execução %s (%s) parou de progredir em %s (iniciada %s) — "
+                "encerrada como interrompida (%s tarefa[s] sem conclusão).",
+                j.id, team, j.atualizado_em or j.iniciado_em, j.iniciado_em, restante,
+            )
+        if n:
+            db.commit()
+        return n
+    except Exception:  # noqa: BLE001
+        log.exception("Falha ao recuperar execuções presas (ignorado).")
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
+
+
 @router.get(
     "/reatribuir/jobs",
     summary="Execuções de reatribuição do time (em andamento + histórico, paginado)",
@@ -198,6 +321,10 @@ def reatribuir_jobs(
     db: Session = Depends(get_db),
 ):
     from app.models.performance import BalanceadorReatribuirJob
+
+    # Mesma ideia do recover_zombies do Tratamento Web: limpa ANTES de listar,
+    # pra tela nunca mostrar "Em andamento" de algo que morreu.
+    _recuperar_zumbis(db, team)
 
     base = db.query(BalanceadorReatribuirJob).filter(BalanceadorReatribuirJob.team == team)
     total = base.count()
@@ -264,6 +391,50 @@ def reatribuir_job_detalhe(job_id: str, team: str = Query(...), db: Session = De
             for d in detalhe
         ]
     }
+
+
+# Reasons que contam como SUCESSO — o resto (falha/pendência/manual) é
+# retentável. dry_ok não conta: simulação não gravou nada pra "refazer".
+_REASON_OK = {"reassigned", "reassigned_web", "dry_ok"}
+
+
+@router.post(
+    "/reatribuir/jobs/{job_id}/retry",
+    summary="Refaz só as tarefas que falharam/ficaram pendentes numa execução",
+    dependencies=[_team],
+)
+def reatribuir_job_retry(
+    job_id: str,
+    team: str = Query(...),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(get_current_user),
+):
+    from app.models.performance import BalanceadorReatribuirJob
+    from app.services.performance import reatribuir_job
+
+    j = db.get(BalanceadorReatribuirJob, job_id)
+    if not j or j.team != team:
+        raise HTTPException(status_code=404, detail="Execução não encontrada")
+    if j.status != "done":
+        raise HTTPException(status_code=409, detail="A execução ainda está em andamento")
+    if j.dry_run:
+        raise HTTPException(status_code=400, detail="Simulação não grava no L1 — nada a refazer")
+
+    itens = [
+        {
+            "task_id": int(d["task_id"]),
+            "to_id": d.get("to_id"),
+            "to_nome": d.get("to_nome"),
+            "origem": d.get("origem") or "tarefa",
+        }
+        for d in (j.detalhe or [])
+        if d.get("task_id") and d.get("reason") not in _REASON_OK
+    ]
+    if not itens:
+        raise HTTPException(status_code=400, detail="Não há tarefas pendentes pra refazer nessa execução")
+
+    novo = reatribuir_job.iniciar(team, itens, [], False, current_user)
+    return {"job_id": novo, "total": len(itens), "status": reatribuir_job.status(novo)}
 
 
 @router.get(

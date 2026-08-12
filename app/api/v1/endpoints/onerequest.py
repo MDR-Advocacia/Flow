@@ -379,6 +379,28 @@ def estado(db: Session = Depends(get_db)):
     return OnerequestService(db).estado()
 
 
+class SyncFonteResponse(BaseModel):
+    executado: bool
+    motivo: Optional[str] = None
+    resultado: Optional[Dict] = None
+
+
+@router.post(
+    "/sync-fonte",
+    response_model=SyncFonteResponse,
+    summary="Espelha AGORA o Postgres da fonte (RPA) pro Flow — disparado ao abrir a página, com throttle",
+    dependencies=[_perm],
+)
+def sync_fonte():
+    """Mesmo espelhamento do job horário, sob demanda: a página do OneRequest
+    chama ao montar. O throttle (3 min) evita que vários operadores abrindo a
+    tela em sequência martelem o banco da fonte; o advisory lock já garante um
+    sync por vez entre workers do uvicorn."""
+    from app.services.onerequest.source_sync_worker import sync_on_demand
+
+    return SyncFonteResponse(**sync_on_demand())
+
+
 @router.patch(
     "/solicitacoes/{solicitacao_id}",
     response_model=UpdateResponse,

@@ -116,6 +116,8 @@ class UserMe(BaseModel):
     can_use_publications: bool = False
     can_use_prazos_iniciais: bool = False
     can_use_onerequest: bool = False
+    can_use_encerramentos: bool = False
+    can_manage_distribuidos_bb: bool = False
     must_change_password: bool = False
     model_config = ConfigDict(from_attributes=True)
 
@@ -346,7 +348,11 @@ class BaseProcessualUploadOut(BaseModel):
     """Detalhe de um upload (linha de base_processual_upload)."""
     id: int
     filename: str
-    file_sha256: str
+    # NULL de propósito no DRY_RUN: a simulação não persiste o arquivo, então não
+    # há hash (o modelo é nullable e o upload_processor grava NULL pra não bater
+    # no UNIQUE). Declarar como obrigatório quebrava a listagem inteira com 500 —
+    # 50 dos 80 uploads em prod são dry-run.
+    file_sha256: Optional[str] = None
     file_bytes: Optional[int] = None
     total_rows_in_file: Optional[int] = None
     summary_novos: int

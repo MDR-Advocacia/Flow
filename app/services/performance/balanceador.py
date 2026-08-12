@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 _BRT = "America/Sao_Paulo"
 _HOJE = f"(now() AT TIME ZONE '{_BRT}')::date"
 _PRAZO = f"(t.prazo_previsto AT TIME ZONE '{_BRT}')::date"
+_CADASTRO = f"(t.cadastrado_em AT TIME ZONE '{_BRT}')::date"
 
 try:
     from zoneinfo import ZoneInfo
@@ -30,6 +31,23 @@ except Exception:  # pragma: no cover
 
 def _hoje_brt() -> _dt.date:
     return (_dt.datetime.now(tz=_TZ) if _TZ else _dt.datetime.now()).date()
+
+
+def _parse_l1_dt(valor: str | None) -> _dt.datetime | None:
+    """Datetime do L1 → aware em BRT. O L1 mistura formatos: '-03:00' e 'Z'
+    (UTC) — e o fromisoformat do Py3.10 NÃO aceita 'Z', o que rotulava
+    centenas de tarefas como sem_prazo (caso Myllene: 396 de 423, todas com
+    'Z') e as jogava pro FIM da fila de divisão. Converter pra BRT também
+    corrige a situação: 02:59Z = 23:59 BRT do dia ANTERIOR."""
+    if not valor:
+        return None
+    try:
+        d = _dt.datetime.fromisoformat(valor.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if d.tzinfo is not None and _TZ is not None:
+        d = d.astimezone(_TZ)
+    return d
 
 
 # Cache (vida do processo) do catálogo de usuários do L1. Usuários mudam
@@ -62,12 +80,97 @@ def _periodo_clause(dias: int) -> str:
     return ""
 
 
+def marcar_origem_publicacoes(
+    tarefas: list[dict], ids_publicacoes: set, apenas: bool = False,
+) -> list[dict]:
+    """Marca cada tarefa com `de_publicacoes` e, se `apenas`, recorta a lista.
+
+    Isolado do `live_pessoa` (que fala com o L1) pra ser testável: é a regra
+    que decide o que entra na redistribuição quando o supervisor liga o
+    recorte de origem.
+
+    O recorte age SÓ na seleção do que será movido — a carga por pessoa, que
+    define quem está sobrecarregado, continua sendo a fila inteira.
+    """
+    for t in tarefas:
+        t["de_publicacoes"] = int(t.get("l1_task_id") or 0) in ids_publicacoes
+    if apenas:
+        return [t for t in tarefas if t["de_publicacoes"]]
+    return tarefas
+
+
 class BalanceadorService:
     def __init__(self, db: Session):
         self.db = db
 
-    def diagnostico(self, team: str) -> list[dict]:
-        """Por colaborador do time: pendentes atrasadas / fatais hoje / futuras."""
+    # Tarefas cuja origem é o módulo de Publicações. O vínculo é EXATO: todo
+    # agendamento feito por lá grava o id da tarefa criada no L1 em
+    # `publicacao_tarefa_audit.created_task_id`, que é o mesmo id do snapshot.
+    #
+    # Não dá pra inferir por SUBTIPO: medido em 05/08/2026, os subtipos mais
+    # "de Publicações" ficam entre 88% e 99% (nunca 100%), e há casos de 65% e
+    # 54% — filtrar por subtipo erraria de 5% a 45%.
+    _ORIGEM_PUB_JOIN = """
+        LEFT JOIN (
+            SELECT DISTINCT created_task_id
+              FROM publicacao_tarefa_audit
+             WHERE created_task_id IS NOT NULL
+        ) pub ON pub.created_task_id = t.l1_task_id
+    """
+
+    def origem_publicacoes_desde(self) -> str | None:
+        """Data do agendamento mais antigo registrado (ISO) — o LIMITE do recorte.
+
+        Tarefa criada por Publicações ANTES disso existe na fila e não aparece
+        no recorte: a auditoria não existia. A tela mostra essa data pro
+        supervisor não achar que "limpou tudo" quando limpou o que é visível.
+        """
+        row = self.db.execute(
+            text("SELECT min(created_at) AS desde FROM publicacao_tarefa_audit")
+        ).first()
+        if not row or not row.desde:
+            return None
+        # O driver devolve datetime no Postgres e str no SQLite — normaliza pra
+        # ISO curto (YYYY-MM-DD) nos dois casos.
+        desde = row.desde
+        return desde.date().isoformat() if hasattr(desde, "date") else str(desde)[:10]
+
+    def diagnostico(
+        self, team: str, inicio: str | None = None, fim: str | None = None,
+        cad_inicio: str | None = None, cad_fim: str | None = None,
+    ) -> list[dict]:
+        """Por colaborador do time: pendentes atrasadas / fatais hoje / futuras.
+
+        Filtro de data OPCIONAL (analise do estoque pendente por dia): quando
+        `inicio`/`fim` (YYYY-MM-DD) vem, o JOIN so conta as tarefas cuja
+        conclusao prevista cai na faixa (por DATA, BRT) — o supervisor ve "o que
+        tem naquele dia / dias anteriores / futuros" pra orientar a
+        redistribuicao. Sem eles = todas as pendentes (comportamento antigo).
+        Este filtro e' SO da tabela; a faixa da redistribuicao e' outra coisa,
+        escolhida no modal do botao Redistribuir."""
+        # Filtro de data SÓ entra quando há faixa; aí restringe às tarefas COM
+        # prazo na janela (as sem prazo saem — não têm data pra filtrar). Sem
+        # faixa, o JOIN é o de sempre (inclui as sem prazo no total/sem_prazo).
+        janela = ""
+        params: dict = {"team": team}
+        if inicio or fim:
+            janela = " AND t.prazo_previsto IS NOT NULL"
+            if inicio:
+                janela += f" AND {_PRAZO} >= :ini"
+                params["ini"] = inicio
+            if fim:
+                janela += f" AND {_PRAZO} <= :fim"
+                params["fim"] = fim
+        # Recorte por DATA DE CADASTRO (quando a tarefa CHEGOU) — independente
+        # e combinável com o de conclusão: "o que foi cadastrado ontem pra
+        # semana que vem" é a interseção dos dois. 100% das tarefas do snapshot
+        # têm cadastrado_em (medido 06/08/2026), então não há balde "sem data".
+        if cad_inicio:
+            janela += f" AND {_CADASTRO} >= :cad_ini"
+            params["cad_ini"] = cad_inicio
+        if cad_fim:
+            janela += f" AND {_CADASTRO} <= :cad_fim"
+            params["cad_fim"] = cad_fim
         rows = self.db.execute(
             text(
                 f"""
@@ -76,22 +179,78 @@ class BalanceadorService:
                   count(t.id) FILTER (WHERE {_PRAZO} = {_HOJE}) AS fatal_hoje,
                   count(t.id) FILTER (WHERE t.prazo_previsto IS NOT NULL AND {_PRAZO} > {_HOJE}) AS futuro,
                   count(t.id) FILTER (WHERE t.prazo_previsto IS NULL) AS sem_prazo,
-                  count(t.id) AS total
+                  count(t.id) AS total,
+                  -- Recorte de ORIGEM: quanto de cada balde veio de Publicações.
+                  -- É informativo — NUNCA substitui o número de carga, senão o
+                  -- supervisor decide "quem está cheio" olhando uma fatia.
+                  count(t.id) FILTER (
+                    WHERE pub.created_task_id IS NOT NULL
+                      AND t.prazo_previsto IS NOT NULL AND {_PRAZO} < {_HOJE}) AS atrasado_pub,
+                  count(t.id) FILTER (
+                    WHERE pub.created_task_id IS NOT NULL AND {_PRAZO} = {_HOJE}) AS fatal_hoje_pub,
+                  count(t.id) FILTER (
+                    WHERE pub.created_task_id IS NOT NULL
+                      AND t.prazo_previsto IS NOT NULL AND {_PRAZO} > {_HOJE}) AS futuro_pub,
+                  count(t.id) FILTER (WHERE pub.created_task_id IS NOT NULL) AS total_pub
                 FROM perf_pessoa p
                 LEFT JOIN perf_l1_tarefa t
-                  ON t.pessoa_id = p.id AND t.status = 'Pendente'
+                  ON t.pessoa_id = p.id AND t.status = 'Pendente'{janela}
+                {self._ORIGEM_PUB_JOIN}
                 WHERE p.equipe = :team AND p.ativo
                 GROUP BY p.id, p.nome, p.cargo, p.is_supervisor
                 ORDER BY p.is_supervisor DESC, atrasado DESC, futuro DESC, p.nome
                 """
             ),
-            {"team": team},
+            params,
         ).fetchall()
         return [
             {
                 "id": r.id, "nome": r.nome, "cargo": r.cargo, "is_supervisor": r.is_supervisor,
                 "atrasado": r.atrasado, "fatal_hoje": r.fatal_hoje, "futuro": r.futuro,
                 "sem_prazo": r.sem_prazo, "total": r.total,
+                "atrasado_pub": r.atrasado_pub, "fatal_hoje_pub": r.fatal_hoje_pub,
+                "futuro_pub": r.futuro_pub, "total_pub": r.total_pub,
+            }
+            for r in rows
+        ]
+
+    def entradas_recentes(self, team: str, dias: int = 7) -> list[dict]:
+        """Prévia do "o que chegou": cadastros por dia (BRT) nos últimos N dias.
+
+        É o acompanhamento que a supervisão faz de cabeça — quanto entrou de
+        tarefa nova por dia — servido pronto ao abrir o filtro de chegada.
+        Vem do SNAPSHOT (não do L1 ao vivo): a prévia é orientação de volume,
+        não base da redistribuição, e bater no L1 por pessoa aqui custaria a
+        cota que a captura de publicações disputa. Consequência honesta: o dia
+        de HOJE aparece parcial até o snapshot da manhã seguinte.
+
+        `cadastradas` conta TODAS as que chegaram no dia (mede o fluxo de
+        entrada); `ainda_pendentes` é o que dessas continua em aberto — a
+        diferença entre os dois é vazão, não erro.
+        """
+        rows = self.db.execute(
+            text(
+                f"""
+                SELECT {_CADASTRO} AS dia,
+                  count(*) AS cadastradas,
+                  count(*) FILTER (WHERE t.status = 'Pendente') AS ainda_pendentes,
+                  count(DISTINCT t.pessoa_id) AS pessoas
+                FROM perf_l1_tarefa t
+                JOIN perf_pessoa p ON p.id = t.pessoa_id
+                WHERE p.equipe = :team AND p.ativo
+                  AND t.cadastrado_em >= now() - make_interval(days => :dias)
+                GROUP BY 1
+                ORDER BY 1
+                """
+            ),
+            {"team": team, "dias": int(dias)},
+        ).fetchall()
+        return [
+            {
+                "dia": r.dia.isoformat() if hasattr(r.dia, "isoformat") else str(r.dia),
+                "cadastradas": int(r.cadastradas),
+                "ainda_pendentes": int(r.ainda_pendentes),
+                "pessoas": int(r.pessoas),
             }
             for r in rows
         ]
@@ -293,12 +452,58 @@ class BalanceadorService:
         self.db.commit()
         return {"ok": True, "registrados": len(alvos or [])}
 
+    @staticmethod
+    def _carregar_l1_pool(client, endpoint: str, flt: str, max_itens: int) -> tuple:
+        """Pagina UM endpoint do L1 (/Tasks ou /Appointments) com o filtro dado.
+        Os dois compartilham o modelo (participants, statusId, endDateTime,
+        subTypeId) — só o endpoint muda. Retorna (raw, total_real, capado)."""
+        raw, skip, total_real, capado = [], 0, None, False
+        while skip < max_itens:
+            params = {
+                "$filter": flt, "$top": "30", "$skip": str(skip),
+                "$orderby": "endDateTime", "$select": "id,subTypeId,endDateTime,description",
+            }
+            if skip == 0:
+                params["$count"] = "true"
+            r = client._request_with_retry("GET", f"{client.base_url}{endpoint}", params=params)
+            j = r.json()
+            if total_real is None:
+                total_real = j.get("@odata.count")
+            batch = j.get("value", [])
+            raw.extend(batch)
+            if len(batch) < 30:
+                break
+            skip += 30
+        else:
+            capado = True
+        return raw, (total_real or 0), capado
+
     # ── LIVE: pendentes não-iniciadas de uma pessoa, direto do L1 ──
-    def live_pessoa(self, team: str, pessoa_id: int, dias: int, incluir_atrasadas: bool = True) -> dict:
+    def live_pessoa(
+        self,
+        team: str,
+        pessoa_id: int,
+        dias: int = 0,
+        incluir_atrasadas: bool = True,
+        inicio: str | None = None,
+        fim: str | None = None,
+        apenas_publicacoes: bool = False,
+        cad_inicio: str | None = None,
+        cad_fim: str | None = None,
+    ) -> dict:
         """Pendentes NÃO iniciadas (statusId=0) da pessoa, AO VIVO do L1 (filtro
         por participante). Agrupa por subtipo (nome via catálogo local
         LegalOneTaskSubType) + devolve os detalhes. Base da redistribuição em
-        tempo real — o número que o supervisor vê é o de AGORA, não o snapshot."""
+        tempo real — o número que o supervisor vê é o de AGORA, não o snapshot.
+
+        Recorte de data pela **data de conclusão prevista** (endDateTime):
+        - `inicio`/`fim` (YYYY-MM-DD): faixa EXATA — puxa SÓ o que cai nas datas
+          escolhidas. As VENCIDAS (prazo < hoje) entram apenas com
+          `incluir_atrasadas=True` (checkbox no modal da faixa).
+        - fallback legado `dias>0`: janela "próximos N dias" (+ vencidas se
+          incluir_atrasadas). Mantido pra compat de chamadas antigas.
+        A ordenação é por prazo CRESCENTE (mais antigo/vencido primeiro) — a
+        divisão prioriza as de conclusão prevista mais antiga."""
         from collections import defaultdict
 
         from app.models.legal_one import LegalOneTaskSubType
@@ -318,38 +523,61 @@ class BalanceadorService:
         # do snapshot/diagnóstico) atribui. Validado empiricamente 2026-07-07:
         # participants/any sem papel puxava também onde ela é só responsável/
         # solicitante (pool de OUTRO universo), e deadLine é null nessas tarefas
-        # (o prazo real vive em endDateTime). Ordena da mais urgente, com TETO de
-        # páginas — o L1 limita a ~1,2 req/s. Recorte de data feito NO L1.
+        # (o prazo real vive em endDateTime). Ordena da mais urgente. Recorte de
+        # data feito NO L1.
         hoje = _hoje_brt()
         flt = (
             f"participants/any(pp: pp/contact/id eq {cid} and pp/isExecuter eq true)"
             " and statusId eq 0 and endDateTime ne null"
         )
-        if not incluir_atrasadas:
-            flt += f" and endDateTime ge {hoje.isoformat()}T00:00:00-03:00"
-        if dias and dias > 0:
-            teto = hoje + _dt.timedelta(days=dias)
-            flt += f" and endDateTime le {teto.isoformat()}T23:59:59-03:00"
-        raw, skip, total_real, capado = [], 0, None, False
-        MAX_TAREFAS = 180  # ~6 páginas; cobre a maioria e capa os backlogs gigantes
-        while skip < MAX_TAREFAS:
-            params = {
-                "$filter": flt, "$top": "30", "$skip": str(skip),
-                "$orderby": "endDateTime", "$select": "id,subTypeId,endDateTime,description",
-            }
-            if skip == 0:
-                params["$count"] = "true"
-            r = client._request_with_retry("GET", f"{client.base_url}/Tasks", params=params)
-            j = r.json()
-            if total_real is None:
-                total_real = j.get("@odata.count")
-            batch = j.get("value", [])
-            raw.extend(batch)
-            if len(batch) < 30:
-                break
-            skip += 30
+        if inicio or fim:
+            # Faixa EXATA por data de conclusão prevista. As VENCIDAS (prazo <
+            # hoje) só entram se `incluir_atrasadas` — antes entravam sempre, o
+            # que virou ruído depois que o calendário fixo passou a definir o
+            # recorte (decisão do operador 2026-07-29).
+            if fim:
+                flt += f" and endDateTime le {fim}T23:59:59-03:00"
+            if inicio:
+                if incluir_atrasadas:
+                    flt += (
+                        f" and (endDateTime ge {inicio}T00:00:00-03:00"
+                        f" or endDateTime lt {hoje.isoformat()}T00:00:00-03:00)"
+                    )
+                else:
+                    flt += f" and endDateTime ge {inicio}T00:00:00-03:00"
         else:
-            capado = True  # estourou o teto de páginas — há mais além das mais urgentes
+            # Legado: janela "próximos N dias" (+ vencidas se pedido).
+            if not incluir_atrasadas:
+                flt += f" and endDateTime ge {hoje.isoformat()}T00:00:00-03:00"
+            if dias and dias > 0:
+                teto = hoje + _dt.timedelta(days=dias)
+                flt += f" and endDateTime le {teto.isoformat()}T23:59:59-03:00"
+        # Recorte por DATA DE CADASTRO, feito NO L1 (creationDate é filtrável —
+        # sondado 06/08/2026: ge/le respondem 200 e o count bate). Ao vivo, não
+        # no snapshot: a redistribuição mexe no estado de AGORA, e tarefa
+        # cadastrada hoje de manhã ainda não está no snapshot (ingerido ~9h).
+        if cad_inicio:
+            flt += f" and creationDate ge {cad_inicio}T00:00:00-03:00"
+        if cad_fim:
+            flt += f" and creationDate le {cad_fim}T23:59:59-03:00"
+        # No L1 "Compromissos e Tarefas" são entidades SEPARADAS na API (/Tasks e
+        # /Appointments), mesmo modelo. A agenda de execução é a UNIÃO das duas —
+        # ler só /Tasks perdia os compromissos (audiências, prazos internos,
+        # peticionamentos) e subcontava a carga (ver docs/balanceador-compromissos-plano.md).
+        # Teto alto (decisão do operador 2026-07-22): carrega o backlog inteiro
+        # pra nunca deixar tarefa de fora da divisão. Como a ordem é prazo-antigo-
+        # primeiro, se algum dia estourar, o que fica de fora é a de prazo mais
+        # distante — nunca a mais antiga. Backstop contra runaway.
+        MAX_POR_ENDPOINT = 1500  # 50 páginas/endpoint; L1 quebra cedo se vier menos
+        raw_t, total_t, cap_t = self._carregar_l1_pool(client, "/Tasks", flt, MAX_POR_ENDPOINT)
+        raw_a, total_a, cap_a = self._carregar_l1_pool(client, "/Appointments", flt, MAX_POR_ENDPOINT)
+        for it in raw_t:
+            it["_origem"] = "tarefa"
+        for it in raw_a:
+            it["_origem"] = "compromisso"
+        raw = raw_t + raw_a
+        total_real = total_t + total_a
+        capado = cap_t or cap_a
 
         sub_ids = {t.get("subTypeId") for t in raw if t.get("subTypeId")}
         nomes = {
@@ -373,14 +601,14 @@ class BalanceadorService:
                         nomes[stid] = row.subtipo
         tarefas = []
         for t in raw:
-            sub = nomes.get(t.get("subTypeId")) or f"subtipo {t.get('subTypeId')}"
-            dl = t.get("endDateTime")
-            d = None
-            if dl:
-                try:
-                    d = _dt.datetime.fromisoformat(dl).date()
-                except ValueError:
-                    d = None
+            # subTypeId None = tarefa criada sem subtipo no L1 (avulsa/manual) —
+            # rótulo padrão da casa em vez do cru "subtipo None".
+            stid = t.get("subTypeId")
+            sub = (nomes.get(stid) or (f"subtipo {stid}" if stid else "(sem subtipo)"))
+            # Normaliza o datetime pra BRT (o L1 mistura 'Z' e '-03:00'; ver
+            # _parse_l1_dt) — a situação, a ordenação e o front dependem disso.
+            dt_prazo = _parse_l1_dt(t.get("endDateTime"))
+            d = dt_prazo.date() if dt_prazo else None
             if d is None:
                 sit = "sem_prazo"
             elif d < hoje:
@@ -392,9 +620,42 @@ class BalanceadorService:
             tarefas.append(
                 {
                     "l1_task_id": t.get("id"), "subtipo": sub, "descricao": t.get("description"),
-                    "prazo": dl, "situacao": sit,
+                    # prazo NORMALIZADO em BRT: strings comparáveis entre si (a
+                    # ordenação do front usa comparação de string).
+                    "prazo": dt_prazo.isoformat() if dt_prazo else t.get("endDateTime"),
+                    "situacao": sit,
+                    # "tarefa" | "compromisso" — o front distingue e a reatribuição
+                    # sabe qual endpoint (/Tasks ou /Appointments) bater no PATCH.
+                    "origem": t.get("_origem", "tarefa"),
                 }
             )
+
+        # Ordena por PRAZO crescente (mais antigo/vencido primeiro), sem prazo por
+        # último. Cada endpoint (/Tasks, /Appointments) já vem ordenado, mas a
+        # concatenação raw_t+raw_a furava a ordem GLOBAL — e a divisão consome
+        # essa ordem (o front pega as primeiras N). Garante aqui a prioridade das
+        # de conclusão prevista mais antiga, independentemente da origem.
+        tarefas.sort(key=lambda t: (t.get("prazo") is None, t.get("prazo") or ""))
+
+        # ── Origem Publicações ────────────────────────────────────────
+        # Marca CADA tarefa (o modal mostra o selo) e, com
+        # `apenas_publicacoes`, recorta a seleção. O recorte age SÓ aqui — na
+        # hora de escolher o que mover. A carga por pessoa, que define quem
+        # está sobrecarregado, continua sendo a fila inteira.
+        ids_vivos = [int(t["l1_task_id"]) for t in tarefas if t.get("l1_task_id")]
+        de_pub: set = set()
+        if ids_vivos:
+            de_pub = {
+                int(r.created_task_id)
+                for r in self.db.execute(
+                    text(
+                        "SELECT DISTINCT created_task_id FROM publicacao_tarefa_audit "
+                        "WHERE created_task_id = ANY(:ids)"
+                    ),
+                    {"ids": ids_vivos},
+                ).fetchall()
+            }
+        tarefas = marcar_origem_publicacoes(tarefas, de_pub, apenas_publicacoes)
 
         agg = defaultdict(lambda: {"total": 0, "atrasado": 0, "fatal_hoje": 0})
         for t in tarefas:
@@ -409,4 +670,6 @@ class BalanceadorService:
             "pessoa_id": pessoa_id, "nome": p.nome, "resolvido": True,
             "total_real": total_real, "carregadas": len(tarefas), "capado": capado,
             "subtipos": subtipos, "tarefas": tarefas,
+            "de_publicacoes": sum(1 for t in tarefas if t.get("de_publicacoes")),
+            "apenas_publicacoes": bool(apenas_publicacoes),
         }

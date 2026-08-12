@@ -28,6 +28,7 @@ from app.api.v1.endpoints import (
     distribuidos_bb,
     ged_legalone,
     offices,
+    encerramentos,
     onenotify_bb,
     onerequest,
     performance,
@@ -45,6 +46,8 @@ from app.api.v1.endpoints import (
     user_feedback,
     users,
     varredura,
+    cargos,
+    uso,
 )
 from app.core import auth as auth_security
 from app.core.config import settings
@@ -174,6 +177,18 @@ async def lifespan(_: FastAPI):
         logger.exception(
             "Falha ao inicializar watchdog de buscas de publicações no startup."
         )
+
+    # Enriquecimento de publicações com as etiquetas (tags) do processo no L1
+    # — caminho web com cache local; chip "Estratégico" e afins na tela de
+    # tratamento (uma publicação estratégica já foi perdida sem isso).
+    try:
+        from app.services.publication_etiquetas import (
+            register_publication_etiquetas_job,
+        )
+
+        register_publication_etiquetas_job(scheduler)
+    except Exception:
+        logger.exception("Falha ao registrar job de etiquetas L1 das publicações.")
 
     # Worker periódico do fluxo "Agendar Prazos Iniciais" — gated pela flag
     # prazos_iniciais_auto_classification_enabled (default off).
@@ -352,6 +367,15 @@ async def lifespan(_: FastAPI):
     except Exception:
         logger.exception("Falha ao registrar job de ingestão do Minha Equipe no startup.")
 
+    # Reagendamentos: bracket diário 07h/19h — foto da manhã vs. noite detecta os
+    # adiamentos de prazo feitos DURANTE o dia (o "calo" que era invisível).
+    try:
+        from app.services.performance.reagendamento_worker import register_reagendamento_jobs
+
+        register_reagendamento_jobs(scheduler)
+    except Exception:
+        logger.exception("Falha ao registrar jobs de reagendamento no startup.")
+
     # Análise Recursal: worker fire-and-forget — auto-submete os PDFs subidos e
     # auto-aplica os vereditos quando o batch termina (sem depender da tela).
     try:
@@ -375,10 +399,50 @@ async def lifespan(_: FastAPI):
             "Falha ao registrar o autorun do Tratamento Web de publicações no startup."
         )
 
+    # Distribuídos BB (Cadastro de Processo): coleta agendada 3x/dia + planilha.
+    try:
+        from app.services.distribuidos_bb.schedule_worker import (
+            register_distribuidos_bb_coleta_job,
+        )
+
+        register_distribuidos_bb_coleta_job(scheduler)
+    except Exception:
+        logger.exception(
+            "Falha ao registrar o agendamento da coleta Distribuídos BB no startup."
+        )
+
+    # Distribuídos BB: monitor que confirma o cadastro no L1 (de 2 em 2 min).
+    try:
+        from app.services.distribuidos_bb.cadastro_monitor_worker import (
+            register_distribuidos_bb_monitor_cadastro_job,
+        )
+
+        register_distribuidos_bb_monitor_cadastro_job(scheduler)
+    except Exception:
+        logger.exception(
+            "Falha ao registrar o monitor de cadastro L1 Distribuídos BB no startup."
+        )
+
+    # Ativos: a consulta ao DataJud acontece SÓ na ingestão (decisão do operador
+    # 2026-07-17: sem worker recorrente depois do cadastro — o que o DataJud não
+    # tiver na hora, fica com o dado da planilha e pronto).
+
     try:
         yield
     finally:
         batch_worker.stop()
+        # Descarrega o que o relatório de utilização ainda tinha em memória.
+        # Sem isto, todo redeploy perde o acumulado da última janela — e num
+        # dia de vários deploys o relatório subcontaria justamente quem estava
+        # trabalhando na hora.
+        try:
+            from app.services import uso_service
+
+            gravadas = uso_service.descarregar()
+            if gravadas:
+                logger.info("uso: %s linha(s) gravadas no shutdown", gravadas)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("uso: flush de shutdown falhou (%s)", exc)
         scheduler.shutdown()
         logger.info("APScheduler stopped")
 
@@ -406,6 +470,9 @@ app.add_middleware(
 protected_dependencies = [Depends(auth_security.get_current_user)]
 
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"], dependencies=protected_dependencies)
+app.include_router(cargos.router, prefix="/api/v1/admin", tags=["Admin"], dependencies=protected_dependencies)
+app.include_router(uso.router, prefix="/api/v1/admin", tags=["Admin: Utilização"], dependencies=protected_dependencies)
+app.include_router(cargos.me_router, prefix="/api/v1", tags=["User"], dependencies=protected_dependencies)
 # admin_notices.router usa o prefixo /api/v1 cru porque algumas rotas
 # (active/dismiss) sao acessiveis a qualquer JWT, e outras (CRUD) tem
 # guard interno de role=admin. Manter sob /api/v1/admin/notices nao
@@ -450,6 +517,11 @@ app.include_router(prazos_iniciais.intake_router, prefix="/api/v1")
 # Intake do OneRequest (motor RPA externo): auth via header
 # X-Onerequest-Api-Key, SEM JWT. Recebe números/detalhes das DMIs do BB.
 app.include_router(onerequest.intake_router, prefix="/api/v1")
+# Intake do Sistema de Encerramentos: auth via header X-Encerramentos-Api-Key,
+# SEM JWT. Encerra o processo no Legal One quando encerrado la.
+app.include_router(encerramentos.intake_router, prefix="/api/v1")
+# Menu "Encerramentos" (gestao, admin): rastro do que a integracao encerrou no L1.
+app.include_router(encerramentos.router, prefix="/api/v1", tags=["Encerramentos"], dependencies=protected_dependencies)
 # UI do operador OneRequest (tratamento + agendar): JWT + permissão onerequest.
 app.include_router(
     onerequest.router, prefix="/api/v1", tags=["OneRequest"], dependencies=protected_dependencies

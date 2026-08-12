@@ -4,7 +4,7 @@
 // distribuído por inteiro (Todas) entre os mesmos alvos.
 
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, Split, UserPlus } from "lucide-react";
+import { ArrowRight, Scale, Split, UserPlus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -42,6 +42,37 @@ function splitRR(count: number, targets: Pessoa[]): DistItem[] {
     .filter((d) => d.qtd > 0);
 }
 
+// "Igualar": distribuição multi-tipo com compensação de sobras. No splitRR puro
+// a sobra de CADA tipo cai sempre nos primeiros da lista e o desequilíbrio
+// acumula (1º da fila termina com vários a mais). Aqui a sobra de cada tipo vai
+// pra quem tem o MENOR total acumulado até então — o total final por pessoa
+// fecha com diferença de no máximo 1 tarefa, qualquer que seja o nº de tipos.
+function splitMultiIgualado(itens: FilaSubtipo[], targets: Pessoa[]): FilaResultado[] {
+  if (!targets.length) return [];
+  const acumulado = new Map<number, number>(targets.map((t) => [t.id, 0]));
+  const out: FilaResultado[] = [];
+  for (const it of itens) {
+    if (it.max <= 0) continue;
+    const base = Math.floor(it.max / targets.length);
+    const rem = it.max % targets.length;
+    const qtds = new Map<number, number>(targets.map((t) => [t.id, base]));
+    // sort estável: empate mantém a ordem original da lista
+    const porMenorTotal = [...targets].sort(
+      (a, b) => (acumulado.get(a.id) ?? 0) - (acumulado.get(b.id) ?? 0),
+    );
+    for (let i = 0; i < rem; i++) {
+      const alvo = porMenorTotal[i];
+      qtds.set(alvo.id, (qtds.get(alvo.id) ?? 0) + 1);
+    }
+    targets.forEach((t) => acumulado.set(t.id, (acumulado.get(t.id) ?? 0) + (qtds.get(t.id) ?? 0)));
+    const dist = targets
+      .map((t) => ({ toId: t.id, toNome: t.nome, qtd: qtds.get(t.id) ?? 0 }))
+      .filter((d) => d.qtd > 0);
+    if (dist.length) out.push({ subtipo: it.subtipo, dist });
+  }
+  return out;
+}
+
 export default function DistribuicaoFilaDialog({
   team,
   fromPessoa,
@@ -62,6 +93,9 @@ export default function DistribuicaoFilaDialog({
   const outros = useMemo(() => alvos.filter((a) => a.id !== fromPessoa.id), [alvos, fromPessoa.id]);
   const [todos, setTodos] = useState(true);
   const [qtd, setQtd] = useState(single ? itens[0].max : totalMax);
+  // multi-tipo: compensa as sobras entre os tipos pra fechar totais iguais
+  // (diferença máx. de 1 tarefa por pessoa). Ligado por padrão.
+  const [igualar, setIgualar] = useState(true);
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [externos, setExternos] = useState<Pessoa[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -128,7 +162,8 @@ export default function DistribuicaoFilaDialog({
     }
   };
 
-  // single: respeita "Todas/número"; multi: Todas de cada subtipo.
+  // single: respeita "Todas/número"; multi: Todas de cada subtipo (com "Igualar"
+  // compensando as sobras entre os tipos, ligado por padrão).
   const resultado = useMemo<FilaResultado[]>(() => {
     if (!targets.length) return [];
     if (single) {
@@ -136,15 +171,29 @@ export default function DistribuicaoFilaDialog({
       const d = splitRR(n, targets);
       return d.length ? [{ subtipo: itens[0].subtipo, dist: d }] : [];
     }
+    if (igualar) return splitMultiIgualado(itens, targets);
     return itens
       .map((it) => ({ subtipo: it.subtipo, dist: splitRR(it.max, targets) }))
       .filter((r) => r.dist.length);
-  }, [single, todos, qtd, targets, itens]);
+  }, [single, todos, qtd, targets, itens, igualar]);
 
   const totalDistribuido = useMemo(
     () => resultado.reduce((s, r) => s + r.dist.reduce((a, d) => a + d.qtd, 0), 0),
     [resultado],
   );
+
+  // total final por pessoa (multi) — é o número que o "Igualar" deixa parelho
+  const totaisPorPessoa = useMemo(() => {
+    const m = new Map<number, { nome: string; total: number }>();
+    for (const r of resultado) {
+      for (const d of r.dist) {
+        const cur = m.get(d.toId) ?? { nome: d.toNome, total: 0 };
+        cur.total += d.qtd;
+        m.set(d.toId, cur);
+      }
+    }
+    return [...m.values()].sort((a, b) => b.total - a.total);
+  }, [resultado]);
 
   const toggle = (id: number) =>
     setSel((s) => {
@@ -184,7 +233,8 @@ export default function DistribuicaoFilaDialog({
           ) : (
             <>
               {itens.length} tipos ({totalMax} tarefas) · de {fromPessoa.nome}. Cada tipo é espalhado por inteiro
-              (round-robin) entre os escolhidos.
+              entre os escolhidos — com <b>Igualar</b> ligado, as sobras dos tipos se compensam e o total final
+              por pessoa fecha parelho.
             </>
           )}
         </p>
@@ -276,7 +326,35 @@ export default function DistribuicaoFilaDialog({
         {/* prévia da fila */}
         {resultado.length > 0 && (
           <div className="space-y-2 rounded-lg border bg-muted/20 p-3 text-xs">
-            <div className="font-medium">Prévia da fila ({totalDistribuido} tarefa/s):</div>
+            <div className="flex items-center justify-between gap-2">
+              <div className="font-medium">Prévia da fila ({totalDistribuido} tarefa/s):</div>
+              {!single && targets.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => setIgualar((v) => !v)}
+                  title="Compensa as sobras entre os tipos pra fechar o total por pessoa parelho (diferença máx. de 1 tarefa). Desligado, cada tipo recomeça do topo da lista e as sobras acumulam nos primeiros."
+                  className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                    igualar
+                      ? "border-indigo-300 bg-indigo-50 text-indigo-700"
+                      : "border-muted-foreground/30 text-muted-foreground hover:bg-muted/50"
+                  }`}
+                >
+                  <Scale className="h-3 w-3" />
+                  Igualar {igualar ? "· ligado" : "· desligado"}
+                </button>
+              )}
+            </div>
+            {/* total final por pessoa — o número que o Igualar deixa parelho */}
+            {!single && totaisPorPessoa.length > 1 && (
+              <div className="flex flex-wrap gap-x-3 gap-y-1 rounded-md border border-dashed bg-background/60 px-2 py-1.5">
+                <span className="font-medium text-muted-foreground">Total por pessoa:</span>
+                {totaisPorPessoa.map((p) => (
+                  <span key={p.nome} className="tabular-nums">
+                    <span className="font-semibold">{p.total}×</span> {p.nome}
+                  </span>
+                ))}
+              </div>
+            )}
             {resultado.map((r) => (
               <div key={r.subtipo}>
                 {!single && <div className="truncate text-[11px] font-medium" title={r.subtipo}>{r.subtipo}</div>}

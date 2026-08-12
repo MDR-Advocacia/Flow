@@ -1,0 +1,512 @@
+"""Ingestão do cliente Ativos: lista seca de números → pré-cadastro via DataJud.
+
+O operador sobe uma planilha/CSV com os números (é tudo o que a Ativos manda).
+Extraímos os CNJs, e pra cada um o DataJud preenche a capa (classe, assunto,
+órgão, comarca, grau, tribunal, data de ajuizamento, movimentos). Vira um
+`bbd_processo` com cliente=ATIVOS. **Partes e valor da causa ficam em branco**
+(lacuna que o DataJud não cobre) pro operador completar antes do cadastro.
+
+Server-backed com progresso: um `BbAtivosLote` rastreia o andamento.
+"""
+from __future__ import annotations
+
+import io
+import logging
+import re
+import threading
+from datetime import datetime, timezone
+from typing import Optional
+
+from sqlalchemy.orm import Session
+
+from app.models.distribuidos_bb import (
+    CLIENTE_ATIVOS,
+    DATAJUD_OK,
+    DATAJUD_SEM_CAPA,
+    DUP_JA_CADASTRADO,
+    DUP_REPETIDO_LOTE,
+    LOTE_CONCLUIDO,
+    LOTE_ERRO,
+    PARTE_A_CLASSIFICAR,
+    POOL_NOVO,
+    PROC_DISTRIBUIDO,
+    BbAtivosDuplicado,
+    BbAtivosLote,
+    BbConfig,
+    BbEscritorio,
+    BbProcesso,
+)
+from app.services.distribuidos_bb.datajud_ativos import (
+    apenas_digitos,
+    consultar_capa,
+    formatar_cnj,
+)
+from app.services.distribuidos_bb.distribuicao_service import distribuir_processo
+
+logger = logging.getLogger("distribuidos_bb.ativos")
+
+# Classes que fazem do Ativos o AUTOR (cobrança ativa). Como o pré-cadastro NÃO
+# tem as partes, o polo/escritório vem da CLASSE (determinístico, do DataJud):
+# execução de título extrajudicial, monitória, carta precatória, busca e apreensão
+# → Autor; o resto (procedimento comum etc.) → Réu. Editável via config
+# `ativos_classes_autor` (casa por substring, minúsculo).
+_CLASSES_AUTOR_DEFAULT = "execu,monit,precat,busca"
+
+
+def _cfg(db: Session, chave: str, default: str) -> str:
+    c = db.get(BbConfig, chave)
+    return c.valor if (c and c.valor is not None) else default
+
+
+def _classe_para_polo(db: Session, classe: Optional[str]) -> tuple[str, str]:
+    """(posicao, polo) a partir da classe. Monitória/execução/precatória → Autor;
+    todo o resto (comuns) E classe desconhecida → Réu (default seguro; o DataJud
+    refina pra Autor depois se a classe real indicar cobrança ativa)."""
+    cl = (classe or "").strip().lower()
+    if cl:
+        kws = _cfg(db, "ativos_classes_autor", _CLASSES_AUTOR_DEFAULT)
+        if any(k.strip() and k.strip() in cl for k in kws.split(",")):
+            return "Autor", "Ativo"
+    return "Réu", "Passivo"
+
+
+def _escritorio_ativos(db: Session, posicao: str) -> BbEscritorio:
+    """Get-or-create do escritório Ativos - Réu/Autor. O path é placeholder editável
+    na tela de Configuração (o operador ajusta pro path real do L1)."""
+    nome = f"Ativos - {posicao}"
+    esc = db.query(BbEscritorio).filter(BbEscritorio.nome == nome).first()
+    if esc is None:
+        esc = BbEscritorio(
+            nome=nome,
+            escritorio_path=f"MDR Advocacia / Área operacional / Ativos / {posicao}",
+            criterio_polo=("Ativo" if posicao == "Autor" else "Passivo"),
+            ativo=True,
+            ordem=90,
+        )
+        db.add(esc)
+        db.commit()
+        db.refresh(esc)
+    return esc
+
+
+# A Ativos manda um xlsx com DUAS abas: "PARA CADASTRO" (o que entra) e
+# "JÁ CADASTRADO" (já está no Legal One/Espaider — serve só de dedupe). O
+# cabeçalho varia entre arquivos (espaço no fim, coluna MOTIVO às vezes ausente),
+# então casamos as colunas por NOME, nunca por posição.
+def _norm(v: object) -> str:
+    return ("" if v is None else str(v)).strip()
+
+
+def _mapear_colunas(hdr: list) -> dict[str, int]:
+    """Aponta cada coluna canônica pelo nome do cabeçalho (robusto à variação)."""
+    idx: dict[str, int] = {}
+    for i, h in enumerate(hdr):
+        H = _norm(h).upper()
+        if not H:
+            continue
+        if H.startswith("PROC"):
+            idx["cnj"] = i
+        elif H.startswith("UF"):
+            idx["uf"] = i
+        elif H.startswith("DATA"):
+            idx["data"] = i
+        elif H.startswith("TIPO"):
+            idx["tipo"] = i
+        elif H.startswith("REMETENTE"):
+            idx["remetente"] = i
+        elif "CONTROLE" in H:
+            idx["controle"] = i
+        elif H.startswith("CLIENTE"):
+            idx["parte"] = i  # nome da parte contrária (quando vem preenchido)
+        elif H.startswith("MOTIVO"):
+            idx["motivo"] = i
+        # ESCRITORIO_DESIGNADO/ESCRITORIO = o escritório DELES (sempre MDR) → ignora.
+    return idx
+
+
+def _linha_para_dict(row: tuple, idx: dict[str, int]) -> Optional[dict]:
+    """Extrai uma linha da aba PARA CADASTRO. None se não tiver CNJ válido."""
+    def cel(k: str) -> Optional[str]:
+        i = idx.get(k)
+        if i is None or i >= len(row):
+            return None
+        s = _norm(row[i])
+        return s or None
+
+    cnj_raw = cel("cnj")
+    digs = apenas_digitos(cnj_raw)
+    if len(digs) != 20:
+        return None
+    return {
+        "cnj": formatar_cnj(digs),
+        "uf": cel("uf"),
+        "data": cel("data"),
+        "tipo": cel("tipo"),
+        "remetente": cel("remetente"),
+        "controle": cel("controle"),
+        "parte": cel("parte"),
+        "motivo": cel("motivo"),
+    }
+
+
+def parse_planilha_ativos(conteudo: bytes, nome_arquivo: str) -> tuple[list[dict], set[str]]:
+    """Lê o arquivo da Ativos.
+
+    Devolve (linhas_para_cadastro, cnjs_ja_cadastrado):
+    - linhas_para_cadastro: dicts da aba "PARA CADASTRO" (dedup por CNJ);
+    - cnjs_ja_cadastrado: dígitos dos CNJs da aba "JÁ CADASTRADO" (só p/ pular).
+
+    CSV/TXT (sem abas) caem no modo lista-seca: tudo vira PARA CADASTRO, só CNJ.
+    """
+    low = (nome_arquivo or "").lower()
+    linhas: list[dict] = []
+    ja: set[str] = set()
+    vistos: set[str] = set()
+
+    if low.endswith(".csv") or low.endswith(".txt"):
+        try:
+            texto = conteudo.decode("utf-8-sig", errors="ignore")
+        except Exception:  # noqa: BLE001
+            texto = conteudo.decode("latin-1", errors="ignore")
+        for cell in re.split(r"[\r\n,;\t]", texto):
+            digs = apenas_digitos(cell)
+            if len(digs) == 20 and digs not in vistos:
+                vistos.add(digs)
+                linhas.append({"cnj": formatar_cnj(digs), "uf": None, "data": None,
+                               "tipo": None, "remetente": None, "controle": None,
+                               "parte": None, "motivo": None})
+        return linhas, ja
+
+    import openpyxl
+
+    wb = openpyxl.load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
+    for ws in wb.worksheets:
+        titulo = (ws.title or "").strip().upper()
+        eh_ja = "JÁ CADASTRAD" in titulo or "JA CADASTRAD" in titulo
+        eh_para = "PARA CADASTRO" in titulo
+        # Só a PARA CADASTRO entra na fila. Qualquer OUTRA aba que mencione
+        # "cadastr" no título (JÁ CADASTRADO, SEM CADASTRO, etc.) é de controle
+        # da Ativos e NÃO pode ser varrida — a "SEM CADASTRO" (2 linhas) já
+        # vazou pra fila no lote de 21/07 justamente por escapar do teste
+        # antigo, que só barrava "CADASTRAD" (com D). Abas sem rótulo nenhum
+        # continuam entrando (modo lista-seca de planilha de aba única).
+        eh_outra_de_controle = (not eh_para) and (not eh_ja) and ("CADASTR" in titulo)
+        if eh_outra_de_controle:
+            logger.info("Ativos: aba %r ignorada (aba de controle, não é PARA CADASTRO).", ws.title)
+            continue
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            continue
+        idx = _mapear_colunas(list(rows[0]))
+        if "cnj" not in idx:
+            # Aba sem cabeçalho reconhecível: varre CNJs crus (fallback).
+            if not eh_ja:
+                for r in rows:
+                    for v in r:
+                        digs = apenas_digitos(v if isinstance(v, str) else _norm(v))
+                        if len(digs) == 20 and digs not in vistos:
+                            vistos.add(digs)
+                            linhas.append({"cnj": formatar_cnj(digs), "uf": None, "data": None,
+                                           "tipo": None, "remetente": None, "controle": None,
+                                           "parte": None, "motivo": None})
+            continue
+        for r in rows[1:]:
+            if all(c is None for c in r):
+                continue
+            d = _linha_para_dict(r, idx)
+            if not d:
+                continue
+            digs = apenas_digitos(d["cnj"])
+            if eh_ja:
+                ja.add(digs)
+            else:
+                # PARA CADASTRO (ou aba única sem rótulo — modo lista-seca).
+                if digs not in vistos:
+                    vistos.add(digs)
+                    linhas.append(d)
+    return linhas, ja
+
+
+def criar_lote(db: Session, *, nome_arquivo: str, total: int, user_id: Optional[int]) -> BbAtivosLote:
+    lote = BbAtivosLote(
+        nome_arquivo=nome_arquivo, total=total, disparado_por_user_id=user_id,
+    )
+    db.add(lote)
+    db.commit()
+    db.refresh(lote)
+    return lote
+
+
+def _fingerprint_ativos(cnj: str) -> str:
+    # Prefixo por cliente: o mesmo CNJ pode existir pra BB e pra Ativos (pastas
+    # diferentes), então não pode colidir no unique de fingerprint.
+    return f"ativos:cnj:{cnj}"
+
+
+# "TIPO." mistura classe processual (Procedimento Comum/Juizado) com tipo de
+# comunicação (carta de citação) e tags de sistema (PJE/PJD/GEJUR). Estas últimas
+# NÃO são classe — viram None (o DataJud traz a classe real depois).
+_TIPO_NAO_CLASSE = {"PJE", "PJD", "TJD", "GEJUR"}
+
+
+def _limpar_tipo(tipo: Optional[str]) -> Optional[str]:
+    t = (tipo or "").strip()
+    if not t:
+        return None
+    u = t.upper()
+    if u in _TIPO_NAO_CLASSE or u.startswith("CARTA"):
+        # Tags de sistema e tipos de comunicação (carta de citação/intimação) NÃO
+        # são classe processual → deixa vazio; o DataJud traz a classe real depois.
+        return None
+    return t
+
+
+def _natureza_do_cnj(digs: str) -> str:
+    """Natureza do CATÁLOGO do L1 pelo segmento J do CNJ (posição 14):
+    5 = Justiça do Trabalho → Trabalhista; resto → Civel. ASCII de propósito —
+    o parser do import do L1 mutila acentos do nosso xlsx (visto no staging) e o
+    catálogo aceita a forma sem acento (padrão que o fluxo BB sempre usou)."""
+    return "Trabalhista" if len(digs) == 20 and digs[13] == "5" else "Civel"
+
+
+def _montar_tramitacao(uf: Optional[str], comarca: Optional[str] = None,
+                       orgao: Optional[str] = None) -> Optional[str]:
+    """Formata no padrão que `parse_tramitacao` espera: 'Comarca/UF - Orgao'."""
+    uf = (uf or "").strip()
+    comarca = (comarca or "").strip()
+    orgao = (orgao or "").strip()
+    if not (uf or comarca or orgao):
+        return None
+    base = f"{comarca}/{uf}" if uf else comarca
+    return f"{base} - {orgao}" if orgao else base
+
+
+def _cadastrar_lote(db: Session, lote_id: int, processo_ids: list[int]) -> None:
+    """Gera a planilha de migração DESTE lote e importa no Legal One.
+
+    Fecha o fluxo sequencial pedido: subiu → DataJud → planilha → cadastro. Usa o
+    mesmo import interno do BB (é ele que dispara o workflow no L1; o POST
+    /Lawsuits da API REST não dispara). O monitor confirma cada pasta depois.
+    """
+    from app.services.distribuidos_bb.import_l1_service import cadastrar_planilha
+    from app.services.distribuidos_bb.planilha_service import (
+        cnjs_liberados_da_planilha,
+        gerar_e_persistir,
+    )
+
+    planilha = gerar_e_persistir(db, processo_ids=processo_ids, cliente=CLIENTE_ATIVOS)
+    if planilha is None:
+        return
+    db.commit()
+
+    # `cnjs_liberados` é OBRIGATÓRIO aqui, e a falta dele foi um bug real
+    # (10/08/2026): o L1 marca `duplicated` sempre que já existe pasta com
+    # aquele CNJ no tenant — INCLUSIVE quando a pasta é de OUTRO cliente. Como
+    # a MDR conduz os dois lados em vários processos, isso é rotina: o CNJ
+    # 0803278-77.2026.8.14.0008 já tinha pasta do BB (cadastrada em 07/08) e a
+    # pasta da ATIVOS foi recusada, ficando "Pendente cadastro" sem virar
+    # tarefa. O BB já passava essa liberação; a Ativos nasceu sem ela.
+    #
+    # A liberação é segura porque a trava anterior (`_marcar_ja_existentes_no_l1`)
+    # já removeu quem tinha pasta do MESMO cliente — o que sobra pendente só
+    # pode ser duplicata de outro cliente, que DEVE ser cadastrada.
+    rel = cadastrar_planilha(
+        bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False,
+        cnjs_liberados=cnjs_liberados_da_planilha(db, planilha.id),
+    )
+    from app.services.distribuidos_bb.cadastro_descartes import registrar_descartes
+
+    registrar_descartes(db, rel, planilha_id=planilha.id)
+    planilha.subido_legalone = True
+    planilha.subido_em = datetime.now(timezone.utc)
+    db.commit()
+    logger.info(
+        "Ativos: lote %s → planilha '%s' importada no L1 (%s pasta[s] nova[s]).",
+        lote_id, planilha.nome_arquivo, rel.get("novos", 0),
+    )
+
+
+def _registrar_duplicado(
+    db: Session, *, lote_id: int, cnj: str, digs: str, motivo: str, parte: Optional[str],
+) -> None:
+    """Persiste um CNJ pulado (idempotente: único por lote+cnj). Best-effort —
+    nunca derruba a ingestão só porque não conseguiu gravar o detalhe."""
+    try:
+        ja = (
+            db.query(BbAtivosDuplicado)
+            .filter(BbAtivosDuplicado.lote_id == lote_id, BbAtivosDuplicado.cnj_digitos == digs)
+            .first()
+        )
+        if ja:
+            return
+        db.add(BbAtivosDuplicado(
+            lote_id=lote_id, cnj=cnj, cnj_digitos=digs, motivo=motivo,
+            parte=(parte or None),
+        ))
+    except Exception:  # noqa: BLE001
+        logger.warning("Ativos: falha ao registrar duplicado %s (lote %s).", cnj, lote_id)
+
+
+def ingerir_lote_background(lote_id: int, linhas: list[dict], ja_cadastrado: set[str]) -> None:
+    """Cria os processos a partir da PLANILHA (fonte primária), consultando o
+    DataJud UMA vez por CNJ, na hora (fluxo sequencial: subiu → DataJud →
+    planilha → cadastro). Sem worker recorrente depois — decisão do operador:
+    o que o DataJud não tiver no momento, fica com o dado da planilha e pronto
+    (`datajud_status=sem_capa`). Roda em thread própria."""
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    criados_ids: list[int] = []
+    try:
+        lote = db.get(BbAtivosLote, lote_id)
+        if lote is None:
+            return
+        for linha in linhas:
+            cnj = linha.get("cnj")
+            try:
+                digs = apenas_digitos(cnj)
+                if len(digs) != 20:
+                    lote.invalidos += 1
+                    lote.processados += 1
+                    db.commit()
+                    continue
+
+                # Já está no Legal One (aba "JÁ CADASTRADO") → não recadastra.
+                if digs in ja_cadastrado:
+                    lote.duplicados += 1
+                    lote.processados += 1
+                    _registrar_duplicado(
+                        db, lote_id=lote_id, cnj=cnj, digs=digs,
+                        motivo=DUP_JA_CADASTRADO, parte=linha.get("parte"),
+                    )
+                    db.commit()
+                    continue
+
+                fp = _fingerprint_ativos(cnj)
+                if db.query(BbProcesso).filter(BbProcesso.fingerprint == fp).first():
+                    lote.duplicados += 1
+                    lote.processados += 1
+                    _registrar_duplicado(
+                        db, lote_id=lote_id, cnj=cnj, digs=digs,
+                        motivo=DUP_REPETIDO_LOTE, parte=linha.get("parte"),
+                    )
+                    db.commit()
+                    continue
+
+                classe = _limpar_tipo(linha.get("tipo"))
+                proc = BbProcesso(
+                    cliente=CLIENTE_ATIVOS,
+                    cnj=cnj,
+                    fingerprint=fp,
+                    status=PROC_DISTRIBUIDO,
+                    planilha_status=POOL_NOVO,
+                    # Natureza = CATÁLOGO do L1 (Civel/Trabalhista, ASCII), NUNCA a
+                    # classe: valor fora do catálogo reprova a validação do import
+                    # ("Campo obrigatório" em nature — 35/35 no 1º lote real). A
+                    # classe processual vai na Ação (actionType, texto livre).
+                    natureza=_natureza_do_cnj(digs),
+                    acao=classe,
+                    data_ajuizamento=linha.get("data"),
+                    adverso_principal=(linha.get("parte") or PARTE_A_CLASSIFICAR),
+                    tramitacao=_montar_tramitacao(linha.get("uf")),
+                    raw={"ativos_planilha": linha, "datajud": None},
+                )
+
+                # 2) DataJud ANTES da planilha (fluxo sequencial). A capa é mais
+                # confiável que o TIPO da planilha (que mistura classe com tipo de
+                # comunicação). Se não achar — o recém-distribuído pode não estar
+                # indexado — segue com o dado da planilha e FIM (sem_capa): não há
+                # reconsulta posterior, por decisão do operador.
+                capa = None
+                try:
+                    capa = consultar_capa(cnj)
+                except Exception:  # noqa: BLE001
+                    logger.warning("Ativos: DataJud falhou no CNJ %s (segue com a planilha).", cnj)
+                if capa:
+                    classe = capa.get("classe") or classe
+                    proc.acao = classe  # classe real do DataJud (natureza fica no catálogo)
+                    proc.situacao = capa.get("assunto")
+                    if capa.get("data_ajuizamento"):
+                        proc.data_ajuizamento = capa.get("data_ajuizamento")
+                    proc.tramitacao = _montar_tramitacao(
+                        capa.get("uf") or linha.get("uf"), capa.get("orgao_julgador")
+                    ) or proc.tramitacao
+                    proc.raw = {"ativos_planilha": linha, "datajud": capa}
+                    proc.datajud_status = DATAJUD_OK
+                    proc.datajud_verificado_em = datetime.now(timezone.utc)
+                    lote.encontrados += 1
+                else:
+                    proc.datajud_status = DATAJUD_SEM_CAPA
+                    lote.nao_encontrados += 1
+
+                # 3) Polo pela CLASSE (o pré-cadastro Ativos não tem as partes):
+                # monitória/execução/precatória/busca → Autor; comuns → Réu.
+                posicao, polo = _classe_para_polo(db, classe)
+                proc.posicao = posicao
+                proc.polo = polo
+
+                db.add(proc)
+                db.flush()  # precisa do id pros eventos da distribuição
+
+                # 4) Distribuição: MESMO motor do BB — escolhe o escritório (agora
+                # filtrado por cliente), tira o próximo da fila no rodízio e aplica
+                # a regra de observação (termo que dispara o workflow no L1).
+                distribuir_processo(db, proc)
+
+                lote.criados += 1
+                lote.processados += 1
+                db.commit()
+                criados_ids.append(proc.id)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+                logger.exception("Ativos: falha ao ingerir CNJ %s (lote %s).", cnj, lote_id)
+                lote = db.get(BbAtivosLote, lote_id)
+                if lote:
+                    lote.processados += 1
+                    db.commit()
+
+        # 5) Fecha a sequência: planilha de migração do que ENTROU neste lote e
+        # cadastro no L1 (o import interno é o que dispara o workflow — o POST
+        # /Lawsuits da API REST não dispara). Best-effort: nunca derruba o lote.
+        if criados_ids:
+            try:
+                _cadastrar_lote(db, lote_id, criados_ids)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Ativos: cadastro do lote %s falhou.", lote_id)
+                lote = db.get(BbAtivosLote, lote_id)
+                if lote:
+                    lote.erro = f"Processos criados, mas o cadastro no L1 falhou: {exc}"
+                    db.commit()
+
+        lote = db.get(BbAtivosLote, lote_id)
+        if lote:
+            lote.status = LOTE_CONCLUIDO
+            lote.concluido_em = datetime.now(timezone.utc)
+            db.commit()
+        logger.info("Ativos: lote %s concluído (criados=%s, dup=%s).",
+                    lote_id, lote.criados if lote else "?", lote.duplicados if lote else "?")
+    except Exception:  # noqa: BLE001
+        logger.exception("Ativos: erro geral no lote %s.", lote_id)
+        try:
+            lote = db.get(BbAtivosLote, lote_id)
+            if lote:
+                lote.status = LOTE_ERRO
+                lote.erro = "Erro inesperado na ingestão."
+                db.commit()
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        db.close()
+
+
+def disparar_ingestao(db: Session, *, conteudo: bytes, nome_arquivo: str, user_id: Optional[int]) -> dict:
+    """Lê a planilha (aba PARA CADASTRO), cria o lote e dispara a ingestão em background."""
+    linhas, ja = parse_planilha_ativos(conteudo, nome_arquivo)
+    if not linhas:
+        raise ValueError("Nenhum número de processo (CNJ) válido encontrado na aba PARA CADASTRO.")
+    lote = criar_lote(db, nome_arquivo=nome_arquivo, total=len(linhas), user_id=user_id)
+    thread = threading.Thread(
+        target=ingerir_lote_background, args=(lote.id, linhas, ja), daemon=True,
+    )
+    thread.start()
+    return {"lote_id": lote.id, "total": len(linhas), "ja_cadastrado": len(ja)}

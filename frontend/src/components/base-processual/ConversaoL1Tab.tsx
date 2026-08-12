@@ -189,7 +189,7 @@ export function ConversaoL1Tab() {
                 33.923.798/0001-00).
               </p>
               <p>
-                · Responsável: <strong>Jose Alberto Veloso de Carvalho</strong>{" "}
+                · Responsável: <strong>Enzo Pinto Bagatoli Carriço</strong>{" "}
                 · Escritório:{" "}
                 <strong>MDR Advocacia / Área operacional / Banco Master / Réu</strong>.
               </p>

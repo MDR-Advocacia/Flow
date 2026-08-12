@@ -8,7 +8,7 @@
 // setor/responsável/data (motor parametrizado), processo clicável -> L1,
 // tarefas pendentes/concluídas na pasta, e log de anotações por DMI.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Card,
@@ -75,6 +75,7 @@ import {
   Lightbulb,
   Loader2,
   type LucideIcon,
+  ChevronsUpDown,
   Pause,
   Pencil,
   Play,
@@ -111,6 +112,7 @@ import {
   OnerequestSolicitacao,
   StatusL1,
   Sugestao,
+  syncFonte,
   updateTratamento,
   verificarProcessoL1,
   verificarStatusL1,
@@ -382,6 +384,13 @@ export default function OnerequestPage() {
   const [editData, setEditData] = useState("");
   const [saving, setSaving] = useState(false);
   const [scheduling, setScheduling] = useState(false);
+  // Trava 1 — clique reflexo: o botao de agendar so' arma alguns instantes
+  // depois de o modal abrir. Em fluxo repetitivo (um item a cada ~15s) o
+  // segundo clique do operador caia em cima dele e agendava sem leitura.
+  const [agendarArmado, setAgendarArmado] = useState(false);
+  // Trava 2 — confirmacao SEMPRE (nao so' na duplicidade): guarda o resumo
+  // do que sera' criado enquanto o operador confirma.
+  const [confirmarAgendamento, setConfirmarAgendamento] = useState(false);
   const [sugestao, setSugestao] = useState<Sugestao | null>(null);
   const [sugerido, setSugerido] = useState(false);
   const [l1, setL1] = useState<L1Tarefas | null>(null);
@@ -518,6 +527,60 @@ export default function OnerequestPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Ao abrir a página, espelha o Postgres da fonte (RPA) em 2º plano — o
+  // backend tem throttle de 3 min, então N operadores abrindo em sequência não
+  // martelam a fonte. Se o sync realmente rodou, recarrega a lista já fresca.
+  const syncFonteDisparado = useRef(false);
+  useEffect(() => {
+    if (syncFonteDisparado.current) return;
+    syncFonteDisparado.current = true;
+    syncFonte()
+      .then((r) => {
+        if (r.executado) load();
+      })
+      .catch(() => {});
+  }, [load]);
+
+  // Auto-verificação no L1: sempre que a listagem carrega, checa em 2º plano
+  // (silencioso) as DMIs desta página AINDA NÃO checadas — a linha atualiza
+  // sozinha de "não checado" pro status real. As já checadas ficam em cache e
+  // não re-batem no L1. O botão "Verificar L1" continua pra forçar re-checagem.
+  const autoVerifyInFlight = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    if (loading) return;
+    const pend = items.filter(
+      (s) =>
+        (s.proc_utilizavel || s.npj_direcionador) &&
+        !s.proc_l1_checado_em &&
+        !autoVerifyInFlight.current.has(s.id),
+    );
+    if (pend.length === 0) return;
+    pend.forEach((s) => autoVerifyInFlight.current.add(s.id));
+    const fila = [...pend];
+    const worker = async () => {
+      while (fila.length) {
+        const sol = fila.shift();
+        if (!sol) break;
+        try {
+          const r = await verificarProcessoL1(sol.id);
+          setItems((prev) =>
+            prev.map((it) =>
+              it.id === sol.id
+                ? { ...it, proc_l1_encontrado: r.encontrado, proc_l1_via: r.via, proc_l1_checado_em: new Date().toISOString() }
+                : it,
+            ),
+          );
+        } catch {
+          /* mantém a linha como estava; segue */
+        } finally {
+          autoVerifyInFlight.current.delete(sol.id);
+        }
+      }
+    };
+    // Concorrência 4 (mesmo teto do botão) — o L1 é rate-limitado.
+    void Promise.all(Array.from({ length: Math.min(4, pend.length) }, worker));
+  }, [items, loading]);
 
   useEffect(() => {
     getOptions().then((o) => setSetores(o.setores)).catch(() => {});
@@ -662,22 +725,27 @@ export default function OnerequestPage() {
   const [respEditFor, setRespEditFor] = useState<number | null>(null);
   const [respSaving, setRespSaving] = useState<number | null>(null);
 
-  const trocarResponsavel = async (sol: OnerequestSolicitacao, u: FormUser) => {
+  const trocarResponsavel = async (sol: OnerequestSolicitacao, u: FormUser | null) => {
     setRespSaving(sol.id);
+    setRespEditFor(null);
     try {
-      await updateTratamento(sol.id, { responsavel_user_id: u.id });
+      await updateTratamento(sol.id, { responsavel_user_id: u ? u.id : null });
       // Atualiza a linha localmente (sem reload da página inteira).
       setItems((prev) =>
         prev.map((it) =>
-          it.id === sol.id ? { ...it, responsavel_user_id: u.id, responsavel_nome: u.name } : it,
+          it.id === sol.id
+            ? { ...it, responsavel_user_id: u ? u.id : null, responsavel_nome: u ? u.name : null }
+            : it,
         ),
       );
-      toast({ title: "Responsável atualizado", description: `${sol.numero_solicitacao} → ${u.name}` });
+      toast({
+        title: u ? "Responsável atualizado" : "Responsável removido",
+        description: u ? `${sol.numero_solicitacao} → ${u.name}` : sol.numero_solicitacao,
+      });
     } catch (e) {
       toast({ title: "Erro ao trocar responsável", description: String((e as Error).message), variant: "destructive" });
     } finally {
       setRespSaving(null);
-      setRespEditFor(null);
     }
   };
 
@@ -741,6 +809,9 @@ export default function OnerequestPage() {
 
   const openModal = (sol: OnerequestSolicitacao) => {
     setSelected(sol);
+    // Desarma e rearma depois — ver "Trava 1" na declaracao do estado.
+    setAgendarArmado(false);
+    window.setTimeout(() => setAgendarArmado(true), 700);
     const u = users.find((x) => x.id === sol.responsavel_user_id);
     setEditResponsavelExt(u ? String(u.external_id) : null);
     setEditSetor(sol.setor ?? "");
@@ -914,8 +985,15 @@ export default function OnerequestPage() {
     }
   };
 
+  // Clique no botao NAO agenda mais: abre a confirmacao com o resumo.
+  const pedirConfirmacao = () => {
+    if (!selected) return;
+    setConfirmarAgendamento(true);
+  };
+
   const handleAgendar = async () => {
     if (!selected) return;
+    setConfirmarAgendamento(false);
     const ok = await saveTratamento();
     if (!ok) return;
     setScheduling(true);
@@ -1225,7 +1303,7 @@ export default function OnerequestPage() {
             variant="outline"
             onClick={verificarProcessoL1Pagina}
             disabled={checkingProc || loading || items.length === 0}
-            title="Verifica no Legal One se o processo de cada DMI desta página existe (CNJ/NPJ) — sem criar tarefa"
+            title="Re-verifica TODAS as DMIs da página no Legal One (as não checadas já verificam sozinhas ao carregar) — útil quando a pasta foi criada depois"
           >
             {checkingProc ? (
               <>
@@ -1483,7 +1561,8 @@ export default function OnerequestPage() {
                         )}
                       </TableCell>
                       <TableCell className="text-sm">
-                        {/* Troca inline: clica no nome (ou no —) e escolhe no combobox. */}
+                        {/* Dropdown de responsável (busca por nome) direto na listagem —
+                            troca sem abrir o Tratar nem mexer no L1. */}
                         <Popover
                           open={respEditFor === sol.id}
                           onOpenChange={(o) => setRespEditFor(o ? sol.id : null)}
@@ -1491,25 +1570,23 @@ export default function OnerequestPage() {
                           <PopoverTrigger asChild>
                             <button
                               type="button"
-                              className="group inline-flex max-w-[180px] items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-muted/60"
+                              className="inline-flex w-full max-w-[190px] items-center justify-between gap-1 rounded-md border bg-background px-2 py-1 text-left text-xs shadow-sm transition-colors hover:bg-muted/60"
                               title="Trocar o responsável"
                               disabled={respSaving === sol.id}
                             >
                               {respSaving === sol.id ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
                               ) : (
-                                <>
-                                  <span className="truncate">
-                                    {sol.responsavel_nome ?? <span className="text-muted-foreground">—</span>}
-                                  </span>
-                                  <Pencil className="h-3 w-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
-                                </>
+                                <span className={`truncate ${sol.responsavel_nome ? "" : "text-muted-foreground"}`}>
+                                  {sol.responsavel_nome ?? "Atribuir…"}
+                                </span>
                               )}
+                              <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                             </button>
                           </PopoverTrigger>
                           <PopoverContent className="w-72 p-0" align="start">
                             <Command>
-                              <CommandInput placeholder="Buscar colaborador…" />
+                              <CommandInput placeholder="Buscar por nome…" />
                               <CommandList className="max-h-56">
                                 <CommandEmpty>Ninguém encontrado.</CommandEmpty>
                                 <CommandGroup>
@@ -1596,14 +1673,18 @@ export default function OnerequestPage() {
 
       {/* Modal de tratamento */}
       <Dialog open={!!selected} onOpenChange={(o) => !o && closeModal()}>
-        <DialogContent className="max-h-[92vh] max-w-5xl overflow-y-auto overflow-x-hidden">
+        {/* flex-col + overflow-hidden: só o MIOLO rola. Header e footer ficam
+            fixos — senão o texto longo da DMI empurra os botões de agendamento
+            pra fora da tela. */}
+        <DialogContent className="flex max-h-[92vh] max-w-5xl flex-col overflow-hidden">
           {selected && (
             <>
-              <DialogHeader>
+              <DialogHeader className="shrink-0">
                 <DialogTitle className="font-mono text-base">DMI {selected.numero_solicitacao}</DialogTitle>
                 <DialogDescription>{selected.titulo ?? "Sem título"}</DialogDescription>
               </DialogHeader>
 
+              <div className="-mr-2 min-h-0 flex-1 space-y-4 overflow-y-auto overflow-x-hidden pr-2">
               <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
                 <div><span className="text-muted-foreground">NPJ:</span> {selected.npj_direcionador ?? "—"}</div>
                 <div><span className="text-muted-foreground">Polo:</span> {selected.polo ?? "—"}</div>
@@ -1615,7 +1696,7 @@ export default function OnerequestPage() {
               {selected.texto_dmi && (
                 <div>
                   <Label className="text-xs text-muted-foreground">Conteúdo da DMI</Label>
-                  <div className="mt-1 max-h-[55vh] min-h-[8rem] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted p-3 text-sm leading-relaxed">
+                  <div className="mt-1 max-h-[28vh] min-h-[6rem] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted p-3 text-sm leading-relaxed">
                     {selected.texto_dmi}
                   </div>
                 </div>
@@ -1792,8 +1873,9 @@ export default function OnerequestPage() {
                   <span>{selected.last_error}</span>
                 </div>
               )}
+              </div>
 
-              <DialogFooter className="gap-2 sm:justify-between">
+              <DialogFooter className="shrink-0 gap-2 border-t pt-3 sm:justify-between">
                 <Button variant="ghost" onClick={handleIgnorar} disabled={saving || scheduling}>
                   Sem providência
                 </Button>
@@ -1802,7 +1884,13 @@ export default function OnerequestPage() {
                     {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                     Salvar
                   </Button>
-                  <Button onClick={handleAgendar} disabled={saving || scheduling}>
+                  <Button
+                    onClick={pedirConfirmacao}
+                    disabled={saving || scheduling || !agendarArmado}
+                    title={!agendarArmado
+                      ? "Aguarde um instante — evita clique acidental"
+                      : "Revise antes de criar a tarefa no Legal One"}
+                  >
                     {scheduling ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CalendarCheck className="mr-2 h-4 w-4" />}
                     Agendar no Legal One
                   </Button>
@@ -1810,6 +1898,56 @@ export default function OnerequestPage() {
               </DialogFooter>
             </>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Confirmação do agendamento — SEMPRE, não só quando há duplicidade.
+          Mostra o que vai ser criado (responsável e data) porque o erro que
+          motivou esta trava foi justamente agendar sem ler a tela. */}
+      <Dialog open={confirmarAgendamento} onOpenChange={setConfirmarAgendamento}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Criar a tarefa no Legal One?</DialogTitle>
+            <DialogDescription>
+              Confira antes de confirmar — depois de criada, a tarefa existe no
+              Legal One.
+            </DialogDescription>
+          </DialogHeader>
+          {selected && (
+            <div className="space-y-2 rounded-md border bg-muted/40 p-3 text-sm">
+              <div className="line-clamp-2 font-medium">{selected.titulo}</div>
+              <div className="flex justify-between gap-3">
+                <span className="text-muted-foreground">Responsável</span>
+                <span className="text-right font-medium">
+                  {users.find((u) => String(u.external_id) === editResponsavelExt)?.name
+                    ?? "— não definido —"}
+                </span>
+              </div>
+              <div className="flex justify-between gap-3">
+                <span className="text-muted-foreground">Conclusão prevista</span>
+                <span className="text-right font-medium">
+                  {editData
+                    ? editData.split("-").reverse().join("/")
+                    : "— não definida —"}
+                </span>
+              </div>
+              {editSetor && (
+                <div className="flex justify-between gap-3">
+                  <span className="text-muted-foreground">Setor</span>
+                  <span className="text-right font-medium">{editSetor}</span>
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter className="gap-2 sm:justify-end">
+            <Button variant="outline" onClick={() => setConfirmarAgendamento(false)}>
+              Cancelar
+            </Button>
+            <Button onClick={handleAgendar} disabled={scheduling}>
+              {scheduling && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Confirmar e criar
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

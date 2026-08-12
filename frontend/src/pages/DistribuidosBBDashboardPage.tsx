@@ -2,21 +2,40 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
+  BarChart3,
   Building2,
   CheckCircle2,
+  List,
   CloudDownload,
+  Upload,
   Download,
+  FileSpreadsheet,
   Inbox,
+  Layers,
   ListChecks,
   Loader2,
   type LucideIcon,
   RefreshCw,
   Settings,
   ShieldAlert,
-  ShieldCheck,
   UserX,
   Users,
 } from "lucide-react";
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip as RTooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import ImportarAtivosDialog from "@/components/distribuidos-bb/ImportarAtivosDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,11 +53,33 @@ import { useToast } from "@/hooks/use-toast";
 import {
   DashboardData,
   RunResumo,
+  baixarPlanilhaArquivada,
+  gerarPlanilhaNoHistorico,
   dispararColeta,
   getDashboard,
   getRun,
   rodarSeed,
 } from "@/services/distribuidos-bb";
+
+const CHART_COLORS = [
+  "#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#ef4444",
+  "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#6366f1",
+];
+
+function fmtDataCurta(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
+}
+
+function fmtDiaMes(d: string): string {
+  const m = d.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[3]}/${m[2]}` : d;
+}
+
+function fmtDataDMA(d: string): string {
+  const m = d.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : d;
+}
 
 function Kpi({
   label,
@@ -73,14 +114,27 @@ function Kpi({
   );
 }
 
+// O backend fala DD/MM/AAAA; o <input type="date"> nativo fala ISO (AAAA-MM-DD).
+// Convertemos nos dois sentidos pra manter o payload/back intactos e ganhar o calendário.
+function brParaIso(br: string): string {
+  const m = br.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : "";
+}
+function isoParaBr(iso: string): string {
+  const m = iso.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : "";
+}
+
 export default function DistribuidosBBDashboardPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(false);
+  const [escViewGrafico, setEscViewGrafico] = useState(false);
 
   // Coleta
   const [coletaOpen, setColetaOpen] = useState(false);
+  const [ativosOpen, setAtivosOpen] = useState(false);
   const [dataIni, setDataIni] = useState("");
   const [dataFim, setDataFim] = useState("");
   const [confirmarCiencia, setConfirmarCiencia] = useState(false);
@@ -88,11 +142,47 @@ export default function DistribuidosBBDashboardPage() {
   const [disparando, setDisparando] = useState(false);
   const [runAtivo, setRunAtivo] = useState<RunResumo | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [gerandoPlanilha, setGerandoPlanilha] = useState(false);
+
+  const gerarPlanilhaDoPool = useCallback(async () => {
+    setGerandoPlanilha(true);
+    try {
+      const pl = await gerarPlanilhaNoHistorico();
+      await baixarPlanilhaArquivada(pl.id, pl.nome_arquivo);
+      toast({
+        title: "Planilha gerada",
+        description: `${pl.total_processos} processo(s) do pool exportado(s) e marcado(s) como "Planilha gerada".`,
+      });
+      setData(await getDashboard());
+    } catch (e) {
+      toast({ title: "Nada para gerar", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setGerandoPlanilha(false);
+    }
+  }, [toast]);
+
+  // Filtro do gráfico de capturas: clicar num chip do "Por cliente" recorta a
+  // série; clicar de novo (ou no chip ativo) volta ao total. Client-side — a
+  // resposta do dashboard já traz a quebra por cliente por dia.
+  const [clienteFiltro, setClienteFiltro] = useState<string | null>(null);
+
+  const labelCliente = (tag: string) =>
+    tag === "ATIVOS" ? "Ativos" : tag === "BB" ? "Banco do Brasil" : "Outros clientes";
+  const corCliente = (tag: string) =>
+    tag === "ATIVOS" ? "bg-violet-500" : tag === "BB" ? "bg-yellow-500" : "bg-slate-400";
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setData(await getDashboard());
+      const dash = await getDashboard();
+      setData(dash);
+      // Tracking PERSISTENTE: se há uma coleta rodando no servidor, reengata o
+      // acompanhamento ao montar/atualizar a tela — não depende de o operador
+      // ter ficado na página quando disparou (trocar de tela não perde o track).
+      const ur = dash.ultima_run;
+      if (ur && ur.status === "EM_ANDAMENTO") {
+        setRunAtivo((atual) => (atual && atual.id === ur.id ? atual : ur));
+      }
     } catch (e) {
       toast({ title: "Erro ao carregar", description: String((e as Error).message), variant: "destructive" });
     } finally {
@@ -198,7 +288,7 @@ export default function DistribuidosBBDashboardPage() {
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
             <Building2 className="h-6 w-6 text-[hsl(var(--dunatech-blue))]" />
-            Distribuídos BB — Acompanhamento
+            Cadastro de Processo — Acompanhamento
           </h1>
           <p className="text-sm text-muted-foreground">
             Processos distribuídos do Banco do Brasil: coleta, ciência, distribuição e cadastro no Legal One.
@@ -208,6 +298,10 @@ export default function DistribuidosBBDashboardPage() {
           <Button size="sm" onClick={() => setColetaOpen(true)}>
             <CloudDownload className="mr-2 h-4 w-4" />
             Nova coleta
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setAtivosOpen(true)}>
+            <Upload className="mr-2 h-4 w-4" />
+            Importar lista (Ativos)
           </Button>
           <Button variant="outline" size="sm" onClick={() => navigate("/distribuidos-bb")}>
             <ListChecks className="mr-2 h-4 w-4" />
@@ -269,23 +363,165 @@ export default function DistribuidosBBDashboardPage() {
         </Card>
       )}
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <Kpi label="Total capturados" value={k?.total ?? 0} icon={Inbox} tone="bg-blue-100 text-blue-700" onClick={() => navigate("/distribuidos-bb")} />
-        <Kpi label="Aguardando ciência" value={k?.coletados ?? 0} icon={ShieldCheck} tone="bg-slate-100 text-slate-700" onClick={() => navigate("/distribuidos-bb?status=COLETADO")} />
         <Kpi label="Distribuídos" value={k?.distribuidos ?? 0} icon={Users} tone="bg-sky-100 text-sky-700" onClick={() => navigate("/distribuidos-bb?status=DISTRIBUIDO")} />
-        <Kpi label="Cadastrados no L1" value={k?.cadastrados ?? 0} icon={CheckCircle2} tone="bg-emerald-100 text-emerald-700" onClick={() => navigate("/distribuidos-bb?status=CADASTRADO")} />
+        <Kpi label="Cadastrados no L1" value={data?.planilhas?.cadastrado_l1 ?? 0} icon={CheckCircle2} tone="bg-emerald-100 text-emerald-700" onClick={() => navigate("/distribuidos-bb")} />
         <Kpi label="Sem responsável" value={k?.sem_responsavel ?? 0} icon={UserX} tone="bg-amber-100 text-amber-700" />
         <Kpi label="Erros / revisão" value={(k?.erros ?? 0) + (k?.revisao ?? 0)} icon={AlertTriangle} tone="bg-rose-100 text-rose-700" onClick={() => navigate("/distribuidos-bb?status=ERRO")} />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      {/* Por cliente (BB / Ativos) */}
+      {data?.por_cliente && data.por_cliente.length > 0 && (
         <Card>
           <CardHeader className="pb-3">
+            <CardTitle className="text-base">Por cliente</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-3">
+            {data.por_cliente.map((c) => (
+              <button
+                key={c.cliente}
+                type="button"
+                onClick={() =>
+                  setClienteFiltro((atual) => (atual === c.cliente ? null : c.cliente))
+                }
+                title="Filtrar o gráfico de capturas por este cliente"
+                className={`flex items-center gap-2 rounded-md border bg-card px-3 py-2 transition-colors hover:bg-accent ${
+                  clienteFiltro === c.cliente
+                    ? "ring-2 ring-primary border-primary"
+                    : clienteFiltro
+                      ? "opacity-50"
+                      : ""
+                }`}
+              >
+                <span className={`h-2.5 w-2.5 rounded-full ${corCliente(c.cliente)}`} />
+                <span className="text-sm">{labelCliente(c.cliente)}</span>
+                <span className="text-base font-semibold">{c.total}</span>
+              </button>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Distribuição por data (capturas) + última passagem */}
+      <Card>
+        <CardHeader className="flex-row items-center justify-between space-y-0 pb-3">
+          <CardTitle className="text-base">
+            Distribuição por data (capturas)
+            {clienteFiltro && (
+              <span className="ml-2 text-sm font-normal text-muted-foreground">
+                · {labelCliente(clienteFiltro)} —{" "}
+                <button
+                  type="button"
+                  className="underline hover:text-foreground"
+                  onClick={() => setClienteFiltro(null)}
+                >
+                  limpar
+                </button>
+              </span>
+            )}
+          </CardTitle>
+          {data?.ultima_passagem?.data && (
+            <span className="rounded-md bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground">
+              Última passagem:{" "}
+              <strong className="text-foreground">{fmtDataCurta(data.ultima_passagem.data)}</strong> ·{" "}
+              <strong className="text-foreground">{data.ultima_passagem.capturados}</strong> capturados
+            </span>
+          )}
+        </CardHeader>
+        <CardContent>
+          {(data?.por_data ?? []).length === 0 ? (
+            <div className="py-10 text-center text-sm text-muted-foreground">Sem capturas ainda.</div>
+          ) : (
+            <div className="h-[210px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart
+                  data={(data!.por_data ?? []).map((d) => ({
+                    ...d,
+                    total: clienteFiltro ? (d.clientes?.[clienteFiltro] ?? 0) : d.total,
+                  }))}
+                  margin={{ left: -14, right: 8, top: 6 }}
+                >
+                  <defs>
+                    <linearGradient id="gData" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.35} />
+                      <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+                  <XAxis
+                    dataKey="data"
+                    fontSize={11}
+                    tickLine={false}
+                    minTickGap={24}
+                    tickFormatter={fmtDiaMes}
+                  />
+                  <YAxis fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} width={28} />
+                  <RTooltip labelFormatter={(l) => fmtDataDMA(String(l))} />
+                  <Area
+                    type="monotone"
+                    dataKey="total"
+                    name="Capturados"
+                    stroke="#3b82f6"
+                    fill="url(#gData)"
+                    strokeWidth={2}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader className="flex-row items-center justify-between space-y-0 pb-3">
             <CardTitle className="text-base">Por escritório responsável</CardTitle>
+            <div className="flex items-center gap-0.5 rounded-md border p-0.5">
+              <button
+                type="button"
+                onClick={() => setEscViewGrafico(false)}
+                title="Lista"
+                className={`rounded p-1 ${!escViewGrafico ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/50"}`}
+              >
+                <List className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setEscViewGrafico(true)}
+                title="Gráfico"
+                className={`rounded p-1 ${escViewGrafico ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/50"}`}
+              >
+                <BarChart3 className="h-4 w-4" />
+              </button>
+            </div>
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
             {(data?.por_escritorio ?? []).length === 0 ? (
               <div className="py-6 text-center text-sm text-muted-foreground">Sem processos ainda.</div>
+            ) : escViewGrafico ? (
+              <div style={{ height: Math.max(160, data!.por_escritorio.length * 46) }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={data!.por_escritorio} layout="vertical" margin={{ left: 8, right: 20 }}>
+                    <XAxis type="number" fontSize={11} allowDecimals={false} hide />
+                    <YAxis
+                      type="category"
+                      dataKey="escritorio"
+                      width={320}
+                      fontSize={10}
+                      interval={0}
+                      tickLine={false}
+                      axisLine={false}
+                    />
+                    <RTooltip />
+                    <Bar dataKey="total" fill="#3b82f6" radius={[0, 4, 4, 0]}>
+                      {data!.por_escritorio.map((_, i) => (
+                        <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
             ) : (
               data!.por_escritorio.map((row) => (
                 <button
@@ -295,7 +531,7 @@ export default function DistribuidosBBDashboardPage() {
                   className="flex items-center justify-between rounded-md border bg-card px-3 py-2 text-sm transition-colors hover:bg-muted/50"
                 >
                   <span className="flex items-center gap-2">
-                    <Building2 className="h-4 w-4 text-muted-foreground" />
+                    <Building2 className="h-4 w-4 shrink-0 text-muted-foreground" />
                     {row.escritorio}
                   </span>
                   <span className="font-semibold">{row.total}</span>
@@ -306,22 +542,198 @@ export default function DistribuidosBBDashboardPage() {
         </Card>
 
         <Card>
-          <CardHeader className="pb-3 flex-row items-center justify-between space-y-0">
-            <CardTitle className="text-base">Envolvidos com contato pendente</CardTitle>
-            <Download className="h-4 w-4 text-muted-foreground" />
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Por natureza</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold">{k?.envolvidos_pendentes ?? 0}</div>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Envolvidos capturados na capa do NPJ que ainda não foram casados por CPF/CNPJ no Legal One.
-            </p>
+            {(data?.por_natureza ?? []).length === 0 ? (
+              <div className="py-10 text-center text-sm text-muted-foreground">Sem processos ainda.</div>
+            ) : (
+              <>
+                <div className="h-[190px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={data!.por_natureza}
+                        dataKey="total"
+                        nameKey="natureza"
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={42}
+                        outerRadius={78}
+                        paddingAngle={2}
+                      >
+                        {data!.por_natureza!.map((_, i) => (
+                          <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                        ))}
+                      </Pie>
+                      <RTooltip />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                  {data!.por_natureza!.map((n, i) => (
+                    <span key={n.natureza} className="flex items-center gap-1.5">
+                      <span
+                        className="h-2.5 w-2.5 rounded-full"
+                        style={{ background: CHART_COLORS[i % CHART_COLORS.length] }}
+                      />
+                      {n.natureza} ({n.total})
+                    </span>
+                  ))}
+                </div>
+              </>
+            )}
             {data?.ultima_run && (
-              <div className="mt-4 rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
-                Última coleta: {data.ultima_run.total_coletados} capturados ·{" "}
-                {data.ultima_run.confirmar_ciencia ? "ciência confirmada" : "modo seguro (sem ciência)"} ·{" "}
-                {data.ultima_run.status}
+              <div className="mt-3 rounded-md border bg-muted/30 p-2 text-xs text-muted-foreground">
+                Última coleta: {data.ultima_run.total_coletados} capturados · {data.ultima_run.status}
               </div>
             )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Gráficos: por estado (UF) + por responsável */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Distribuição por estado (UF)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(data?.por_estado ?? []).length === 0 ? (
+              <div className="py-10 text-center text-sm text-muted-foreground">Sem processos ainda.</div>
+            ) : (
+              <div className="h-[220px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={data!.por_estado} margin={{ left: -12, right: 8, top: 4 }}>
+                    <XAxis dataKey="uf" fontSize={11} tickLine={false} />
+                    <YAxis fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} width={28} />
+                    <RTooltip />
+                    <Bar dataKey="total" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Por responsável</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(data?.por_responsavel ?? []).length === 0 ? (
+              <div className="py-10 text-center text-sm text-muted-foreground">Sem processos ainda.</div>
+            ) : (
+              <div style={{ height: Math.max(160, data!.por_responsavel!.length * 28) }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={data!.por_responsavel} layout="vertical" margin={{ left: 8, right: 16 }}>
+                    <XAxis type="number" fontSize={11} allowDecimals={false} hide />
+                    <YAxis
+                      type="category"
+                      dataKey="responsavel"
+                      width={140}
+                      fontSize={11}
+                      tickLine={false}
+                      axisLine={false}
+                    />
+                    <RTooltip />
+                    <Bar dataKey="total" fill="#10b981" radius={[0, 4, 4, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Pool + planilhas pendentes de subir no Legal One */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader className="pb-3 flex-row items-center justify-between space-y-0">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Layers className="h-4 w-4 text-amber-600" />
+              Pool aguardando planilha
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-3xl font-bold">{data?.planilhas?.pool_novos ?? 0}</div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Processos novos distribuídos que ainda não entraram em nenhuma planilha. Gere quando
+              quiser — a próxima coleta traz os novos.
+            </p>
+            {/* Ciclo do cadastro: Novo → Pendente cadastro → Confirmado no L1 */}
+            <div className="mt-3 flex flex-wrap gap-2 text-xs">
+              <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-700">
+                {data?.planilhas?.pool_novos ?? 0} Novo
+              </span>
+              <span className="rounded-full bg-sky-100 px-2 py-1 text-sky-700">
+                {data?.planilhas?.pendente_cadastro ?? 0} Pendente cadastro
+              </span>
+              <span className="rounded-full bg-emerald-100 px-2 py-1 text-emerald-700">
+                {data?.planilhas?.cadastrado_l1 ?? 0} Confirmado no L1
+              </span>
+            </div>
+            <Button
+              className="mt-4"
+              size="sm"
+              onClick={gerarPlanilhaDoPool}
+              disabled={gerandoPlanilha || (data?.planilhas?.pool_novos ?? 0) === 0}
+            >
+              {gerandoPlanilha ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <FileSpreadsheet className="mr-2 h-4 w-4" />
+              )}
+              Gerar planilha do pool
+            </Button>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3 flex-row items-center justify-between space-y-0">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <CloudDownload className="h-4 w-4 text-[hsl(var(--dunatech-blue))]" />
+              Planilhas pendentes de subir no Legal One
+            </CardTitle>
+            <Button variant="ghost" size="sm" onClick={() => navigate("/distribuidos-bb")}>
+              Ver todas
+            </Button>
+          </CardHeader>
+          <CardContent>
+            <div className="text-3xl font-bold">{data?.planilhas?.pendentes ?? 0}</div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Planilhas já geradas que o operador ainda não marcou como subidas no Legal One.
+            </p>
+            <div className="mt-3 flex flex-col gap-2">
+              {(data?.planilhas?.recentes_pendentes ?? []).length === 0 ? (
+                <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
+                  Nenhuma planilha pendente de envio.
+                </div>
+              ) : (
+                data!.planilhas!.recentes_pendentes.map((pl) => (
+                  <div
+                    key={pl.id}
+                    className="flex items-center justify-between gap-2 rounded-md border bg-card px-3 py-2 text-sm"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate font-mono text-xs">{pl.nome_arquivo}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {pl.total_processos} processo(s) · {fmtDataCurta(pl.created_at)}
+                      </div>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="shrink-0"
+                      onClick={() => baixarPlanilhaArquivada(pl.id, pl.nome_arquivo)}
+                    >
+                      <Download className="mr-1.5 h-3.5 w-3.5" /> Baixar
+                    </Button>
+                  </div>
+                ))
+              )}
+            </div>
           </CardContent>
         </Card>
       </div>
@@ -342,13 +754,24 @@ export default function DistribuidosBBDashboardPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
                 <Label className="text-xs">Data inicial</Label>
-                <Input placeholder="DD/MM/AAAA" value={dataIni} onChange={(e) => setDataIni(e.target.value)} />
+                <Input
+                  type="date"
+                  value={brParaIso(dataIni)}
+                  onChange={(e) => setDataIni(isoParaBr(e.target.value))}
+                />
               </div>
               <div className="space-y-1">
                 <Label className="text-xs">Data final</Label>
-                <Input placeholder="DD/MM/AAAA" value={dataFim} onChange={(e) => setDataFim(e.target.value)} />
+                <Input
+                  type="date"
+                  value={brParaIso(dataFim)}
+                  onChange={(e) => setDataFim(isoParaBr(e.target.value))}
+                />
               </div>
             </div>
+            <p className="-mt-1 text-xs text-muted-foreground">
+              Clique no campo pra abrir o calendário. Deixe em branco = hoje.
+            </p>
 
             <div className="flex items-start gap-2 rounded-md border p-3">
               <Checkbox
@@ -398,6 +821,9 @@ export default function DistribuidosBBDashboardPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Importar lista (Ativos) — mesmo dialog da tela de Processos */}
+      <ImportarAtivosDialog open={ativosOpen} onOpenChange={setAtivosOpen} onDone={load} />
     </div>
   );
 }

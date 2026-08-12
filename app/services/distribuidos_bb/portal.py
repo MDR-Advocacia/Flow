@@ -105,11 +105,39 @@ class PortalBBColetor:
         from playwright.sync_api import sync_playwright
 
         sessao = self.onelog.obter_sessao()
+        # Guardada pra reuso fora do navegador (pesquisa de vínculos via HTTP
+        # direto usa a MESMA sessão autenticada, sem novo login no OneLog).
+        self.sessao_onelog = sessao
         cookies = _formatar_cookies(sessao.get("cookies", []))
         if not cookies:
             raise RuntimeError("OneLog não devolveu cookies válidos para injetar no navegador.")
 
+        # O `start()` liga um loop asyncio PROPRIO do Playwright e o mantem
+        # rodando nesta thread. Se qualquer passo daqui pra frente estourar
+        # sem que o Playwright seja parado, esse loop fica vivo — e a
+        # retentativa seguinte, na MESMA thread, morre com "Sync API inside
+        # the asyncio loop", mensagem que ESCONDE o erro real.
+        #
+        # Foi o que aconteceu em 10/08/2026: a tentativa 1 falhou por falta de
+        # display (Xvfb fora do ar), vazou o loop, e as tentativas 2 e 3
+        # gravaram no run o erro de asyncio. A investigacao foi atras de
+        # asyncio quando o problema era o display.
         self._pw = sync_playwright().start()
+        try:
+            self._abrir_navegador(cookies)
+        except BaseException:
+            # Devolve a thread ao estado limpo antes de repropagar, pra que a
+            # proxima tentativa enxergue o erro DE VERDADE.
+            try:
+                self._pw.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._pw = None
+            raise
+        return self
+
+    def _abrir_navegador(self, cookies) -> None:
+        """Sobe o Chromium e prepara contexto/pagina com a sessao do OneLog."""
         self._browser = self._pw.chromium.launch(
             headless=self.headless,
             args=[
@@ -120,7 +148,7 @@ class PortalBBColetor:
             ],
         )
         self._context = self._browser.new_context(
-            user_agent=sessao.get("user_agent"),
+            user_agent=(self.sessao_onelog or {}).get("user_agent"),
             viewport={"width": 1920, "height": 1080},
             locale="pt-BR",
             timezone_id="America/Fortaleza",
@@ -129,7 +157,6 @@ class PortalBBColetor:
         self._page = self._context.new_page()
         logger.info("Portal BB: abrindo %s", self.portal_url)
         self._page.goto(self.portal_url, wait_until="domcontentloaded", timeout=60000)
-        return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         for fechar in (
@@ -151,8 +178,8 @@ class PortalBBColetor:
     # contém o caminho do app de notificações. Provado ao vivo 2026-07-09.
     _FRAME_URL_MARK = "consultar-receber-notificacoes"
 
-    def _localizar_frame(self, timeout_ms: int = 30000):
-        """Espera o SPA montar e devolve o frame do app de notificações."""
+    def _procurar_frame(self, timeout_ms: int):
+        """Uma tentativa: espera até timeout_ms o frame do app montar. None se não veio."""
         import time as _t
 
         limite = _t.monotonic() + timeout_ms / 1000.0
@@ -166,9 +193,41 @@ class PortalBBColetor:
                     except Exception:  # noqa: BLE001
                         pass
             self._page.wait_for_timeout(1000)
+        return None
+
+    def _localizar_frame(self, timeout_ms: Optional[int] = None):
+        """Espera o SPA montar e devolve o frame do app de notificações.
+
+        O PAJ é intermitente: às vezes o SPA simplesmente não monta na primeira
+        carga (provado em prod 2026-07-16 — run falhou 09:56 e o mesmo run manual
+        passou 09:57). Então em vez de abortar na primeira, RECARREGA a página e
+        tenta de novo N vezes. Isso acontece ANTES de qualquer ciência, então
+        repetir aqui é inócuo (nada irreversível foi feito ainda).
+        """
+        tentativas = max(1, int(settings.distribuidos_bb_frame_tentativas or 3))
+        espera = int(timeout_ms or settings.distribuidos_bb_frame_timeout_ms or 30000)
+
+        for tentativa in range(1, tentativas + 1):
+            frame = self._procurar_frame(espera)
+            if frame is not None:
+                if tentativa > 1:
+                    logger.info("Portal BB: app de notificações montou na tentativa %s.", tentativa)
+                return frame
+            if tentativa < tentativas:
+                logger.warning(
+                    "Portal BB: app de notificações não montou em %ss (tentativa %s/%s) — "
+                    "recarregando a página e tentando de novo.",
+                    espera / 1000, tentativa, tentativas,
+                )
+                try:
+                    self._page.reload(wait_until="domcontentloaded", timeout=60000)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Portal BB: falha ao recarregar a página: %s", exc)
+
         raise RuntimeError(
-            "App de notificações do BB não carregou (o portal bloqueia headless — "
-            "rode com Chromium NÃO-headless sob Xvfb)."
+            f"App de notificações do BB não montou após {tentativas} tentativa(s) de "
+            f"{espera / 1000:.0f}s (com reload entre elas). Portal instável/lento no momento "
+            f"— headless={self.headless}."
         )
 
     # ── consulta ─────────────────────────────────────────────────────

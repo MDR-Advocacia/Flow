@@ -54,7 +54,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
-import { TEAMS, teamLabel } from "@/lib/teams";
+import { teamLabel, useTeams } from "@/lib/teams";
 import {
   type Candidato,
   type RosterPessoa,
@@ -79,6 +79,8 @@ export default function RosterEditor({
   onChanged?: () => void;
 }) {
   const { toast } = useToast();
+  // Catálogo dinâmico (admin cria equipe sem deploy) — ver lib/teams.
+  const teams = useTeams();
   const [rows, setRows] = useState<RosterPessoa[]>([]);
   const [loading, setLoading] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -261,7 +263,7 @@ export default function RosterEditor({
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            {TEAMS.map((t) => (
+                            {teams.map((t) => (
                               <SelectItem key={t.key} value={t.key}>
                                 {t.label}
                               </SelectItem>

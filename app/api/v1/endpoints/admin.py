@@ -429,9 +429,11 @@ class UserUpdateRequest(BaseModel):
     can_use_publications: Optional[bool] = None
     can_use_prazos_iniciais: Optional[bool] = None
     can_use_onerequest: Optional[bool] = None
+    can_use_encerramentos: Optional[bool] = None
     notify_onerequest_errors: Optional[bool] = None
     can_use_minha_equipe: Optional[bool] = None
     minha_equipe_equipes: Optional[list] = None
+    can_manage_distribuidos_bb: Optional[bool] = None
     default_office_id: Optional[int] = None
 
 
@@ -444,6 +446,7 @@ class UserResponseSchema(BaseModel):
     can_use_publications: bool
     can_use_prazos_iniciais: bool = False
     can_use_onerequest: bool = False
+    can_use_encerramentos: bool = False
     notify_onerequest_errors: bool = False
     default_office_id: Optional[int] = None
 
@@ -467,6 +470,9 @@ def list_users(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
 
     users = db.query(LegalOneUser).order_by(LegalOneUser.name).all()
+    from app.models.legal_one import FlowCargo
+
+    _cargos = {c.id: c.nome for c in db.query(FlowCargo).all()}
     return [
         {
             "id": u.id,
@@ -479,13 +485,24 @@ def list_users(
             "can_use_publications": u.can_use_publications,
             "can_use_prazos_iniciais": getattr(u, "can_use_prazos_iniciais", False),
             "can_use_onerequest": getattr(u, "can_use_onerequest", False),
+            "can_use_encerramentos": getattr(u, "can_use_encerramentos", False),
             "can_use_minha_equipe": getattr(u, "can_use_minha_equipe", False),
             "minha_equipe_equipes": _equipes_to_list(u),
+            "can_manage_distribuidos_bb": getattr(u, "can_manage_distribuidos_bb", False),
             "notify_onerequest_errors": getattr(u, "notify_onerequest_errors", False),
             "default_office_id": u.default_office_id,
-            "has_password": u.hashed_password is not None,
+            # Sem senha no sistema (identidade e' o Entra). O que o admin
+            # precisa ver aqui e' se a pessoa pode ser RESPONSAVEL por tarefa:
+            # isso exige contato no L1 (external_id).
+            "tem_contato_l1": u.external_id is not None,
             "is_sso": getattr(u, "last_sso_at", None) is not None,
-            "must_change_password": u.must_change_password,
+            # RBAC (usr005): de onde vem a permissão e se há desvio individual.
+            "cargo_id": getattr(u, "cargo_id", None),
+            "cargo_nome": _cargos.get(getattr(u, "cargo_id", None)),
+            "excecoes": (
+                len(getattr(u, "modulos_extra", None) or {})
+                + len(getattr(u, "equipes_extra", None) or {})
+            ),
         }
         for u in users
     ]
@@ -508,20 +525,27 @@ def update_user(
 
     if payload.role is not None:
         user.role = payload.role
-    if payload.can_schedule_batch is not None:
-        user.can_schedule_batch = payload.can_schedule_batch
-    if payload.can_use_publications is not None:
-        user.can_use_publications = payload.can_use_publications
-    if payload.can_use_prazos_iniciais is not None:
-        user.can_use_prazos_iniciais = payload.can_use_prazos_iniciais
-    if payload.can_use_onerequest is not None:
-        user.can_use_onerequest = payload.can_use_onerequest
-    if payload.can_use_minha_equipe is not None:
-        user.can_use_minha_equipe = payload.can_use_minha_equipe
+    # RBAC (usr005): marcar módulo/equipe aqui NÃO grava a coluna direto — vira
+    # EXCEÇÃO sobre o cargo (e some se voltar a bater com ele). Assim a tela
+    # continua funcionando e o cache materializado nunca desencontra da
+    # política. Ver app/services/permissoes.py.
+    from app.services import permissoes as _perm
+
+    _mods = {
+        "can_schedule_batch": payload.can_schedule_batch,
+        "can_use_publications": payload.can_use_publications,
+        "can_use_prazos_iniciais": payload.can_use_prazos_iniciais,
+        "can_use_onerequest": payload.can_use_onerequest,
+        "can_use_encerramentos": payload.can_use_encerramentos,
+        "can_use_minha_equipe": payload.can_use_minha_equipe,
+        "can_manage_distribuidos_bb": payload.can_manage_distribuidos_bb,
+        "notify_onerequest_errors": payload.notify_onerequest_errors,
+    }
+    _mods = {k: v for k, v in _mods.items() if v is not None}
+    if _mods:
+        _perm.definir_modulos(db, user, _mods)
     if payload.minha_equipe_equipes is not None:
-        user.minha_equipe_equipes = ",".join(payload.minha_equipe_equipes)
-    if payload.notify_onerequest_errors is not None:
-        user.notify_onerequest_errors = payload.notify_onerequest_errors
+        _perm.definir_equipes(db, user, list(payload.minha_equipe_equipes))
     if payload.default_office_id is not None:
         user.default_office_id = payload.default_office_id
 
@@ -536,76 +560,26 @@ def update_user(
         "can_use_publications": user.can_use_publications,
         "can_use_prazos_iniciais": getattr(user, "can_use_prazos_iniciais", False),
         "can_use_onerequest": getattr(user, "can_use_onerequest", False),
+        "can_use_encerramentos": getattr(user, "can_use_encerramentos", False),
         "can_use_minha_equipe": getattr(user, "can_use_minha_equipe", False),
         "minha_equipe_equipes": _equipes_to_list(user),
+        "can_manage_distribuidos_bb": getattr(user, "can_manage_distribuidos_bb", False),
         "notify_onerequest_errors": getattr(user, "notify_onerequest_errors", False),
         "default_office_id": user.default_office_id,
     }
 
 
-@router.post("/users/{user_id}/activate", tags=["Admin"])
-def activate_user(
-    user_id: int,
-    db: Session = Depends(get_db),
-    current_user: LegalOneUser = Depends(auth.get_current_user),
-):
-    """Activate user and generate temporary password (admin only)."""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
-
-    user = db.query(LegalOneUser).filter(LegalOneUser.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-
-    # Generate temporary password
-    temp_password = auth.generate_temp_password()
-    user.hashed_password = auth.get_password_hash(temp_password)
-    user.is_active = True
-    user.must_change_password = True
-
-    db.commit()
-    db.refresh(user)
-
-    # Return the plaintext password ONCE
-    return {
-        "id": user.id,
-        "email": user.email,
-        "name": user.name,
-        "temp_password": temp_password,
-        "message": "Esta senha só será exibida uma vez. Repasse-a ao usuário com segurança.",
-    }
-
-
-@router.post("/users/{user_id}/reset-password", tags=["Admin"])
-def reset_user_password(
-    user_id: int,
-    db: Session = Depends(get_db),
-    current_user: LegalOneUser = Depends(auth.get_current_user),
-):
-    """Reset user password (admin only)."""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
-
-    user = db.query(LegalOneUser).filter(LegalOneUser.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-
-    # Generate temporary password
-    temp_password = auth.generate_temp_password()
-    user.hashed_password = auth.get_password_hash(temp_password)
-    user.must_change_password = True
-
-    db.commit()
-    db.refresh(user)
-
-    # Return the plaintext password ONCE
-    return {
-        "id": user.id,
-        "email": user.email,
-        "name": user.name,
-        "temp_password": temp_password,
-        "message": "Esta senha só será exibida uma vez. Repasse-a ao usuário com segurança.",
-    }
+# Ativacao de conta e reset de senha REMOVIDOS em 07/08/2026 (decisao do
+# operador). Nao existe mais senha no Flow: a identidade e' o Entra ID.
+#
+# O fluxo agora e' um so': a pessoa entra pelo botao da Microsoft, o usuario
+# nasce SEM permissao nenhuma, e o gestor define o CARGO. Nao ha conta pra
+# "ativar" — quem tem conta no Entra tem acesso ao login; o que o gestor
+# controla e' o papel, nao a existencia.
+#
+# O que motivou: manter senha provisoria significava manter um segundo caminho
+# de entrada, um estado "criado mas inativo" que so' confundia, e um campo de
+# senha em banco que ninguem usava. Some tudo.
 
 
 @router.post("/users/{user_id}/deactivate", tags=["Admin"])
@@ -622,6 +596,11 @@ def deactivate_user(
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
+    # Bloqueio de acesso no Flow. NAO e' "desativar cadastro": o cadastro
+    # pertence ao Entra. Isto e' a tranca local, pra quando o gestor precisa
+    # cortar o acesso na hora sem esperar o RH mexer no Entra. Se a conta
+    # continuar valida no Entra, a pessoa ainda passa pelo login da Microsoft
+    # e toma 403 na sessao — que e' o comportamento desejado e visivel.
     user.is_active = False
     db.commit()
     db.refresh(user)
@@ -1067,11 +1046,6 @@ def delete_saved_filter(
 # ─── User Self-Service Endpoints ───────────────────────────────────────────
 
 
-class ChangePasswordRequest(BaseModel):
-    current_password: str
-    new_password: str
-
-
 class MeResponseSchema(BaseModel):
     id: int
     name: str
@@ -1081,10 +1055,11 @@ class MeResponseSchema(BaseModel):
     can_use_publications: bool
     can_use_prazos_iniciais: bool = False
     can_use_onerequest: bool = False
+    can_use_encerramentos: bool = False
     can_use_minha_equipe: bool = False
     minha_equipe_equipes: list = []
+    can_manage_distribuidos_bb: bool = False
     default_office_id: Optional[int]
-    must_change_password: bool
 
     class Config:
         from_attributes = True
@@ -1105,42 +1080,186 @@ def get_current_user_info(
         "can_use_publications": current_user.can_use_publications,
         "can_use_prazos_iniciais": getattr(current_user, "can_use_prazos_iniciais", False),
         "can_use_onerequest": getattr(current_user, "can_use_onerequest", False),
+        "can_use_encerramentos": getattr(current_user, "can_use_encerramentos", False),
         "can_use_minha_equipe": getattr(current_user, "can_use_minha_equipe", False),
         "minha_equipe_equipes": _equipes_to_list(current_user),
+        "can_manage_distribuidos_bb": getattr(current_user, "can_manage_distribuidos_bb", False),
         "default_office_id": current_user.default_office_id,
-        "must_change_password": current_user.must_change_password,
+        # Mantido como False fixo: o front antigo ainda le este campo, e
+        # remover de vez exigiria versionar a resposta. Nao existe mais senha
+        # pra trocar.
+        "must_change_password": False,
     }
 
 
-@me_router.post("/me/change-password", tags=["User"])
-def change_password(
-    payload: ChangePasswordRequest,
+# Troca de senha REMOVIDA em 07/08/2026: nao existe senha no Flow. A
+# credencial e' a conta Microsoft, e trocar senha se faz no Entra.
+
+@router.get("/equipes", tags=["Admin"], summary="Equipes do Minha Equipe (inclui as desativadas)")
+def listar_equipes(
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    """Change current user password."""
-    # Validate current password
-    if not current_user.hashed_password or not auth.verify_password(
-        payload.current_password, current_user.hashed_password
-    ):
+    _exige_admin(current_user)
+    from app.models.performance import PerfEquipe
+
+    contagem = _headcount(db)
+    rows = db.query(PerfEquipe).order_by(PerfEquipe.ordem, PerfEquipe.label).all()
+    return [_equipe_dto(e, contagem.get(e.key, 0)) for e in rows]
+
+
+def _exige_admin(current_user: LegalOneUser) -> None:
+    if current_user.role != "admin":
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Senha atual incorreta.",
+            status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required"
         )
 
-    # Validate new password
-    auth.validate_password(payload.new_password)
 
-    # Update password
-    current_user.hashed_password = auth.get_password_hash(payload.new_password)
-    current_user.must_change_password = False
+def _slug_equipe(texto: str) -> str:
+    import re as _re
+    import unicodedata as _ud
 
-    db.commit()
-    db.refresh(current_user)
+    s = _ud.normalize("NFKD", str(texto or ""))
+    s = "".join(c for c in s if not _ud.combining(c))
+    s = _re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-").lower()
+    return _re.sub(r"-{2,}", "-", s)
+
+
+def _equipe_dto(e, pessoas: int) -> dict:
+    return {
+        "id": e.id, "key": e.key, "label": e.label, "grupo": e.grupo,
+        "ordem": e.ordem, "ativo": e.ativo, "pessoas": pessoas,
+    }
+
+
+def _headcount(db) -> dict:
+    """Pessoas ATIVAS por equipe — alimenta o aviso de impacto na exclusão."""
+    from app.models.performance import PerfPessoa
 
     return {
-        "id": current_user.id,
-        "email": current_user.email,
-        "name": current_user.name,
-        "message": "Senha alterada com sucesso.",
+        k: int(n)
+        for k, n in db.query(PerfPessoa.equipe, func.count(PerfPessoa.id))
+        .filter(PerfPessoa.ativo)
+        .group_by(PerfPessoa.equipe)
+        .all()
     }
+
+
+class EquipePayload(BaseModel):
+    label: str
+    grupo: str
+    key: Optional[str] = None   # só na criação; derivado do label quando vazio
+    ordem: Optional[int] = None
+    ativo: Optional[bool] = None
+
+
+@router.post("/equipes", tags=["Admin"], status_code=201, summary="Cria uma equipe")
+def criar_equipe(
+    payload: EquipePayload,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _exige_admin(current_user)
+    from app.models.performance import PerfEquipe
+    from app.services.performance.teams import invalidar_cache
+
+    label = (payload.label or "").strip()
+    grupo = (payload.grupo or "").strip()
+    if not label or not grupo:
+        raise HTTPException(status_code=400, detail="Informe o nome e o grupo da equipe.")
+    key = _slug_equipe(payload.key or label)
+    if not key:
+        raise HTTPException(status_code=400, detail="Não consegui gerar um identificador a partir desse nome.")
+
+    ja = db.query(PerfEquipe).filter(PerfEquipe.key == key).first()
+    if ja is not None:
+        # Reaproveita a desativada em vez de criar uma key duplicada — assim as
+        # permissões antigas daquela key voltam a valer, que é o esperado.
+        if not ja.ativo:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Já existe uma equipe desativada com esse identificador ('{key}'): {ja.label}. Reative-a em vez de criar outra.",
+            )
+        raise HTTPException(status_code=409, detail=f"Já existe a equipe '{ja.label}' com esse identificador ({key}).")
+
+    if payload.ordem is not None:
+        ordem = int(payload.ordem)
+    else:
+        # Entra no fim do próprio grupo, pra não embaralhar o menu.
+        ultimo = (
+            db.query(func.max(PerfEquipe.ordem)).filter(PerfEquipe.grupo == grupo).scalar()
+        )
+        ordem = int(ultimo or 0) + 10
+    nova = PerfEquipe(key=key, label=label, grupo=grupo, ordem=ordem, ativo=True)
+    db.add(nova)
+    db.commit()
+    db.refresh(nova)
+    invalidar_cache()
+    logger.info("Equipe criada: %s (%s / %s) por %s", label, key, grupo, current_user.email)
+    return _equipe_dto(nova, 0)
+
+
+@router.put("/equipes/{equipe_id}", tags=["Admin"], summary="Edita rótulo/grupo/ordem/ativo (a key é imutável)")
+def editar_equipe(
+    equipe_id: int,
+    payload: EquipePayload,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _exige_admin(current_user)
+    from app.models.performance import PerfEquipe
+    from app.services.performance.teams import invalidar_cache
+
+    e = db.get(PerfEquipe, equipe_id)
+    if e is None:
+        raise HTTPException(status_code=404, detail="Equipe não encontrada.")
+    label = (payload.label or "").strip()
+    grupo = (payload.grupo or "").strip()
+    if not label or not grupo:
+        raise HTTPException(status_code=400, detail="Informe o nome e o grupo da equipe.")
+    e.label = label
+    e.grupo = grupo
+    if payload.ordem is not None:
+        e.ordem = int(payload.ordem)
+    if payload.ativo is not None:
+        e.ativo = bool(payload.ativo)
+    db.commit()
+    db.refresh(e)
+    invalidar_cache()
+    logger.info("Equipe %s atualizada por %s", e.key, current_user.email)
+    return _equipe_dto(e, _headcount(db).get(e.key, 0))
+
+
+@router.delete("/equipes/{equipe_id}", tags=["Admin"], summary="Desativa a equipe (soft-delete)")
+def excluir_equipe(
+    equipe_id: int,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _exige_admin(current_user)
+    from app.models.performance import PerfEquipe
+    from app.services.performance.teams import invalidar_cache
+
+    e = db.get(PerfEquipe, equipe_id)
+    if e is None:
+        raise HTTPException(status_code=404, detail="Equipe não encontrada.")
+    e.ativo = False
+    db.commit()
+    invalidar_cache()
+    pessoas = _headcount(db).get(e.key, 0)
+    logger.info(
+        "Equipe %s desativada por %s (%s pessoa[s] seguem vinculadas).",
+        e.key, current_user.email, pessoas,
+    )
+    return {"ok": True, "key": e.key, "pessoas_vinculadas": pessoas}
+
+
+@me_router.get("/equipes", tags=["User"], summary="Catálogo de equipes ATIVAS (menu/rotas)")
+def catalogo_equipes(
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    """Qualquer usuário autenticado — a sidebar monta o menu com isto (o filtro
+    de quem vê o quê continua sendo a permissão por equipe do usuário)."""
+    from app.services.performance.teams import listar
+
+    return {"equipes": listar()}

@@ -28,7 +28,9 @@ export interface UserSquadInfo {
 
 export interface SelectableUser {
   id: number;
-  external_id: number;
+  // Contato no L1. NULO enquanto o usuário do Entra não casar com um contato
+  // — nesse estado ele não pode ser responsável por tarefa.
+  external_id: number | null;
   name: string;
   squads: UserSquadInfo[];
   email?: string | null;
@@ -75,12 +77,23 @@ const UserSelector = ({
     );
   }, [users, filterBySquadIds]);
 
-  const handleSelect = (currentValue: string) => {
-    const selected = users.find(u => u.name.toLowerCase() === currentValue.toLowerCase());
-    if (selected) {
-      const newValue = String(selected.external_id) === value ? null : String(selected.external_id);
-      onChange(newValue);
-    }
+  // Sem contato no Legal One a pessoa NÃO pode ser responsável por tarefa: o
+  // payload do L1 exige `contact.id`. Deixá-la na lista só produzia falha
+  // silenciosa. Ela usa o Flow normalmente — só não aparece aqui.
+  const usuariosSelecionaveis = useMemo(
+    () => filteredUsers.filter((u) => u.external_id != null),
+    [filteredUsers],
+  );
+  const ocultosSemContato = filteredUsers.length - usuariosSelecionaveis.length;
+
+  // Recebe o USUÁRIO, não o nome. Resolver por nome quebrava em silêncio
+  // quando duas pessoas tinham o mesmo nome: o `find` devolvia a primeira, que
+  // podia ser outra pessoa — ou um registro sem contato no L1, e aí o valor
+  // virava "null", o pai fazia parseInt("null") = NaN e o campo voltava EM
+  // BRANCO, sem erro nenhum (caso da Ana Carolina, 07/08/2026).
+  const handleSelect = (selected: SelectableUser) => {
+    const novo = String(selected.external_id);
+    onChange(novo === value ? null : novo);
     setOpen(false);
   };
 
@@ -131,14 +144,21 @@ const UserSelector = ({
             <CommandInput placeholder="Buscar usuário..." />
             <CommandList>
               <CommandEmpty>Nenhum usuário encontrado.</CommandEmpty>
+              {ocultosSemContato > 0 && (
+                <div className="border-b px-3 py-2 text-[11px] text-muted-foreground">
+                  {ocultosSemContato} pessoa(s) fora da lista por não terem
+                  cadastro de contato no Legal One — sem isso o L1 não aceita
+                  vinculá-las como responsável.
+                </div>
+              )}
               <CommandGroup>
-                {filteredUsers.map(user => (
+                {usuariosSelecionaveis.map(user => (
                   <CommandItem
-                    key={user.external_id}
+                    key={user.external_id ?? `sem-contato-${user.id}`}
                     // Concatena email no value pra que o cmdk filtre por
                     // nome OU email (busca livre por qualquer pedaco).
                     value={showEmail && user.email ? `${user.name} ${user.email}` : user.name}
-                    onSelect={() => handleSelect(user.name)}
+                    onSelect={() => handleSelect(user)}
                   >
                     <Check
                       className={cn(

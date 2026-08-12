@@ -676,3 +676,119 @@ def get_publications_operators(
         "team_totals": team_totals,
         "generated_at": now.isoformat(),
     }
+
+
+@router.get(
+    "/publications-entradas",
+    summary="Entradas de publicações por dia e cliente (linha do tempo)",
+)
+def get_publications_entradas(
+    inicio: str | None = Query(None, description="YYYY-MM-DD (default: fim-29d)"),
+    fim: str | None = Query(None, description="YYYY-MM-DD (default: hoje BRT)"),
+    base: Literal["captura", "publicacao"] = Query(
+        "captura",
+        description="Qual data agrupa o dia: captura (quando o Flow viu) ou "
+                    "publicacao (quando o diário publicou)",
+    ),
+    db: Session = Depends(get_db),
+):
+    """Linha do tempo de VOLUME DE ENTRADA pro acompanhamento da supervisão:
+    quantas publicações chegaram por dia, separadas por cliente.
+
+    "Cliente" é o ramo do escritório responsável (Banco do Brasil, Ativos,
+    Banco Master...), extraído do path do escritório — determinístico, sem
+    depender de cadastro novo.
+
+    As duas bases de data existem porque respondem perguntas diferentes:
+    CAPTURA mede carga de trabalho que entrou na fila naquele dia (inclui
+    recuperações retroativas — em 05/08 entraram 270 publicações antigas de
+    uma vez, e é honesto o gráfico mostrar esse pico no dia da captura);
+    PUBLICAÇÃO mede o fato jurídico no tempo. Duplicadas ficam de fora nas
+    duas — irmãs da mesma publicação no mesmo dia não são "entrada" nova.
+    """
+    hoje_brt = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+    try:
+        d_fim = datetime.strptime(fim, "%Y-%m-%d").date() if fim else hoje_brt
+        d_ini = (
+            datetime.strptime(inicio, "%Y-%m-%d").date()
+            if inicio else d_fim - timedelta(days=29)
+        )
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Datas em YYYY-MM-DD.")
+    if d_ini > d_fim:
+        d_ini, d_fim = d_fim, d_ini
+    # Teto defensivo: 370 dias cobrem "último ano" sem deixar a query virar
+    # varredura da tabela inteira por um typo no ano.
+    if (d_fim - d_ini).days > 370:
+        d_ini = d_fim - timedelta(days=370)
+
+    # publication_date é STRING ISO (herdada do L1) — left(...,10) dá o dia.
+    # created_at é timestamptz — converte pra data em BRT.
+    col_dia = (
+        "left(r.publication_date, 10)"
+        if base == "publicacao"
+        else "to_char(r.created_at at time zone 'America/Sao_Paulo', 'YYYY-MM-DD')"
+    )
+    rows = db.execute(
+        text(f"""
+            select {col_dia} as dia,
+                   -- Escritório responsável COMPLETO (cliente / posição):
+                   -- "Banco do Brasil / Réu" e "Banco do Brasil / Autor" são
+                   -- operações diferentes e o dashboard precisa separá-las
+                   -- (pedido do operador 06/08). Recuperação de Honorários não
+                   -- tem folha de posição — fica só o ramo.
+                   coalesce(
+                     nullif(
+                       split_part(o.path, ' / ', 3) ||
+                       case when split_part(o.path, ' / ', 4) <> ''
+                            then ' / ' || split_part(o.path, ' / ', 4)
+                            else '' end,
+                       ''),
+                     'Sem escritório'
+                   ) as cliente,
+                   count(*) as n
+              from publicacao_registros r
+              left join legal_one_offices o
+                on o.external_id = r.linked_office_id
+             where r.is_duplicate = false
+               and {col_dia} >= :ini and {col_dia} <= :fim
+             group by 1, 2
+        """),
+        {"ini": d_ini.isoformat(), "fim": d_fim.isoformat()},
+    ).fetchall()
+
+    por_dia: dict[str, dict[str, int]] = {}
+    total_cliente: dict[str, int] = {}
+    for dia, cliente, n in rows:
+        if not dia:
+            continue
+        por_dia.setdefault(dia, {})[cliente] = int(n)
+        total_cliente[cliente] = total_cliente.get(cliente, 0) + int(n)
+
+    clientes = [c for c, _ in sorted(total_cliente.items(), key=lambda kv: -kv[1])]
+
+    # Série contínua: dia sem entrada aparece como zero — buraco no eixo faria
+    # o gráfico pular fim de semana e sugerir continuidade que não houve.
+    serie = []
+    d = d_ini
+    while d <= d_fim:
+        chave = d.isoformat()
+        contagens = por_dia.get(chave, {})
+        ponto: dict = {
+            "dia": chave,
+            "rotulo": f"{d.day:02d}/{d.month:02d}",
+            "total": sum(contagens.values()),
+        }
+        for c in clientes:
+            ponto[c] = contagens.get(c, 0)
+        serie.append(ponto)
+        d += timedelta(days=1)
+
+    return {
+        "inicio": d_ini.isoformat(),
+        "fim": d_fim.isoformat(),
+        "base": base,
+        "clientes": clientes,
+        "total_periodo": sum(total_cliente.values()),
+        "serie": serie,
+    }

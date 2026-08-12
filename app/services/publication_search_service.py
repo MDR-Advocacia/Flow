@@ -1420,6 +1420,16 @@ class PublicationSearchService:
                     raw["_proposed_tasks"] = proposals
             rec.raw_relationships = raw
 
+        # SHADOW MODE: a previsão é gravada AQUI — proposta montada, operador
+        # ainda não viu. Prever depois da ação humana seria trapaça: o placar
+        # mediria memória, não capacidade de decidir.
+        try:
+            from app.services.publication_shadow import ShadowService
+
+            ShadowService(self.db).prever_muitos(records)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("shadow: previsão em lote falhou (%s)", exc)
+
         self.db.commit()
 
     # Limite máximo de caracteres aceito pela API Legal One no campo description.
@@ -2743,6 +2753,22 @@ class PublicationSearchService:
             if items:
                 grouped_list.append(self._build_group(items))
 
+        # Etiquetas do L1 (cache local, 1 query pra página) — chip na tela de
+        # tratamento pro operador ver processo estratégico/prioritário ANTES
+        # de tratar. Ausente do cache = None (sem info ainda), [] = sem tag.
+        try:
+            from app.services.publication_etiquetas import etiquetas_por_lawsuit
+
+            et_map = etiquetas_por_lawsuit(
+                self.db,
+                [g["lawsuit_id"] for g in grouped_list if g.get("lawsuit_id")],
+            )
+            for g in grouped_list:
+                lid = g.get("lawsuit_id")
+                g["l1_etiquetas"] = et_map.get(int(lid)) if lid else None
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao anexar etiquetas L1 nos grupos (ignorado).")
+
         return {
             "total_groups": total_groups,
             "total_records": total_records,
@@ -3266,8 +3292,19 @@ class PublicationSearchService:
             "task_audit_labels": self._build_audit_labels(task_audits),
         }
 
+    # Motivos estruturados da ciência — espelham os 3 critérios que a operação
+    # declarou (06/08/2026: já agendado / parte adversa / só informativa) +
+    # classificação incorreta (alimenta a taxonomia) + escape.
+    IGNORE_REASONS = {
+        "ja_agendado", "parte_adversa", "informativa",
+        "classificacao_incorreta", "outro",
+    }
+
     def update_record_status(
-        self, record_id: int, new_status: str, acted_by: Optional[Any] = None
+        self, record_id: int, new_status: str, acted_by: Optional[Any] = None,
+        ignore_reason: Optional[str] = None,
+        ignore_reason_note: Optional[str] = None,
+        consultou_autos: bool = False,
     ) -> dict[str, Any]:
         valid_statuses = {
             RECORD_STATUS_NEW, RECORD_STATUS_CLASSIFIED,
@@ -3294,6 +3331,28 @@ class PublicationSearchService:
             record.ignored_by_email = getattr(acted_by, "email", None)
             record.ignored_by_name = getattr(acted_by, "name", None)
             record.ignored_at = now_utc
+        if new_status == RECORD_STATUS_IGNORED and ignore_reason:
+            if ignore_reason not in self.IGNORE_REASONS:
+                raise ValueError(
+                    f"Motivo de ciência inválido: {ignore_reason}. "
+                    f"Aceitos: {sorted(self.IGNORE_REASONS)}"
+                )
+            record.ignore_reason = ignore_reason
+            record.ignore_reason_note = (ignore_reason_note or "").strip() or None
+        if new_status == RECORD_STATUS_IGNORED and consultou_autos:
+            record.consultou_autos = True
+
+        # SHADOW: fecha o par previsão × realidade.
+        if new_status in (RECORD_STATUS_IGNORED, RECORD_STATUS_SCHEDULED):
+            try:
+                from app.services.publication_shadow import ShadowService
+
+                ShadowService(self.db).registrar_desfecho(
+                    record.id, new_status, motivo=ignore_reason,
+                    por=getattr(acted_by, "name", None),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("shadow: desfecho não registrado (%s)", exc)
 
         from app.services.publication_treatment_service import PublicationTreatmentService
         treatment_service = PublicationTreatmentService(self.db)
@@ -3602,6 +3661,21 @@ class PublicationSearchService:
             }
         return adjustments
 
+    @staticmethod
+    def _so_data_iso(valor):
+        """'2026-08-12T14:00:00-03:00' → date(2026,8,12). None se não parsear."""
+        if not valor or not isinstance(valor, str):
+            return None
+        try:
+            from datetime import datetime as _dt
+            return _dt.fromisoformat(valor.replace("Z", "+00:00")).date()
+        except Exception:  # noqa: BLE001
+            try:
+                from datetime import datetime as _dt
+                return _dt.strptime(valor[:10], "%Y-%m-%d").date()
+            except Exception:  # noqa: BLE001
+                return None
+
     def _record_scheduled_task_audit(
         self,
         *,
@@ -3662,10 +3736,52 @@ class PublicationSearchService:
                             continue
                         if proposto is not None and proposto != enviado:
                             override_fields[field] = {"proposto": proposto, "enviado": enviado}
+                # Motivo da troca de SUBTIPO (pub007): o modal pergunta só
+                # quando o operador troca o subtipo proposto (~51/dia — atrito
+                # aceitável, e é o sinal que conserta template). Nunca na troca
+                # de responsável (~224/dia: rotina de carga, não dúvida).
+                motivo_sub = None
+                marcadores: dict = {}
+                if isinstance(sent, dict):
+                    motivo_sub = sent.pop("_subtipo_troca_motivo", None)
+                    # pub008 — captura do conhecimento tácito. Todos os
+                    # marcadores saem do payload aqui: nunca podem vazar pro L1.
+                    for chave in ("_data_troca_motivo", "_consultou_autos",
+                                  "_agendou_com_tarefa_aberta_motivo",
+                                  "_tarefa_removida_motivo"):
+                        v = sent.pop(chave, None)
+                        if v not in (None, "", False):
+                            marcadores[chave] = v
+                if motivo_sub and "subTypeId" not in override_fields:
+                    motivo_sub = None  # só vale quando houve troca de fato
+
+                # DELTA DE DATA (pub008): gravado SEMPRE, sem perguntar nada.
+                # 72% dos agendamentos mexem na data e isso não era auditado —
+                # negativo = operador antecipou, positivo = adiou. Metade do
+                # valor vem do número puro, sem custar atrito a ninguém.
+                delta_dias = None
+                if prop:
+                    d_prop = self._so_data_iso(prop.get("endDateTime"))
+                    d_sent = self._so_data_iso(sent.get("endDateTime"))
+                    if d_prop and d_sent:
+                        delta_dias = (d_sent - d_prop).days
+                        if delta_dias != 0:
+                            override_fields.setdefault("endDateTime", {
+                                "proposto": prop.get("endDateTime"),
+                                "enviado": sent.get("endDateTime"),
+                                "delta_dias": delta_dias,
+                            })
                 self.db.add(PublicationTaskAudit(
                     lawsuit_id=lawsuit_id,
                     publication_record_id=rec_id,
                     subtype_id=int(sub) if sub is not None else None,
+                    subtipo_troca_motivo=motivo_sub,
+                    data_delta_dias=delta_dias,
+                    data_troca_motivo=marcadores.get("_data_troca_motivo"),
+                    consultou_autos=bool(marcadores.get("_consultou_autos")) or None,
+                    agendou_com_tarefa_aberta_motivo=marcadores.get(
+                        "_agendou_com_tarefa_aberta_motivo"),
+                    tarefa_removida_motivo=marcadores.get("_tarefa_removida_motivo"),
                     created_task_id=task_id,
                     sent_payload=sent,
                     proposed_payload=prop,
@@ -3679,6 +3795,18 @@ class PublicationSearchService:
                 ))
         except Exception as exc:  # noqa: BLE001
             logger.warning("publications: falha ao gravar auditoria de agendamento: %s", exc)
+
+        # SHADOW: agendamento efetivado = desfecho real das publicações do grupo.
+        try:
+            from app.services.publication_shadow import ShadowService
+
+            shadow = ShadowService(self.db)
+            for rec in records:
+                shadow.registrar_desfecho(
+                    getattr(rec, "id", None), "AGENDADO", por=sb_name,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("shadow: desfecho de agendamento não registrado (%s)", exc)
 
     def schedule_group(
         self,
@@ -3734,6 +3862,13 @@ class PublicationSearchService:
         # routing abaixo e é removido aqui pra nunca vazar pro L1.
         operator_locked = [
             bool(p.pop("_responsible_overridden", False)) if isinstance(p, dict) else False
+            for p in payloads
+        ]
+        # `_subtipo_troca_motivo` viaja no payload até a auditoria (que o
+        # remove ao gravar). Guardamos uma cópia porque o payload enviado ao
+        # L1 é sanitizado antes — sem isto o motivo se perderia no caminho.
+        motivos_subtipo = [
+            (p.get("_subtipo_troca_motivo") if isinstance(p, dict) else None)
             for p in payloads
         ]
 
@@ -3915,6 +4050,11 @@ class PublicationSearchService:
         for p in payloads:
             if isinstance(p, dict):
                 p.pop("_responsible_overridden", None)
+                p.pop("_subtipo_troca_motivo", None)
+                for _k in ("_data_troca_motivo", "_consultou_autos",
+                           "_agendou_com_tarefa_aberta_motivo",
+                           "_tarefa_removida_motivo"):
+                    p.pop(_k, None)
 
         # Fallback de office pra tarefas avulsas: embora esse fluxo seja
         # explicitamente "sem processo vinculado", alguns records ainda

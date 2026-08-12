@@ -48,8 +48,17 @@ RUN cd /app/app/runners/legalone \
     && npm ci --omit=dev \
     && npx --yes playwright install --with-deps chromium
 
-# ─── Código da aplicação (layer leve) ─────────────────────────────
-COPY . .
+# ATENÇÃO: `COPY . .` NÃO mora aqui. Ele fica no FIM de cada stage final.
+#
+# Quando o copy do código estava nesta stage, QUALQUER alteração de código
+# invalidava tudo abaixo dele — e abaixo dele estão as instalações pesadas de
+# cada stage. Efeito medido no deploy de 10/08/2026: todo deploy reinstalava
+# xvfb, os dois pacotes `playwright` e RE-BAIXAVA o Chromium do ajus-runner
+# (165MB, 23s), sem que uma linha disso tivesse mudado. Somava ~60s de CPU e
+# 165MB de rede por deploy num servidor de 4 vCPUs que já vive perto do teto.
+#
+# Com o copy no fim de cada stage, alterar código reconstrói só a última
+# camada (o código em si) e todo o resto vem do cache.
 
 
 # ─── Stage 2: api ─────────────────────────────────────────────────
@@ -66,6 +75,9 @@ FROM base AS api
 RUN apt-get update && apt-get install -y --no-install-recommends xvfb \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir playwright==1.59.0
+
+# Código por ÚLTIMO: é a única camada que muda a cada deploy.
+COPY . .
 
 RUN chmod +x /app/scripts/docker-api-start.sh
 
@@ -91,5 +103,8 @@ RUN pip install --no-cache-dir playwright==1.47.0
 RUN playwright install chromium
 
 RUN mkdir -p /app/data/ajus-session
+
+# Código por ÚLTIMO — sem isto o Chromium acima era rebaixado a cada deploy.
+COPY . .
 
 CMD ["python", "scripts/ajus_runner_worker.py"]

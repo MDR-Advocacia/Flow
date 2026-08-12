@@ -38,6 +38,25 @@ class PublicationTaskAudit(Base):
     # separada do override humano (pub005). {campo: {antes, depois, motivo}}.
     system_adjustments = Column(jsonb(), nullable=True)
 
+    # Por que o operador trocou o SUBTIPO proposto (pub007). Captura
+    # estratégica: só ~51 casos/dia, e é o sinal que aponta template errado.
+    # Nulo quando não houve troca ou o motivo não foi informado.
+    subtipo_troca_motivo = Column(String(40), nullable=True)
+
+    # ── Captura do conhecimento tácito (pub008) ────────────────────────
+    # Delta da data em DIAS: negativo = o operador ANTECIPOU, positivo =
+    # adiou. Gravado SEMPRE (custo zero de atrito) — 72% dos agendamentos
+    # mexem na data e isso não era auditado. É onde vive a regra de prazo
+    # ("contestação 2 dias antes", "próximo dia útil").
+    data_delta_dias = Column(Integer, nullable=True)
+    # Motivo pedido só no DESVIO ANÔMALO (fora de ±3 dias).
+    data_troca_motivo = Column(String(40), nullable=True)
+    # "Precisei abrir o processo pra decidir" — é O sinal do balde OPERADOR.
+    consultou_autos = Column(Boolean, nullable=True)
+    # Agendou apesar de haver tarefa da família aberta: a existente NÃO cobre.
+    agendou_com_tarefa_aberta_motivo = Column(String(40), nullable=True)
+    # Removeu bloco que o template propunha: o template propõe demais aqui.
+    tarefa_removida_motivo = Column(String(40), nullable=True)
     # Quem agendou (snapshot do operador — o L1 só guarda "Sistema").
     scheduled_by_user_id = Column(Integer, nullable=True, index=True)
     scheduled_by_name = Column(String, nullable=True)

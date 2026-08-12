@@ -162,7 +162,16 @@ export function AdminNoticeBar() {
                   <Icon className={`mt-0.5 h-6 w-6 shrink-0 ${style.icon}`} />
                   <div className="flex-1 min-w-0">
                     <div className="text-base font-semibold leading-tight">{n.title}</div>
-                    <div className="text-sm whitespace-pre-wrap mt-1">{n.message}</div>
+                    <div className="mt-1 space-y-1.5 text-sm leading-relaxed">
+                      {String(n.message ?? "")
+                        .split(/\n\s*\n/)
+                        .filter((par) => par.trim())
+                        .map((par, i) => (
+                          <p key={i} className="whitespace-pre-wrap">
+                            {par.trim()}
+                          </p>
+                        ))}
+                    </div>
                     {ends ? (
                       <div className="text-xs mt-1 opacity-70">Ate {ends}</div>
                     ) : null}
@@ -195,10 +204,15 @@ export function AdminNoticeBar() {
             aria-modal="true"
             aria-labelledby="notice-modal-title"
           >
-            <div className="w-full max-w-lg overflow-hidden rounded-xl bg-white shadow-2xl">
-              <div className={`h-1.5 w-full ${style.accent}`} />
-              <div className="p-6">
-                <div className="flex items-start gap-3.5">
+            {/* max-w-2xl: com `max-w-lg` (512px) qualquer aviso de mais de dois
+                parágrafos virava um paredão de linhas curtas quebradas no meio
+                da frase — o texto do recorte de Publicações (05/08/2026) ficou
+                ilegível assim. `max-h` + rolagem interna evitam que um aviso
+                comprido empurre o botão "Ciente" pra fora da tela em notebook. */}
+            <div className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
+              <div className={`h-1.5 w-full shrink-0 ${style.accent}`} />
+              <div className="flex min-h-0 flex-1 flex-col p-6">
+                <div className="flex min-h-0 flex-1 items-start gap-3.5 overflow-y-auto">
                   <Icon className={`mt-0.5 h-7 w-7 shrink-0 ${style.icon}`} />
                   <div className="flex-1 min-w-0">
                     <h2
@@ -207,15 +221,27 @@ export function AdminNoticeBar() {
                     >
                       {modalNotice.title}
                     </h2>
-                    <p className="mt-2 whitespace-pre-wrap text-sm text-slate-700">
-                      {modalNotice.message}
-                    </p>
+                    {/* `leading-relaxed` + espaço entre parágrafos: a mensagem
+                        vem como texto puro com quebras (whitespace-pre-wrap), e
+                        sem entrelinha os parágrafos colam num bloco só. */}
+                    <div className="mt-3 space-y-3 text-[15px] leading-relaxed text-slate-700">
+                      {String(modalNotice.message ?? "")
+                        .split(/\n\s*\n/)
+                        .filter((par) => par.trim())
+                        .map((par, i) => (
+                          <p key={i} className="whitespace-pre-wrap">
+                            {par.trim()}
+                          </p>
+                        ))}
+                    </div>
                     {ends ? (
                       <p className="mt-3 text-xs text-slate-400">Aviso valido ate {ends}</p>
                     ) : null}
                   </div>
                 </div>
-                <div className="mt-6 flex justify-end">
+                {/* Fora da área de rolagem: o botão fica sempre visível, mesmo
+                    com aviso longo. */}
+                <div className="mt-5 flex shrink-0 justify-end border-t pt-4">
                   <Button
                     onClick={() => handleDismiss(modalNotice.id)}
                     disabled={isDismissing}

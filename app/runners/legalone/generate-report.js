@@ -9,6 +9,7 @@
 // Login/SSO espelhado do cancel-legacy-task.js (OnePass + key selection).
 
 const { chromium } = require('playwright');
+const l1session = require('./l1-session');
 
 function parseArgs(argv) {
   const args = {};
@@ -175,8 +176,17 @@ async function createLoggedInSession(loginConfig) {
     if (rt === 'image' || rt === 'media' || rt === 'font') return route.abort();
     return route.continue();
   });
+  // Sessão compartilhada: com cookies válidos o login() vira só uma validação
+  // (navega, vê a página logada e retorna) — sem derrubar os outros robôs.
+  const sharedCookies = l1session.loadSharedCookies();
+  if (sharedCookies) {
+    await l1session.injectSharedCookies(context, loginConfig.returnUrl, sharedCookies);
+    console.error('[session] cookies compartilhados injetados — tentando reusar a sessão.');
+  }
   const page = await context.newPage();
   await login(page, loginConfig);
+  const saved = await l1session.persistSharedCookies(null, context, loginConfig.returnUrl);
+  console.error(`[session] sessão ativa ${saved ? 'sincronizada no' : 'NÃO sincronizada no'} cache compartilhado.`);
   return { browser, context, page };
 }
 

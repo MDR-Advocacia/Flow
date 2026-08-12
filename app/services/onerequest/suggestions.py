@@ -107,7 +107,16 @@ def sugerir(
         regra_resp = RESPONSAVEL_POR_SETOR.get(setor)
         if regra_resp:
             nome, conf = regra_resp
-            u = db.query(LegalOneUser).filter(LegalOneUser.name == nome).first()
+            # Case-insensitive + SÓ ATIVO: sugestão nunca aponta ex-colaborador
+            # (o L1 recusa tarefa com participante inativo).
+            u = (
+                db.query(LegalOneUser)
+                .filter(
+                    LegalOneUser.name.ilike(nome),
+                    LegalOneUser.is_active.is_(True),
+                )
+                .first()
+            )
             if u:
                 resp_id, resp_nome, resp_conf = u.id, u.name, conf
 

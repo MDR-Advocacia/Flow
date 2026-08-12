@@ -815,13 +815,44 @@ const TaskTemplatesPageLegacy = () => {
   useEffect(() => {
     if (deepLinkConsumedRef.current || loading) return;
     const tid = searchParams.get("template_id");
-    if (!tid) return;
+    const cat = searchParams.get("category");
+    if (!tid && !cat) return;
     deepLinkConsumedRef.current = true;
-    const target = templates.find((t) => t.id === Number(tid));
-    if (target) {
-      openEdit(target);
+    if (tid) {
+      const target = templates.find((t) => t.id === Number(tid));
+      if (target) {
+        openEdit(target);
+      } else {
+        setError(`Template #${tid} não encontrado — pode ter sido excluído ou recriado.`);
+      }
+      return;
+    }
+    // Deep-link do "Sem template" da fila de Publicações
+    // (?category=&subcategory=&office_id=): se já existe template ativo pra
+    // esta classificação no escritório, abre a EDIÇÃO (fallback no global);
+    // se não existe, abre a CRIAÇÃO pré-preenchida — o operador só escolhe as
+    // tarefas, sem redigitar classificação nem caçar na listagem.
+    const sub = searchParams.get("subcategory") || "";
+    const offRaw = searchParams.get("office_id");
+    const offVal = offRaw ? Number(offRaw) : null;
+    const casa = (t: TaskTemplate, office: number | null) =>
+      t.is_active && t.category === cat &&
+      (t.subcategory ?? "") === sub && (t.office_external_id ?? null) === office;
+    const alvo =
+      templates.find((t) => casa(t, offVal)) ||
+      templates.find((t) => casa(t, null));
+    if (alvo) {
+      openEdit(alvo);
     } else {
-      setError(`Template #${tid} não encontrado — pode ter sido excluído ou recriado.`);
+      setEditingId(null);
+      setForm({
+        ...BLANK_FORM,
+        category: cat,
+        subcategory: sub,
+        office_external_ids: [offVal != null ? String(offVal) : "_global"],
+        taskBlocks: [{ ...BLANK_TASK_BLOCK }],
+      });
+      setDialogOpen(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, templates]);

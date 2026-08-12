@@ -64,7 +64,11 @@ TAB_TO_SETOR = {
     "bb execucao&encerramento": "bb-execucao",
     "bb acordos": "bb-acordos",
     "bb estrategico": "bb-estrategico",
+    # Controladoria (ex-"BB Cadastro"): aceita os dois nomes de aba porque a
+    # planilha de squads pode demorar a ser renomeada — enquanto vier "BB
+    # Cadastro" a ingestão continua caindo no setor certo.
     "bb cadastro": "bb-cadastro",
+    "controladoria": "bb-cadastro",
     "master reu": "master-reu",
     "ativos reu": "ativos-reu",
 }

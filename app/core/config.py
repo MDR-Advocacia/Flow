@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     mail_from_address: str | None = None
     mail_from_name: str | None = None
     mail_to: str | None = None
+    # Destinatário(s) do alerta quando o batch de classificação de publicações
+    # FALHA ao ser criado na Anthropic (ex.: HTTP 502). Vírgula separa vários.
+    # Sem valor, cai em mail_to/email_to. Setável no Coolify (CLASSIFICACAO_ALERT_EMAIL).
+    classificacao_alert_email: str | None = "ti@mdradvocacia.com,jonilsonvilela@mdradvocacia.com"
+    # Destinatário(s) do alerta quando o AUTO-CADASTRO dos Distribuídos BB falha
+    # (import interno do L1) — mesmo mecanismo do alerta de classificação.
+    distribuidos_bb_alert_email: str | None = "ti@mdradvocacia.com,jonilsonvilela@mdradvocacia.com"
     system_name: str | None = None
     app_name: str | None = None
 
@@ -109,6 +116,51 @@ class Settings(BaseSettings):
     # rate limit em rodadas multi-banco. Default ON desde 2026-05-07;
     # se voltar a falhar, setar False no Coolify pra rollback rápido.
     publication_scheduler_batch_mode: bool = True
+
+    # Contingência de captura: se a busca pela API do L1 falhar, manda o
+    # próprio L1 GERAR o relatório de publicações e importa o arquivo. Cobre o
+    # caso em que a API cai mas o site segue de pé (foi o de 30/07/2026).
+    #
+    # Ligado por padrão: se dependesse de variável setada à mão, o esquecimento
+    # só apareceria na madrugada em que a contingência fosse necessária.
+    #
+    # ATENÇÃO em teste: isso aciona o SITE do Legal One e gera um relatório de
+    # verdade. Teste que simula queda do L1 PRECISA mockar
+    # `capturar_publicacoes` — senão a suíte fica lenta e passa a depender do L1
+    # estar no ar pra passar (a suíte gerou o relatório #13435 assim).
+    publication_report_fallback_enabled: bool = True
+    # Janela D-1 → D0 por data de CADASTRO do andamento (mesma semântica do
+    # /Updates: pega o que entrou no L1, não o que foi publicado).
+    publication_report_fallback_dias_atras: int = 1
+    # Destinatários do alerta da captura (vírgula separa). Sem valor, cai no
+    # EMAIL_TO. Em 30/07/2026 a rodada falhou nos 13 escritórios e ninguém foi
+    # avisado — a captura simplesmente nunca chamava alerta.
+    #
+    # Vai com o MESMO default no código dos outros alertas da casa
+    # (classificacao_alert_email, distribuidos_bb_alert_email): alerta que só
+    # funciona depois de alguém lembrar de setar variável é alerta que não
+    # existe. Sobrescrevível por PUBLICATION_ALERT_EMAIL no Coolify.
+    publication_alert_email: str | None = "ti@mdradvocacia.com,jonilsonvilela@mdradvocacia.com"
+
+    # ── Terceira contingência: DJEN/Comunica ──────────────────────────
+    # Última rede da captura, acionada só depois que a API do L1 E o relatório
+    # do L1 Web falharam. Fica DESLIGADA por padrão: é contingência oculta, e
+    # sem o proxy brasileiro a Comunica responde 403 de qualquer jeito.
+    djen_enabled: bool = False
+    comunica_base_url: str = "https://comunicaapi.pje.jus.br"
+    comunica_timeout_seconds: int = 30
+    djen_default_meio: str = "D"
+    # OABs do escritório no formato "numero:UF", vírgula separa.
+    djen_oabs: str = "5553:RN"
+    # Saída brasileira obrigatória — a Comunica bloqueia IP de datacenter fora
+    # do país. Mesmo MikroTik usado pelo Lake e pelo OneLog.
+    djen_proxy: str | None = None
+    djen_request_delay_seconds: float = 3.1
+    djen_max_pages: int = 200
+    # Ignora publicação de processo que a base não conhece. A consulta por OAB
+    # traz um superconjunto da carteira (192 de 1.017 em 31/07/2026), e o
+    # /Updates do L1 — a fonte primária — também não as traria.
+    djen_somente_carteira: bool = True
 
     # Classifier Engine
     anthropic_api_key: str | None = None
@@ -303,6 +355,12 @@ class Settings(BaseSettings):
     # Vazio = endpoint de intake desativado.
     onenotify_bb_intake_api_key: str | None = None
 
+    # ── Intake Encerramentos (Sistema de Encerramentos MDR) ───────────
+    # Chave(s) que autenticam o Sistema de Encerramentos no endpoint
+    # /api/v1/legalone/encerramento (encerrar processo no Legal One).
+    # Aceita múltiplas separadas por vírgula. Vazio = endpoint desativado.
+    encerramentos_intake_api_key: str | None = None
+
     # ── OneRequest: alerta "vence hoje" via Teams (Microsoft Graph) ────
     # Liga o botão "Enviar no Teams". A DM sai NO NOME da operadora logada,
     # via Graph delegado (MSAL no front + token repassado ao backend). Default
@@ -385,11 +443,49 @@ class Settings(BaseSettings):
     # Roda sob Xvfb (DISPLAY setado no docker-api-start.sh). Só ligue
     # headless=True em ambiente onde o portal não faça anti-bot.
     distribuidos_bb_headless: bool = False
+
+    # Resiliência do RPA — o PAJ é intermitente (provado em prod 2026-07-16: run
+    # falhou 09:56 e o mesmo, repetido às 09:57, passou).
+    # (a) O SPA às vezes não monta na 1ª carga → recarrega e tenta de novo.
+    #     Acontece ANTES de qualquer ciência, então repetir é inócuo.
+    distribuidos_bb_frame_tentativas: int = 3
+    distribuidos_bb_frame_timeout_ms: int = 30000
+    # (b) Se o run inteiro falhar (ou terminar inconsistente), repete a rodagem.
+    #     Seguro: a ciência tira o item da lista do BB, então a retentativa só
+    #     pega o que sobrou (retomada), e o fingerprint impede duplicata no banco.
+    distribuidos_bb_coleta_tentativas: int = 3
+    distribuidos_bb_coleta_retry_espera_seg: int = 60
+
     # Trava de segurança GLOBAL da ciência: por run o operador pode ligar,
     # mas se isto estiver False a ciência (SIM) NUNCA é dada, aconteça o
     # que acontecer. Default seguro.
     distribuidos_bb_confirmar_ciencia: bool = False
     distribuidos_bb_session_timeout_seconds: int = 1800
+
+    # Agendamento automático da coleta: 3x/dia (madrugada, meio-dia, noite),
+    # horário de Brasília. Ao fim de cada passagem, gera e arquiva a planilha.
+    # A ciência continua protegida pela trava global acima — mesmo agendado,
+    # só dá SIM no BB se distribuidos_bb_confirmar_ciencia também estiver True.
+    distribuidos_bb_agendamento_ativo: bool = True
+    distribuidos_bb_agendamento_horarios: str = "3,12,20"  # horas BRT, separadas por vírgula
+
+    # Monitor de cadastro no Legal One: de X em X min bate na API do L1 procurando
+    # a pasta (por CNJ+escritório) dos processos com planilha já gerada, e confirma.
+    distribuidos_bb_monitor_cadastro_ativo: bool = True
+    distribuidos_bb_monitor_intervalo_min: int = 2
+
+    # Vínculos: pesquisa no portal BB, por parte do processo capturado, as OUTRAS
+    # ações ativas conduzidas pelo MDR — decide a distribuição especializada
+    # (Equipe Mista) e alimenta o painel Acompanhamento Réu/Autor.
+    distribuidos_bb_vinculos_ativo: bool = True
+    # Base dos endpoints JSON do PAJ (mesma origem do portal).
+    distribuidos_bb_paj_base: str = "https://juridico.bb.com.br/paj"
+
+
+    # Cadastro 100% automático: ao fim de uma coleta com processos distribuídos,
+    # gera a planilha e importa no L1 (cria as pastas + dispara o workflow) sem
+    # precisar do operador clicar. O monitor depois confirma cada pasta.
+    distribuidos_bb_auto_cadastro_ativo: bool = True
 
     # ── GED LegalOne — envio em lote de arquivos pro GED (ECM) do L1 ──
     # Modulo dedicado a subir arquivos arbitrarios (PDF, docx, xlsx,
@@ -517,6 +613,12 @@ class Settings(BaseSettings):
     def onenotify_bb_intake_api_keys(self) -> set[str]:
         """Chaves válidas pro intake do OneNotify BB (rotação)."""
         raw = self.onenotify_bb_intake_api_key or ""
+        return {key.strip() for key in raw.split(",") if key.strip()}
+
+    @property
+    def encerramentos_intake_api_keys(self) -> set[str]:
+        """Chaves válidas pro intake do Sistema de Encerramentos (rotação)."""
+        raw = self.encerramentos_intake_api_key or ""
         return {key.strip() for key in raw.split(",") if key.strip()}
 
 

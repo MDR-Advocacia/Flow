@@ -495,7 +495,12 @@ def get_data_for_task_form(db: Session = Depends(get_db)):
     )
     # Só usuários com external_id (contato no L1) podem ser responsável por
     # tarefa — os sem external_id (SSO/JIT não sincronizado) ficam de fora.
-    users = db.query(LegalOneUser).filter(LegalOneUser.external_id.isnot(None))
+    # Só usuários ATIVOS: o L1 recusa tarefa com participante inativo
+    # ("O valor do campo 'Participants' deve ser o id de um usuário ativo" —
+    # caso real: ex-colaborador escolhido no dropdown do OneRequest, 400).
+    users = db.query(LegalOneUser).filter(
+        LegalOneUser.external_id.isnot(None), LegalOneUser.is_active.is_(True)
+    )
     users_for_form = [
         UserForTaskForm(
             id=user.id,
@@ -552,6 +557,45 @@ async def preview_spreadsheet(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/acessorios/analise-risco",
+    summary="Acessório: preenche o CNJ da planilha de Análise de Risco (join por NPJ na Base Analítica)",
+)
+async def acessorio_analise_risco(
+    analise: UploadFile = File(..., description="Planilha de agendamento (Análise de Risco) com NPJ e CNJ em branco"),
+    base: UploadFile = File(..., description="Base Analítica (relacional NPJ -> Nº do Processo)"),
+    current_user: LegalOneUser = Depends(auth_security.get_current_user),
+):
+    import json as _json
+
+    from app.services.tasks.analise_risco_merge import gerar_planilha_com_cnj
+
+    a_bytes = await analise.read()
+    b_bytes = await base.read()
+    if not a_bytes or not b_bytes:
+        raise HTTPException(status_code=400, detail="Envie as duas planilhas (Análise de Risco e Base Analítica).")
+    _validate_spreadsheet_upload(analise, a_bytes)
+    _validate_spreadsheet_upload(base, b_bytes)
+    try:
+        out_bytes, resumo = gerar_planilha_com_cnj(a_bytes, b_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400,
+            detail="Não consegui processar as planilhas. Confira se são .xlsx válidos e no formato esperado.",
+        ) from exc
+    return StreamingResponse(
+        BytesIO(out_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="analise_risco_com_cnj.xlsx"',
+            "X-Analise-Resumo": _json.dumps(resumo, ensure_ascii=False),
+            "Access-Control-Expose-Headers": "X-Analise-Resumo, Content-Disposition",
+        },
+    )
 
 
 @router.post("/trigger/task", tags=["Tasks"])

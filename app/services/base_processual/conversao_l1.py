@@ -4,7 +4,7 @@ no XLSX de migracao do Legal One.
 Port do script `gerar_planilha.py` (autor Jonilson Vilela) usado
 historicamente fora do sistema. Mantem a logica:
 - Banco Master sempre como Reu.
-- Responsavel fixo "Jose Alberto Veloso de Carvalho".
+- Responsavel fixo "Enzo Pinto Bagatoli Carriço" (era Jose Alberto ate 2026-07-09).
 - Escritorio fixo "MDR Advocacia / Area operacional / Banco Master / Reu".
 - Marca "bmagravo" nas Observacoes quando a Acao = "Agravo de Instrumento"
   ou o numero do processo termina em ".0000"; caso contrario "bmcomum".
@@ -29,7 +29,7 @@ _warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "MODELO_LEGAL_ONE.xlsx"
 
-RESPONSAVEIS_REU = ["Jose Alberto Veloso de Carvalho"]
+RESPONSAVEIS_REU = ["Enzo Pinto Bagatoli Carriço"]
 ESCRITORIO_REU = "MDR Advocacia / Área operacional / Banco Master / Réu"
 CLIENTE_PRINCIPAL = "Banco Master S.A. - Em Liquidação Extrajudicial"
 CLIENTE_CNPJ = "33.923.798/0001-00"

@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -331,8 +331,12 @@ const OperatorOfficeRows = ({
           <td className="py-1.5 px-2">
             <div className="flex items-center gap-1.5 pl-7 text-muted-foreground">
               <CornerDownRight className="h-3 w-3 shrink-0" />
+              {/* Sem o prefixo constante ("MDR Advocacia / Área operacional /"):
+                  truncar pela direita comia justamente a ponta que distingue as
+                  operações (Banco do Brasil / RÉU vs / AUTOR). O caminho
+                  completo continua no tooltip. */}
               <span className="max-w-[320px] truncate" title={of.office_name}>
-                {of.office_name}
+                {folhaEscritorio(of.office_name)}
               </span>
             </div>
           </td>
@@ -408,6 +412,376 @@ const KpiCard = ({ label, value, caption, icon: Icon, tone = 'default', isLoadin
     </Card>
   );
 };
+
+// ─── Entradas por dia (o que CHEGOU, por cliente) ──────────────────────────
+// Pedido da supervisão (06/08/2026): acompanhar o volume de entrada de
+// publicações por dia, separado por cliente, com o período livre. "Cliente" é
+// o ramo do escritório responsável (Banco do Brasil, Ativos, ...), extraído do
+// path — determinístico, sem cadastro novo. Duas bases de data porque medem
+// coisas diferentes: CAPTURA = carga que entrou na fila naquele dia (inclui
+// recuperação retroativa, e é honesto o pico aparecer); PUBLICAÇÃO = o fato
+// jurídico no tempo (fim de semana zera, como deve).
+// Visual em duas camadas em vez de barra empilhada (feedback do operador
+// 06/08): com ~10 escritórios a pilha vira sopa de cores e o rabo da legenda
+// não diz nada. A ÁREA de cima mostra o ritmo total; o MAPA DE CALOR de baixo
+// dá uma linha por escritório responsável — padrão semanal, pico e ausência
+// ficam legíveis por linha, e escala pra quantos escritórios existirem.
+const ENTRADA_COR_BASE = '14, 165, 233'; // sky-500 em RGB (intensidade via alpha)
+const ENTRADA_PRESETS = [7, 15, 30, 60, 90];
+
+interface EntradasResp {
+  inicio: string;
+  fim: string;
+  base: string;
+  clientes: string[];
+  total_periodo: number;
+  serie: Array<Record<string, number | string>>;
+}
+
+// "MDR Advocacia / Área operacional / Banco do Brasil / Réu" → "Banco do Brasil / Réu".
+// O prefixo é idêntico em todo escritório da casa — mostrar só o fim é o que
+// deixa a distinção (cliente / posição) visível em espaço curto.
+function folhaEscritorio(path: string | null | undefined): string {
+  if (!path) return '';
+  const partes = path.split(' / ').map((x) => x.trim()).filter(Boolean);
+  if (partes.length <= 2) return path;
+  return partes.slice(2).join(' / ');
+}
+
+function isoDiasAtras(dias: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - dias);
+  return d.toISOString().slice(0, 10);
+}
+
+function EntradasPorDiaCard() {
+  const [dados, setDados] = useState<EntradasResp | null>(null);
+  const [carregando, setCarregando] = useState(false);
+  const [base, setBase] = useState<'captura' | 'publicacao'>('captura');
+  const [inicio, setInicio] = useState(() => isoDiasAtras(29));
+  const [fim, setFim] = useState(() => isoDiasAtras(0));
+  // Escritório FOCADO: clicar numa linha do mapa de calor abre a curva só
+  // dele, no mesmo período e na mesma base — o recorte de data continua
+  // valendo porque a curva lê a MESMA série já carregada.
+  const [focoCliente, setFocoCliente] = useState<string | null>(null);
+
+  useEffect(() => {
+    let ativo = true;
+    (async () => {
+      setCarregando(true);
+      try {
+        const res = await apiFetch(
+          `/api/v1/dashboard/publications-entradas?inicio=${inicio}&fim=${fim}&base=${base}`,
+        );
+        if (res.ok && ativo) setDados(await res.json());
+      } catch {
+        /* painel informativo — não derruba o dashboard */
+      } finally {
+        if (ativo) setCarregando(false);
+      }
+    })();
+    return () => { ativo = false; };
+  }, [inicio, fim, base]);
+
+  const mediaDia = useMemo(() => {
+    if (!dados || dados.serie.length === 0) return 0;
+    return Math.round(dados.total_periodo / dados.serie.length);
+  }, [dados]);
+
+  // Foco só vale enquanto o escritório existir no período carregado — mudar
+  // a faixa pode fazê-lo sumir da resposta, e aí o painel fecha sozinho.
+  const focoValido = useMemo(
+    () => (focoCliente && dados?.clientes.includes(focoCliente) ? focoCliente : null),
+    [focoCliente, dados],
+  );
+
+  const focoStats = useMemo(() => {
+    if (!focoValido || !dados) return null;
+    let total = 0;
+    let pico = { rotulo: '—', v: 0 };
+    for (const ponto of dados.serie) {
+      const v = Number(ponto[focoValido] || 0);
+      total += v;
+      if (v > pico.v) pico = { rotulo: String(ponto.rotulo), v };
+    }
+    return {
+      total,
+      media: Math.round(total / Math.max(1, dados.serie.length)),
+      pico,
+    };
+  }, [focoValido, dados]);
+
+  const presetAtivo = useMemo(() => {
+    return ENTRADA_PRESETS.find(
+      (d) => inicio === isoDiasAtras(d - 1) && fim === isoDiasAtras(0),
+    );
+  }, [inicio, fim]);
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle className="text-base flex items-center gap-2">
+              Entradas por dia
+              {carregando && (
+                <span className="text-xs font-normal text-muted-foreground">atualizando…</span>
+              )}
+            </CardTitle>
+            <CardDescription>
+              Volume de publicações que chegou, por cliente.
+              {dados && (
+                <>
+                  {' '}No período:{' '}
+                  <strong>{dados.total_periodo.toLocaleString('pt-BR')}</strong>{' '}
+                  (média de {mediaDia}/dia).
+                </>
+              )}
+            </CardDescription>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Base da data: captura mede carga da fila; publicação, o fato no diário */}
+            <div className="flex rounded-md border border-slate-200 p-0.5">
+              <Button
+                size="sm"
+                variant={base === 'captura' ? 'default' : 'ghost'}
+                className="h-7 px-2 text-xs"
+                title="Agrupa pelo dia em que o Flow capturou (mede carga de trabalho; recuperação retroativa aparece como pico no dia)"
+                onClick={() => setBase('captura')}
+              >
+                Por captura
+              </Button>
+              <Button
+                size="sm"
+                variant={base === 'publicacao' ? 'default' : 'ghost'}
+                className="h-7 px-2 text-xs"
+                title="Agrupa pelo dia em que o diário publicou (o fato jurídico no tempo)"
+                onClick={() => setBase('publicacao')}
+              >
+                Por publicação
+              </Button>
+            </div>
+            <div className="flex gap-1">
+              {ENTRADA_PRESETS.map((d) => (
+                <Button
+                  key={d}
+                  size="sm"
+                  variant={presetAtivo === d ? 'default' : 'outline'}
+                  className="h-7 px-2 text-xs"
+                  onClick={() => {
+                    setInicio(isoDiasAtras(d - 1));
+                    setFim(isoDiasAtras(0));
+                  }}
+                >
+                  {d}d
+                </Button>
+              ))}
+            </div>
+            <div className="flex items-center gap-1">
+              <Input
+                type="date"
+                value={inicio}
+                onChange={(e) => e.target.value && setInicio(e.target.value)}
+                className="h-7 w-[8.6rem] px-2 text-xs"
+              />
+              <span className="text-xs text-muted-foreground">a</span>
+              <Input
+                type="date"
+                value={fim}
+                onChange={(e) => e.target.value && setFim(e.target.value)}
+                className="h-7 w-[8.6rem] px-2 text-xs"
+              />
+            </div>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {!dados || dados.serie.length === 0 ? (
+          <p className="py-10 text-center text-sm text-muted-foreground">
+            {carregando ? 'Carregando…' : 'Sem entradas no período.'}
+          </p>
+        ) : (
+          <div className="space-y-4">
+            {/* Camada 1: o ritmo total do período */}
+            <ResponsiveContainer width="100%" height={150}>
+              <AreaChart data={dados.serie} margin={{ left: -14, right: 8, top: 6 }}>
+                <defs>
+                  <linearGradient id="gEntradas" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={`rgb(${ENTRADA_COR_BASE})`} stopOpacity={0.3} />
+                    <stop offset="100%" stopColor={`rgb(${ENTRADA_COR_BASE})`} stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                <XAxis
+                  dataKey="rotulo"
+                  fontSize={11}
+                  tickLine={false}
+                  axisLine={false}
+                  interval="preserveStartEnd"
+                  minTickGap={16}
+                />
+                <YAxis fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} />
+                <RTooltip
+                  labelFormatter={(l) => `Dia ${l}`}
+                  formatter={(v: number) => [Number(v).toLocaleString('pt-BR'), 'entradas']}
+                  contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="total"
+                  name="Entradas"
+                  stroke={`rgb(${ENTRADA_COR_BASE})`}
+                  strokeWidth={2}
+                  fill="url(#gEntradas)"
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+
+            {/* Curva FOCADA de um escritório (clique numa linha do mapa) */}
+            {focoValido && focoStats && (
+              <div className="rounded-lg border border-sky-200 bg-sky-50/40 p-3">
+                <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-sm">
+                    <span className="font-semibold text-sky-800">{focoValido}</span>
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {focoStats.total.toLocaleString('pt-BR')} no período · média{' '}
+                      {focoStats.media}/dia · pico {focoStats.pico.v.toLocaleString('pt-BR')} em{' '}
+                      {focoStats.pico.rotulo}
+                    </span>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 px-2 text-xs text-muted-foreground"
+                    onClick={() => setFocoCliente(null)}
+                  >
+                    Fechar ✕
+                  </Button>
+                </div>
+                <ResponsiveContainer width="100%" height={160}>
+                  <AreaChart data={dados.serie} margin={{ left: -14, right: 8, top: 6 }}>
+                    <defs>
+                      <linearGradient id="gFoco" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor={`rgb(${ENTRADA_COR_BASE})`} stopOpacity={0.35} />
+                        <stop offset="100%" stopColor={`rgb(${ENTRADA_COR_BASE})`} stopOpacity={0.02} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#dbeafe" vertical={false} />
+                    <XAxis
+                      dataKey="rotulo"
+                      fontSize={11}
+                      tickLine={false}
+                      axisLine={false}
+                      interval="preserveStartEnd"
+                      minTickGap={16}
+                    />
+                    <YAxis fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} />
+                    <RTooltip
+                      labelFormatter={(l) => `Dia ${l}`}
+                      formatter={(v: number) => [Number(v).toLocaleString('pt-BR'), focoValido]}
+                      contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey={focoValido}
+                      name={focoValido}
+                      stroke={`rgb(${ENTRADA_COR_BASE})`}
+                      strokeWidth={2}
+                      fill="url(#gFoco)"
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {/* Camada 2: mapa de calor escritório responsável × dia */}
+            <div className="overflow-x-auto">
+              <div className="min-w-[560px]">
+                {(() => {
+                  const totalPorCliente = new Map(
+                    dados.clientes.map((c) => [
+                      c,
+                      dados.serie.reduce((soma, ponto) => soma + Number(ponto[c] || 0), 0),
+                    ]),
+                  );
+                  const maxCelula = Math.max(
+                    1,
+                    ...dados.serie.flatMap((ponto) =>
+                      dados.clientes.map((c) => Number(ponto[c] || 0)),
+                    ),
+                  );
+                  // Rótulo do eixo a cada K dias pra não virar serrilhado em 90d.
+                  const passo = Math.max(1, Math.ceil(dados.serie.length / 15));
+                  return (
+                    <>
+                      {dados.clientes.map((c) => (
+                        <div
+                          key={c}
+                          className={`flex cursor-pointer items-center gap-1 rounded py-[1px] transition-colors hover:bg-sky-50 ${
+                            focoValido === c ? 'bg-sky-100/70 ring-1 ring-sky-300' : ''
+                          }`}
+                          title={`Clique para ver a curva só de ${c}`}
+                          onClick={() => setFocoCliente(focoValido === c ? null : c)}
+                        >
+                          <span
+                            className={`w-44 shrink-0 truncate pr-1 text-right text-[11px] ${
+                              focoValido === c ? 'font-semibold text-sky-800' : 'text-muted-foreground'
+                            }`}
+                            title={c}
+                          >
+                            {c}
+                          </span>
+                          <div className="flex flex-1 gap-[2px]">
+                            {dados.serie.map((ponto) => {
+                              const v = Number(ponto[c] || 0);
+                              return (
+                                <div
+                                  key={`${c}-${ponto.dia}`}
+                                  className="h-5 flex-1 rounded-[3px]"
+                                  style={{
+                                    backgroundColor:
+                                      v > 0
+                                        ? `rgba(${ENTRADA_COR_BASE}, ${0.15 + 0.85 * (v / maxCelula)})`
+                                        : 'rgba(148, 163, 184, 0.12)',
+                                  }}
+                                  title={`${c} — ${ponto.rotulo}: ${v.toLocaleString('pt-BR')} publicação(ões)`}
+                                />
+                              );
+                            })}
+                          </div>
+                          <span className="w-14 shrink-0 pl-1 text-right text-[11px] font-semibold tabular-nums">
+                            {(totalPorCliente.get(c) ?? 0).toLocaleString('pt-BR')}
+                          </span>
+                        </div>
+                      ))}
+                      {/* eixo de dias, alinhado às células */}
+                      <div className="flex items-center gap-1 pt-1">
+                        <span className="w-44 shrink-0" />
+                        <div className="flex flex-1 gap-[2px]">
+                          {dados.serie.map((ponto, i) => (
+                            <div
+                              key={`eixo-${ponto.dia}`}
+                              className="flex-1 text-center text-[9px] leading-none text-muted-foreground"
+                            >
+                              {i % passo === 0 ? ponto.rotulo : ''}
+                            </div>
+                          ))}
+                        </div>
+                        <span className="w-14 shrink-0 pl-1 text-right text-[10px] text-muted-foreground">
+                          total
+                        </span>
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 // Passo do funil compacto (Bloco 3): rótulo + número + seta pra baixo.
 const FunnelStep = ({
@@ -684,6 +1058,9 @@ const PublicationsDashboardPage = () => {
               isLoading={rhythmLoading}
             />
           </div>
+
+          {/* Entradas por dia — o que chegou, por cliente (acompanhamento da supervisão) */}
+          <EntradasPorDiaCard />
 
           {/* Bloco 4 — Tratamento por operador (agendadas + ciências) */}
           <Card>

@@ -30,6 +30,13 @@ export interface Colaborador {
   futuro: number;
   sem_prazo: number;
   total: number;
+  /** Recorte de ORIGEM: quanto de cada balde veio do módulo de Publicações.
+   *  É informativo — a carga que define "quem está sobrecarregado" continua
+   *  sendo o número cheio (atrasado/fatal_hoje/futuro/total). */
+  atrasado_pub: number;
+  fatal_hoje_pub: number;
+  futuro_pub: number;
+  total_pub: number;
 }
 
 export interface MatrizItem {
@@ -49,6 +56,7 @@ export interface TarefaDetalhe {
   uf?: string | null;
   prazo: string | null;
   situacao: Situacao;
+  origem?: "tarefa" | "compromisso"; // L1 separa /Tasks de /Appointments
 }
 
 // ── LIVE: pendentes de uma pessoa direto do L1 (matriz + detalhe) ──
@@ -110,24 +118,99 @@ export async function getUsuarios(team: string, busca: string): Promise<UsuarioB
   return r.usuarios;
 }
 
+// Faixa EXATA de datas (data de conclusão prevista). `inicio`/`fim` no formato
+// YYYY-MM-DD. Sem eles, cai no modo legado por `dias`.
+export interface FaixaData {
+  inicio: string;
+  fim: string;
+  /** Puxar TAMBÉM as vencidas (prazo < hoje), além da faixa. Default: não —
+   *  com o calendário fixo, a faixa escolhida é o recorte exato. */
+  incluirAtrasadas?: boolean;
+  /** Recorta a seleção às tarefas originadas no módulo de Publicações.
+   *  Age SÓ na escolha do que mover — a tabela de carga não muda. */
+  apenasPublicacoes?: boolean;
+  /** Faixa por DATA DE CADASTRO da tarefa (quando ela CHEGOU), combinável com
+   *  a faixa de conclusão: "cadastrada ontem pra semana que vem" é a
+   *  interseção das duas. No live, o recorte é feito NO L1 (creationDate). */
+  cadInicio?: string;
+  cadFim?: string;
+}
+
 export async function getLivePessoa(
   team: string,
   pessoaId: number,
-  dias: number,
-  incluirAtrasadas = true,
+  faixa: FaixaData | null,
+  dias = 0,
 ): Promise<LivePessoa> {
-  const qs = new URLSearchParams({
-    team,
-    pessoa_id: String(pessoaId),
-    dias: String(dias),
-    incluir_atrasadas: String(incluirAtrasadas),
-  });
+  const qs = new URLSearchParams({ team, pessoa_id: String(pessoaId) });
+  if (faixa) {
+    qs.set("inicio", faixa.inicio);
+    qs.set("fim", faixa.fim);
+    qs.set("incluir_atrasadas", String(!!faixa.incluirAtrasadas));
+    if (faixa.apenasPublicacoes) qs.set("apenas_publicacoes", "true");
+    if (faixa.cadInicio) qs.set("cad_inicio", faixa.cadInicio);
+    if (faixa.cadFim) qs.set("cad_fim", faixa.cadFim);
+  } else {
+    qs.set("dias", String(dias));
+    qs.set("incluir_atrasadas", "true");
+  }
   return json(await apiFetch(`${BASE}/live-pessoa?${qs.toString()}`));
 }
 
-export async function getDiagnostico(team: string): Promise<Colaborador[]> {
-  const r = await json<{ colaboradores: Colaborador[] }>(await apiFetch(`${BASE}/diagnostico?team=${team}`));
+export interface FaixaTabela {
+  inicio?: string;
+  fim?: string;
+  cadInicio?: string;
+  cadFim?: string;
+}
+
+function faixaTabelaQs(qs: URLSearchParams, faixa?: FaixaTabela | null): void {
+  if (!faixa) return;
+  if (faixa.inicio) qs.set("inicio", faixa.inicio);
+  if (faixa.fim) qs.set("fim", faixa.fim);
+  if (faixa.cadInicio) qs.set("cad_inicio", faixa.cadInicio);
+  if (faixa.cadFim) qs.set("cad_fim", faixa.cadFim);
+}
+
+export async function getDiagnostico(
+  team: string, faixa?: FaixaTabela | null,
+): Promise<Colaborador[]> {
+  const qs = new URLSearchParams({ team });
+  faixaTabelaQs(qs, faixa);
+  const r = await json<{ colaboradores: Colaborador[]; publicacoes_desde?: string | null }>(
+    await apiFetch(`${BASE}/diagnostico?${qs.toString()}`),
+  );
+  // `publicacoes_desde` viaja junto no array (propriedade não-enumerável seria
+  // perdida no map do React) — quem quiser lê via getDiagnosticoCompleto.
   return r.colaboradores;
+}
+
+/** Igual ao getDiagnostico, mas devolve também o LIMITE do recorte de origem:
+ *  a data do agendamento mais antigo registrado. Tarefa de Publicações
+ *  anterior a isso existe na fila e não aparece no recorte. */
+export async function getDiagnosticoCompleto(
+  team: string, faixa?: FaixaTabela | null,
+): Promise<{ colaboradores: Colaborador[]; publicacoes_desde: string | null }> {
+  const qs = new URLSearchParams({ team });
+  faixaTabelaQs(qs, faixa);
+  const r = await json<{ colaboradores: Colaborador[]; publicacoes_desde?: string | null }>(
+    await apiFetch(`${BASE}/diagnostico?${qs.toString()}`),
+  );
+  return { colaboradores: r.colaboradores, publicacoes_desde: r.publicacoes_desde ?? null };
+}
+
+/** Prévia do "o que chegou": cadastros de tarefa por dia nos últimos N dias.
+ *  Vem do snapshot — o dia de HOJE aparece parcial até o snapshot da manhã. */
+export interface EntradaDia {
+  dia: string;
+  cadastradas: number;
+  ainda_pendentes: number;
+  pessoas: number;
+}
+export async function getEntradas(team: string, dias = 7): Promise<EntradaDia[]> {
+  const qs = new URLSearchParams({ team, dias: String(dias) });
+  const r = await json<{ entradas: EntradaDia[] }>(await apiFetch(`${BASE}/entradas?${qs.toString()}`));
+  return r.entradas;
 }
 
 export async function getMatriz(team: string, pessoaIds: number[], dias: number): Promise<MatrizItem[]> {
@@ -242,6 +325,17 @@ export async function getExecucaoDetalhe(team: string, jobId: string): Promise<E
   return r.tarefas;
 }
 
+// Refaz só as tarefas que falharam/ficaram pendentes numa execução — dispara um
+// novo job (server-backed) com esses itens (preserva origem tarefa/compromisso).
+export async function retentarExecucao(
+  team: string,
+  jobId: string,
+): Promise<{ job_id: string; total: number }> {
+  return json(
+    await apiFetch(`${BASE}/reatribuir/jobs/${jobId}/retry?team=${team}`, { method: "POST" }),
+  );
+}
+
 export async function downloadExecucaoExcel(team: string, jobId: string): Promise<void> {
   const res = await apiFetch(`${BASE}/reatribuir/jobs/${jobId}/excel?team=${team}`);
   if (!res.ok) throw new Error(`Erro ${res.status} ao gerar o Excel`);
@@ -263,6 +357,7 @@ export interface ReatribuirItem {
   task_id: number;
   to_id: number | null;
   to_nome: string | null;
+  origem?: "tarefa" | "compromisso";
 }
 
 export interface ReatribuirStatus {

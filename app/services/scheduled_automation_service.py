@@ -687,30 +687,77 @@ class ScheduledAutomationService:
                     len(publications), union_from, union_to, total_active,
                 )
             except Exception as exc:  # noqa: BLE001
-                # L1 caiu — todos os offices ativos viram FALHA nesta rodada.
-                # Logamos UMA stack trace; cada office só recebe o resumo.
+                # A API do L1 caiu. Antes de dar a rodada por perdida, tenta a
+                # CONTINGÊNCIA: mandar o próprio L1 gerar o relatório de
+                # publicações e importar o arquivo.
+                #
+                # Cobre o modo de falha real de 30/07/2026, em que o /Updates
+                # respondia 502 mas o site do L1 estava no ar — as 13 buscas do
+                # dia morreram e a captura só voltou porque o operador extraiu o
+                # relatório na mão.
                 logger.exception(
-                    "Falha no fetch L1 batch: marcando %s escritórios como falha.",
-                    total_active,
+                    "Falha no fetch L1 batch (%s escritórios ativos).", total_active,
                 )
                 err_msg = f"L1 batch fetch failed: {exc}"
-                for office_id, df, dt in active:
-                    self._record_attempt_failure(office_id, df, dt, err_msg, automation_id)
-                    failed.append(office_id)
-                if run_id is not None:
-                    self._update_progress(
-                        run_id,
-                        phase="pull_publications",
-                        current=total_active,
-                        total=total_active,
-                        message=f"Falha L1 fetch — {total_active} escritórios marcados como falha",
+
+                publications = None
+                if True:  # o encadeamento decide quais camadas estão ligadas
+                    if run_id is not None:
+                        self._update_progress(
+                            run_id,
+                            phase="pull_publications",
+                            current=0,
+                            total=total_active,
+                            message="API do L1 falhou — gerando relatório de contingência...",
+                        )
+                    conting = self._contingencia(failed_count=total_active)
+
+                    if conting.get("ok"):
+                        publications = conting["publicacoes"]
+                        logger.warning(
+                            "CONTINGÊNCIA ATIVA: a API do L1 falhou e a captura "
+                            "veio do relatório #%s (%s publicações de %s processos, "
+                            "janela %s a %s).",
+                            conting.get("report_id"), conting.get("total"),
+                            conting.get("processos"), conting.get("data_inicio"),
+                            conting.get("data_fim"),
+                        )
+                        err_msg = None
+                        self._alertar_contingencia(conting, str(exc))
+                    else:
+                        logger.error(
+                            "Contingência por relatório não resolveu (%s). "
+                            "A rodada segue como falha.",
+                            conting.get("motivo"),
+                        )
+                        err_msg = (
+                            f"{err_msg} | contingencia: {conting.get('motivo')}"
+                        )
+
+                if publications is None:
+                    # Nem a API nem a contingência trouxeram nada.
+                    for office_id, df, dt in active:
+                        self._record_attempt_failure(office_id, df, dt, err_msg, automation_id)
+                        failed.append(office_id)
+                    self._alertar_captura_falhou(
+                        failed=failed, ok=ok, erro=err_msg,
+                        janela=f"{union_from:%d/%m %H:%M} a {union_to:%d/%m %H:%M}",
+                        run_id=run_id,
                     )
-                return {
-                    "records_found": 0,
-                    "offices_ok": ok,
-                    "offices_failed": failed,
-                    "offices_skipped": skipped,
-                }
+                    if run_id is not None:
+                        self._update_progress(
+                            run_id,
+                            phase="pull_publications",
+                            current=total_active,
+                            total=total_active,
+                            message=f"Falha L1 fetch — {total_active} escritórios marcados como falha",
+                        )
+                    return {
+                        "records_found": 0,
+                        "offices_ok": ok,
+                        "offices_failed": failed,
+                        "offices_skipped": skipped,
+                    }
 
             # Fan-out: cada office processa o subset que é dele.
             for idx, (office_id, date_from, date_to) in enumerate(active, start=1):
@@ -813,12 +860,183 @@ class ScheduledAutomationService:
                         message=f"Escritório {idx}/{total_offices}: falhou",
                     )
 
+        # ── Contingência no modo legado ───────────────────────────────
+        # PRECISA existir aqui: produção roda com
+        # PUBLICATION_SCHEDULER_BATCH_MODE=false, então é ESTE o caminho que
+        # falha de madrugada. Enganchar só no batch deixaria a rede de proteção
+        # instalada no corredor errado.
+        contingencia_txt = None
+        if failed:
+            janela_l = {o: (df, dt) for o, df, dt in active}
+            conting = self._contingencia(failed_count=len(failed))
+
+            if conting.get("ok"):
+                publicacoes = conting["publicacoes"]
+                recuperados: List[int] = []
+                for office_id in list(failed):
+                    df, dt = janela_l.get(office_id, (None, None))
+                    try:
+                        result = search_service.create_and_run_search(
+                            date_from=df.strftime("%Y-%m-%dT%H:%M:%SZ") if df else None,
+                            date_to=dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None,
+                            responsible_office_id=internal_to_external.get(office_id, office_id),
+                            auto_classify=False,
+                            requested_by="scheduler-contingencia",
+                            prefetched_publications=publicacoes,
+                        )
+                        achados = int(
+                            result.get("total_new", 0) or result.get("total_found", 0) or 0
+                        )
+                        total_found += achados
+                        self._record_attempt_success(office_id, df, dt, achados, automation_id)
+                        recuperados.append(office_id)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Contingência: escritório %s seguiu falhando.", office_id,
+                        )
+                for office_id in recuperados:
+                    failed.remove(office_id)
+                    ok.append(office_id)
+                contingencia_txt = (
+                    f"{conting.get('origem')} recuperou {len(recuperados)} de "
+                    f"{len(recuperados) + len(failed)} escritório(s)"
+                )
+                logger.warning(
+                    "CONTINGÊNCIA ATIVA (legado, %s): %s escritório(s) recuperados.",
+                    conting.get("origem"), len(recuperados),
+                )
+                if not failed:
+                    self._alertar_contingencia(conting, "API do L1 falhou por escritório")
+            else:
+                contingencia_txt = f"não resolveu ({conting.get('motivo')})"
+
+        if failed:
+            self._alertar_captura_falhou(
+                failed=failed, ok=ok,
+                erro="A busca pela API do Legal One falhou nesses escritórios.",
+                contingencia=contingencia_txt,
+                run_id=run_id,
+            )
+
+        # Vigia do PERÍMETRO, não da execução: os dois alertas acima só sabem
+        # falar de escritório que foi varrido. Pasta parada no escritório raiz
+        # não é varrida por ninguém, então some sem gerar erro — foi assim que
+        # 654 pastas ficaram invisíveis até 05/08/2026, uma delas com prazo de
+        # réplica já decorrido. Roda depois da captura pra não atrasá-la.
+        self._verificar_cobertura(ok + failed + skipped)
+
         return {
             "records_found": total_found,
             "offices_ok": ok,
             "offices_failed": failed,
             "offices_skipped": skipped,
         }
+
+    def _verificar_cobertura(self, office_ids_varridos) -> None:
+        try:
+            from app.services.legal_one_client import LegalOneApiClient
+            from app.services.publication_office_coverage import (
+                alertar_se_houver_buraco,
+            )
+
+            # Client próprio: o serviço não guarda um, e a verificação é
+            # best-effort — não vale acoplar o construtor por causa dela.
+            alertar_se_houver_buraco(
+                self.db, LegalOneApiClient(), office_ids_varridos
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha na verificação de cobertura (ignorada).")
+
+    # ── Contingências da captura, em ordem ────────────────────────────
+
+    def _contingencia(self, *, failed_count: int) -> dict:
+        """Tenta as contingências na ordem, e para na primeira que resolver.
+
+            1. Relatório gerado no L1 Web  — cobre "API fora, site de pé", que
+               é o modo de falha mais comum (foi o de 30 e 31/07/2026);
+            2. DJEN/Comunica               — última rede, não depende do L1
+               para buscar. Fica desligada por padrão (contingência oculta).
+
+        Devolve o mesmo formato das duas, mais `origem`, pra quem chama tratar
+        as camadas do mesmo jeito.
+        """
+        from app.core.config import settings as _s
+
+        motivos: list[str] = []
+
+        if _s.publication_report_fallback_enabled:
+            try:
+                from app.services.publication_l1_report_fallback import (
+                    capturar_publicacoes as _por_relatorio,
+                )
+
+                r = _por_relatorio(
+                    self.db, dias_atras=_s.publication_report_fallback_dias_atras,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Contingência por relatório falhou.")
+                r = {"ok": False, "motivo": "excecao"}
+            if r.get("ok"):
+                return {**r, "origem": f"relatório #{r.get('report_id')}"}
+            motivos.append(f"relatorio={r.get('motivo')}")
+
+        if _s.djen_enabled:
+            logger.warning(
+                "Relatório não resolveu (%s escritórios em falha) — caindo pro DJEN.",
+                failed_count,
+            )
+            try:
+                from app.services.djen_publication_fallback import (
+                    capturar_publicacoes as _por_djen,
+                )
+
+                d = _por_djen(
+                    self.db, dias_atras=_s.publication_report_fallback_dias_atras,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Contingência pelo DJEN falhou.")
+                d = {"ok": False, "motivo": "excecao"}
+            if d.get("ok"):
+                return {**d, "origem": "DJEN", "report_id": None}
+            motivos.append(f"djen={d.get('motivo')}")
+
+        return {"ok": False, "motivo": " · ".join(motivos) or "nenhuma_camada_ligada"}
+
+    # ── Alertas da captura ────────────────────────────────────────────
+    # Best-effort: e-mail que falha não pode derrubar a rodada.
+
+    def _alertar_captura_falhou(
+        self, *, failed, ok, erro, janela=None, contingencia=None, run_id=None,
+    ) -> None:
+        try:
+            from app.services.publication_capture_alerts import alertar_falha_captura
+
+            alertar_falha_captura(
+                escritorios_falha=list(failed),
+                escritorios_ok=list(ok),
+                erro=erro,
+                janela=janela,
+                contingencia=contingencia,
+                run_id=run_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao disparar o alerta da captura (ignorado).")
+
+    def _alertar_contingencia(self, conting: dict, erro_api: str) -> None:
+        try:
+            from app.services.publication_capture_alerts import (
+                alertar_contingencia_ativada,
+            )
+
+            alertar_contingencia_ativada(
+                total_publicacoes=conting.get("total", 0),
+                processos=conting.get("processos", 0),
+                report_id=conting.get("report_id"),
+                janela=f"{conting.get('data_inicio')} a {conting.get('data_fim')}",
+                erro_api=erro_api,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao disparar o alerta de contingência (ignorado).")
 
     def _execute_classify(self, office_ids: List[int], run_id: Optional[int] = None) -> Dict[str, Any]:
         """
@@ -858,6 +1076,16 @@ class ScheduledAutomationService:
         )
 
         classifier = PublicationBatchClassifier(db=self.db)
+
+        # 1.5) Resgata batch zumbi ANTES de coletar. Batch não-terminal
+        # sombreia seus registros na coleta (proteção anti-duplicação), então
+        # um batch pendurado por redeploy esconde publicações PRA SEMPRE — o
+        # 114 segurou 521 por 20 dias sem nenhum alerta. Best-effort: o resgate
+        # não pode derrubar a rodada que veio proteger.
+        try:
+            asyncio.run(classifier.recover_stale_batches())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Classify: resgate de batches zumbis falhou: %s", exc)
 
         # 2) Coleta pendentes em todos os escritórios selecionados
         if run_id is not None:

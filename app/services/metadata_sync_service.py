@@ -88,77 +88,89 @@ class MetadataSyncService:
             return False
 
     def sync_users(self) -> bool:
-        self.logger.info("Sincronizando usuarios (Users)...")
+        """NAO sincroniza usuarios. Apenas VINCULA o contato do L1 por e-mail.
+
+        DECISAO DO OPERADOR (07/08/2026, definitiva): a identidade do Flow e' o
+        Entra ID e nada mais. Usuario nasce do login SSO; papel quem define e' o
+        gestor. Nao existe mais usuario criado a partir do cadastro do L1, nem
+        ativacao de conta, nem senha provisoria.
+
+        O que ESTA funcao ainda faz, e o motivo de nao ter sido simplesmente
+        apagada: a tarefa no Legal One exige o ID DE CONTATO de quem sera' o
+        responsavel. Esse id nao e' identidade, e' um ATRIBUTO operacional. Aqui
+        ele e' preenchido casando o e-mail do usuario do Entra com o cadastro de
+        contatos do L1 — e SO isso:
+
+          - nunca CRIA usuario (o cadastro do L1 nao gera acesso ao Flow);
+          - nunca DESATIVA usuario (quem tira acesso e' o Entra ou o gestor);
+          - nunca SOBRESCREVE e-mail (o e-mail e' a identidade, e' do Entra);
+          - so' preenche `external_id` onde ele esta' VAZIO, e so' quando o
+            e-mail bate exatamente.
+
+        O historico dessa decisao: o sync antigo espelhava `isActive` do L1 e
+        desativava quem nao estivesse na lista. Isso derrubou o acesso de gente
+        que trabalha aqui (cadastro antigo em gmail no L1) e criou usuario
+        duplicado — dois registros com o mesmo nome, um sem `external_id`, que
+        quebrou EM SILENCIO o seletor de responsavel (o campo voltava em branco,
+        caso da Ana Carolina em 07/08). Cada rodada do sync reabria o problema.
+        """
+        self.logger.info("Vinculando contatos do L1 aos usuarios do Entra...")
         try:
             users_data = self.legal_one_client.get_all_users()
             if not users_data:
-                self.logger.warning("Nenhum usuario encontrado na API do Legal One.")
+                self.logger.warning("Nenhum contato retornado pelo Legal One.")
                 return False
 
-            with self.db.begin_nested():
-                existing_users = {user.external_id: user for user in self.db.query(LegalOneUser).all()}
+            # e-mail (minusculo) -> id do contato no L1
+            por_email: dict[str, int] = {}
+            for u in users_data:
+                email = (u.get("email") or "").strip().lower()
+                ext = u.get("id")
+                if email and ext and email not in por_email:
+                    por_email[email] = int(ext)
 
-                # Índice secundário por email para detectar usuários criados
-                # manualmente (ex.: admin com external_id=0) e vinculá-los ao
-                # external_id real do Legal One sem gerar UniqueViolation.
-                existing_by_email = {u.email: u for u in existing_users.values() if u.email}
+            # Ids ja' usados: `external_id` e' unico na tabela, entao vincular
+            # dois usuarios ao mesmo contato explodiria a constraint.
+            ja_usados = {
+                r[0] for r in self.db.query(LegalOneUser.external_id)
+                .filter(LegalOneUser.external_id.isnot(None)).all()
+            }
 
-                for user_data in users_data:
-                    external_id = user_data.get("id")
-                    if not external_id:
-                        continue
-
-                    email = user_data.get("email")
-                    user = existing_users.get(external_id)
-
-                    if not user and email:
-                        # Fallback: talvez exista pelo email (criado manualmente).
-                        user = existing_by_email.get(email)
-                        if user:
-                            # Vincula ao external_id real; preserva role, senha
-                            # e permissões que foram configurados manualmente.
-                            user.external_id = external_id
-                            existing_users[external_id] = user
-
-                    if user:
-                        user.name = user_data.get("name")
-                        # NÃO sincroniza o e-mail de quem já tem login via Entra/SSO
-                        # (last_sso_at preenchido). O e-mail virou IDENTIDADE DE LOGIN
-                        # e passou a ser gerido só pelo Entra ID: sobrescrever com o
-                        # e-mail do cadastro do Legal One revertia o login (ex.:
-                        # institucional -> e-mail antigo), recriava conta pendente e
-                        # jogava o usuário pra tela de espera a cada sync. Demais
-                        # campos (nome/ativo) seguem sincronizando para os outros
-                        # módulos — a sync continua intocada fora deste vínculo.
-                        if user.last_sso_at is None:
-                            user.email = email
-                        user.is_active = user_data.get("isActive", False)
-                    else:
-                        new_user = LegalOneUser(
-                            external_id=external_id,
-                            name=user_data.get("name"),
-                            email=email,
-                            is_active=user_data.get("isActive", False),
-                        )
-                        self.db.add(new_user)
-                        if email:
-                            existing_by_email[email] = new_user
-
-                active_external_ids = {
-                    user["id"]
-                    for user in users_data
-                    if user.get("id") and user.get("isActive")
-                }
-                for external_id, user in existing_users.items():
-                    if external_id not in active_external_ids:
-                        user.is_active = False
+            vinculados = 0
+            sem_contato: list[str] = []
+            for user in (
+                self.db.query(LegalOneUser)
+                .filter(LegalOneUser.external_id.is_(None))
+                .all()
+            ):
+                email = (user.email or "").strip().lower()
+                ext = por_email.get(email)
+                if ext and ext not in ja_usados:
+                    user.external_id = ext
+                    ja_usados.add(ext)
+                    vinculados += 1
+                    self.logger.info(
+                        "Usuario %s vinculado ao contato L1 %s pelo e-mail.",
+                        user.email, ext,
+                    )
+                elif not ext:
+                    sem_contato.append(user.email or f"id={user.id}")
 
             self.db.commit()
-            self.logger.info("Sincronizacao de usuarios concluida.")
+            if sem_contato:
+                # Nao e' erro: a pessoa usa o Flow normalmente, so' nao pode ser
+                # RESPONSAVEL por tarefa no L1 ate' ter contato la'. O admin ve
+                # isso na tela de usuarios.
+                self.logger.warning(
+                    "%s usuario(s) sem contato correspondente no L1 (nao podem "
+                    "ser responsaveis por tarefa): %s",
+                    len(sem_contato), ", ".join(sem_contato[:10]),
+                )
+            self.logger.info("Vinculo de contatos concluido: %s novo(s).", vinculados)
             return True
         except Exception as exc:
             self.db.rollback()
-            self.logger.error("Erro ao sincronizar usuarios: %s", exc, exc_info=True)
+            self.logger.error("Erro ao vincular contatos do L1: %s", exc, exc_info=True)
             return False
 
     def sync_task_types_and_subtypes(self) -> bool:

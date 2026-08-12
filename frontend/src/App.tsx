@@ -6,7 +6,6 @@ import { useState, useEffect, useContext } from 'react';
 
 // Componentes de Rota e Layout
 import ProtectedRoute from './components/ProtectedRoute';
-import { ChangePasswordDialog } from './components/ChangePasswordDialog';
 import AdminNoticeBar from './components/AdminNoticeBar';
 import FeedbackButton from './components/FeedbackButton';
 
@@ -43,6 +42,7 @@ import ContatosLegalOnePage from './pages/ContatosLegalOnePage';
 import OnerequestPage from './pages/OnerequestPage';
 import OnerequestDashboardPage from './pages/OnerequestDashboardPage';
 import DistribuidosBBPage from './pages/DistribuidosBBPage';
+import EncerramentosL1Page from './pages/EncerramentosL1Page';
 import DistribuidosBBDashboardPage from './pages/DistribuidosBBDashboardPage';
 import DistribuidosBBConfigPage from './pages/DistribuidosBBConfigPage';
 import MinhaEquipePage from './pages/MinhaEquipePage';
@@ -55,13 +55,8 @@ const queryClient = new QueryClient();
 
 function AppContent() {
   const authContext = useContext(AuthContext);
-  const [showChangePasswordDialog, setShowChangePasswordDialog] = useState(false);
-
-  useEffect(() => {
-    if (authContext?.mustChangePassword && authContext.isAuthenticated) {
-      setShowChangePasswordDialog(true);
-    }
-  }, [authContext?.mustChangePassword, authContext?.isAuthenticated]);
+  // Troca de senha removida em 07/08/2026: não existe senha no Flow, a
+  // credencial é a conta Microsoft (Entra ID).
 
   return (
     <>
@@ -79,6 +74,7 @@ function AppContent() {
             <Route path="/tasks/template-batch" element={<CreateTaskByTemplatePage />} />
             <Route path="/tasks/spreadsheet-batch" element={<CreateTaskFromSpreadsheetPage />} />
             <Route path="/cancelamento-duplicadas" element={<CancelamentoDuplicadasPage />} />
+            <Route path="/encerramentos-legalone" element={<EncerramentosL1Page />} />
             <Route path="/publications" element={<PublicationsPage />} />
             <Route path="/publications/onenotify-bb" element={<OneNotifyBBPage />} />
             <Route path="/publications/dashboard" element={<PublicationsDashboardPage />} />
@@ -139,20 +135,6 @@ function AppContent() {
 
       <Toaster />
 
-      <ChangePasswordDialog
-        isOpen={showChangePasswordDialog}
-        isMandatory={authContext?.mustChangePassword ?? false}
-        onPasswordChanged={() => {
-          setShowChangePasswordDialog(false);
-          // O JWT atual ainda carrega must_change_password=true.
-          // Força logout para que o próximo login emita um token com a claim atualizada.
-          if (authContext?.mustChangePassword) {
-            authContext?.logout();
-          } else {
-            authContext?.refreshMe();
-          }
-        }}
-      />
     </>
   );
 }

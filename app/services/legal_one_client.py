@@ -979,6 +979,61 @@ class LegalOneApiClient:
         response = self._request_with_retry("GET", url, params=params)
         return response.json()
 
+    def close_lawsuit(
+        self,
+        lawsuit_id: int,
+        closing_date: str,
+        closing_reason: str,
+    ) -> Dict[str, Any]:
+        """
+        Encerra o processo no Legal One via API oficial.
+
+        Mapeamento confirmado na entidade Lawsuit (validado lendo um processo
+        encerrado manualmente pela UI):
+          closingDate          <-> DataEncerramento (ISO yyyy-mm-dd)
+          closingReason        <-> MotivoEncerramento (convencao MDR:
+                                   NOME COMPLETO - dd/mm/aaaa hh:mm)
+
+        ATENCAO: `closed` e READ-ONLY na API. Enviar a propriedade faz o L1
+        responder 400 Validation "A propriedade 'closed' nao deve ser
+        informada para uma acao de alteracao" — quem deriva o closed=true e o
+        proprio L1 a partir da data de encerramento. (Descoberto em producao
+        no primeiro encerramento real, 30/07/2026.)
+
+        Nao altera o responsavel da pasta nem os campos de resultado
+        (result/resultType/resultReason/datas) — estes seguem preenchidos
+        pela equipe no L1, como no fluxo manual.
+
+        Tenta /Lawsuits e cai pro /Litigations (mesmo padrao dos
+        Participants: o id pode pertencer a qualquer uma das entities).
+        Levanta HTTPError se o L1 recusar em ambas.
+        """
+        payload = {
+            "closingDate": closing_date,
+            "closingReason": closing_reason,
+        }
+        last_error: Optional[Exception] = None
+        for base_entity in ("/Lawsuits", "/Litigations"):
+            url = f"{self.base_url}{base_entity}/{lawsuit_id}"
+            self.logger.info(
+                "Encerrando processo %s via PATCH %s (closingDate=%s).",
+                lawsuit_id, base_entity, closing_date,
+            )
+            try:
+                self._request_with_retry("PATCH", url, json=payload)
+                return {"lawsuit_id": lawsuit_id, "entity": base_entity, **payload}
+            except requests.exceptions.HTTPError as exc:
+                status_code = exc.response.status_code if exc.response is not None else 0
+                body = exc.response.text[:400] if exc.response is not None else ""
+                self.logger.warning(
+                    "PATCH %s/%s falhou (%s): %s",
+                    base_entity, lawsuit_id, status_code, body,
+                )
+                last_error = exc
+                if status_code != 404:
+                    break  # erro real (validacao/permissao): nao adianta trocar a entity
+        raise last_error  # type: ignore[misc]
+
     def get_lawsuit_responsible_user(self, lawsuit_id: int) -> Optional[Dict[str, Any]]:
         """
         Busca o responsável principal (participante com isResponsible=True)
@@ -1377,13 +1432,15 @@ class LegalOneApiClient:
             )
             return False
 
-    def get_task_participants(self, task_id: int) -> List[Dict[str, Any]]:
+    def get_task_participants(self, task_id: int, entity: str = "tasks") -> List[Dict[str, Any]]:
         """
-        Participantes (Envolvidos) atuais da tarefa. Ler SEMPRE antes de
-        escrever — o PATCH de participants substitui a coleção inteira
+        Participantes (Envolvidos) atuais da tarefa OU compromisso. Ler SEMPRE
+        antes de escrever — o PATCH de participants substitui a coleção inteira
         (REPLACE). Ver docs/legalone-reatribuir-responsavel-executante-tarefa.md.
+        `entity`: "tasks" (Tarefa) | "appointments" (Compromisso) — mesmo modelo.
         """
-        url = f"{self.base_url}/tasks/{task_id}/participants"
+        ent = "appointments" if entity == "appointments" else "tasks"
+        url = f"{self.base_url}/{ent}/{task_id}/participants"
         resp = self._request_with_retry("GET", url)
         return (resp.json() or {}).get("value", [])
 
@@ -1402,7 +1459,7 @@ class LegalOneApiClient:
             pass
         return False
 
-    def update_task_participants(self, task_id: int, participants: list) -> dict:
+    def update_task_participants(self, task_id: int, participants: list, entity: str = "Tasks") -> dict:
         """
         Substitui a coleção de participantes (Envolvidos) — troca responsável /
         executante / solicitante. Semântica de REPLACE: mande a lista final
@@ -1410,11 +1467,13 @@ class LegalOneApiClient:
 
         Cada item: {"contact": {"id": int}, "isResponsible": bool,
                     "isExecuter": bool, "isRequester": bool}  (grafia: Executer).
+        `entity`: "Tasks" (Tarefa) | "Appointments" (Compromisso) — mesmo PATCH.
 
         Retorna {"ok": bool, "reason": "reassigned"|"workflow_locked"|"error",
                  "http": int|None}. Tarefa de Workflow = HTTP 400 travado.
         """
-        url = f"{self.base_url}/Tasks/{task_id}"
+        ent = "Appointments" if entity == "Appointments" else "Tasks"
+        url = f"{self.base_url}/{ent}/{task_id}"
         try:
             resp = self._request_with_retry(
                 "PATCH", url, json={"participants": participants}
@@ -1437,8 +1496,8 @@ class LegalOneApiClient:
             if self.is_workflow_locked(body):
                 return {"ok": False, "reason": "workflow_locked", "http": http}
             self.logger.error(
-                "Falha PATCH participants /Tasks/%s: HTTP %s. %s",
-                task_id, http, (getattr(resp, "text", "") or "")[:400],
+                "Falha PATCH participants /%s/%s: HTTP %s. %s",
+                ent, task_id, http, (getattr(resp, "text", "") or "")[:400],
             )
             return {"ok": False, "reason": "error", "http": http}
 
