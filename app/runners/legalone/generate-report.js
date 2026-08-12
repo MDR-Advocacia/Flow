@@ -183,11 +183,21 @@ async function createLoggedInSession(loginConfig) {
     await l1session.injectSharedCookies(context, loginConfig.returnUrl, sharedCookies);
     console.error('[session] cookies compartilhados injetados — tentando reusar a sessão.');
   }
-  const page = await context.newPage();
-  await login(page, loginConfig);
-  const saved = await l1session.persistSharedCookies(null, context, loginConfig.returnUrl);
-  console.error(`[session] sessão ativa ${saved ? 'sincronizada no' : 'NÃO sincronizada no'} cache compartilhado.`);
-  return { browser, context, page };
+  // Do launch até o return ninguém mais tem a referência do browser: se o
+  // login (ou a gravação de cookies) estourar aqui, o Chromium fica órfão e
+  // o `finally` do main não acha `session` pra fechar. Cada órfão são ~7
+  // processos, e foi assim que o container juntou 112 chrome-headless em
+  // 12/08/2026. Mesma correção feita no cancel-legacy-task.js.
+  try {
+    const page = await context.newPage();
+    await login(page, loginConfig);
+    const saved = await l1session.persistSharedCookies(null, context, loginConfig.returnUrl);
+    console.error(`[session] sessão ativa ${saved ? 'sincronizada no' : 'NÃO sincronizada no'} cache compartilhado.`);
+    return { browser, context, page };
+  } catch (error) {
+    await browser.close().catch(() => {});
+    throw error;
+  }
 }
 
 async function gerarRelatorio(page, { baseUrl, modelId, timeoutMs }) {

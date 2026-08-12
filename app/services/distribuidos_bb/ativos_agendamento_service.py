@@ -167,6 +167,62 @@ def _ja_tem_tarefa_aberta(client, lawsuit_id: int, subtype_id: int) -> bool:
     return False
 
 
+def _reativar_e_confirmar(client, lawsuit_id: int) -> dict:
+    """Reativa a pasta e CONFIRMA relendo o status.
+
+    A confirmação não é zelo excessivo: o caminho web responde `Success=true`
+    assim que enfileira a alteração, então a resposta positiva não prova que a
+    pasta voltou. Sem reler, um lote inteiro poderia ser dado como reativado
+    sem nada ter mudado no L1.
+    """
+    from app.models.distribuidos_bb import L1_PASTA_ATIVO
+    from app.services.distribuidos_bb.reativacao_service import (
+        confirmar_reativacao,
+        reativar_pasta,
+    )
+
+    res = reativar_pasta(client, lawsuit_id)
+    if not res.get("ok"):
+        return res
+    status = confirmar_reativacao(client, lawsuit_id)
+    res["status_confirmado"] = status
+    if status is not None and int(status) != L1_PASTA_ATIVO:
+        res["ok"] = False
+        res["erro"] = (
+            f"L1 aceitou a alteração mas a pasta continua no status {status}."
+        )
+    return res
+
+
+def _marcar_reativacao(db, item: dict, *, ok: bool) -> None:
+    """Reflete o resultado da reativação no processo. Best-effort."""
+    from app.models.distribuidos_bb import (
+        L1_PASTA_ATIVO,
+        REATIV_FALHOU,
+        REATIV_REATIVADO,
+        BbProcesso,
+    )
+
+    pid = item.get("processo_id")
+    if not pid:
+        return
+    try:
+        p = db.get(BbProcesso, pid)
+        if not p:
+            return
+        if ok:
+            p.reativacao_status = REATIV_REATIVADO
+            p.reativado_em = datetime.now(timezone.utc)
+            p.l1_status_id = L1_PASTA_ATIVO
+        else:
+            # Fica FALHOU (não volta pra PENDENTE) pra o operador ver que já
+            # tentamos e não ficar reprocessando o mesmo caso em silêncio.
+            p.reativacao_status = REATIV_FALHOU
+        db.commit()
+    except Exception:  # noqa: BLE001
+        logger.warning("Reativação: não consegui marcar o processo %s.", pid)
+
+
 def _run_job(job_id: int) -> None:
     from app.db.session import SessionLocal
     from app.services.legal_one_client import LegalOneApiClient
@@ -188,6 +244,26 @@ def _run_job(job_id: int) -> None:
                 if job.dry_run:
                     it["status"] = "simulado"
                 else:
+                    # Passo 1 (só na fila de reativação): a pasta está fechada e
+                    # o cliente reenviou o processo. Ela precisa voltar pra Ativo
+                    # ANTES da tarefa — tarefa em pasta arquivada não aparece pra
+                    # ninguém no dia a dia.
+                    if config.get("reativar_pasta") and it.get("precisa_reativar"):
+                        rat = _reativar_e_confirmar(client, lawsuit_id)
+                        it["reativacao"] = rat
+                        if not rat.get("ok"):
+                            # Não agenda em cima de pasta que continua fechada:
+                            # a tarefa ficaria invisível e o erro, mascarado.
+                            it["status"] = "falha"
+                            it["erro"] = (
+                                "Não foi possível reativar a pasta: "
+                                f"{rat.get('erro') or 'motivo não informado'}"
+                            )
+                            job.falhas += 1
+                            _marcar_reativacao(db, it, ok=False)
+                            continue
+                        _marcar_reativacao(db, it, ok=True)
+
                     if _ja_tem_tarefa_aberta(client, lawsuit_id, config["subtype_id"]):
                         it["status"] = "pulado"
                         it["erro"] = "Já havia tarefa aberta desse subtipo na pasta."

@@ -20,13 +20,17 @@ import openpyxl
 from sqlalchemy.orm import Session
 
 from app.models.distribuidos_bb import (
+    L1_PASTA_FECHADAS,
+    L1_PASTA_LABEL,
     NIVEL_AVISO,
+    NIVEL_ERRO,
     PLANILHA_MANUAL,
     POOL_CADASTRADO_L1,
     POOL_NOVO,
     POOL_PENDENTE_CADASTRO,
     PROC_CADASTRADO,
     PROC_DISTRIBUIDO,
+    REATIV_PENDENTE,
     SECAO_PLANILHA,
     BbConfig,
     BbEnvolvido,
@@ -86,6 +90,13 @@ def gerar_planilha(
 
     # Cliente por linha (BB × Ativos): nome/CNPJ/tipo do dono do processo.
     def _cliente_cfg(cli: str) -> tuple[str, str, str]:
+        if cli == "MASTER":
+            return (
+                _cfg(db, "master_cliente_nome",
+                     "Banco Master S.A. - Em Liquidação Extrajudicial"),
+                _cfg(db, "master_cliente_cpf_cnpj", "33.923.798/0001-00"),
+                _cfg(db, "master_cliente_tipo", "PJ"),
+            )
         if cli == "ATIVOS":
             return (
                 _cfg(db, "ativos_cliente_nome", "Ativos S.A. Securitizadora de Créditos Financeiros"),
@@ -145,7 +156,14 @@ def gerar_planilha(
         linha[13] = adverso_tipo
         linha[15] = p.data_ajuizamento
         linha[16] = p.acao
-        linha[17] = p.npj if p.cliente == "BB" else ""
+        if p.cliente == "BB":
+            linha[17] = p.npj
+        elif p.cliente == "MASTER":
+            # Data/hora de entrada como Título: é assim que o operador do
+            # Master localiza o lote no L1 (comportamento do módulo antigo).
+            linha[17] = p.created_at.strftime("%d/%m/%Y %H:%M:%S") if p.created_at else ""
+        else:
+            linha[17] = ""
         linha[19] = tram["uf"]
         linha[20] = tram["cidade"]
         linha[21] = tram["orgao"]
@@ -279,17 +297,54 @@ def _marcar_ja_existentes_no_l1(db: Session, processos: list[BbProcesso]) -> set
             p.planilha_status = POOL_CADASTRADO_L1
             p.cadastro_confirmado_em = agora
             p.l1_verificado_em = agora
+
+            # A pasta existe — mas ela está ATIVA? Até 11/08/2026 esta pergunta
+            # não era feita: baixada e ativa davam no mesmo "já cadastrado", e o
+            # processo saía da fila sem tarefa e sem alerta. Na carteira do
+            # Banco Master a pasta fechada é a REGRA (6.709 de 8.756), então o
+            # cliente reenviar um processo arquivado significa, quase sempre,
+            # que ele voltou a andar e precisa ser reativado.
+            status_l1 = m.get("statusId")
+            p.l1_status_id = int(status_l1) if status_l1 is not None else None
+            fechada = p.l1_status_id in L1_PASTA_FECHADAS
+            if fechada:
+                p.reativacao_status = REATIV_PENDENTE
             marcados.add(p)
+
             registrar_evento(
-                db, secao=SECAO_PLANILHA, nivel=NIVEL_AVISO,
-                acao="Já existia no L1 — não recadastrado",
+                db, secao=SECAO_PLANILHA,
+                # Pasta fechada é ERRO (alerta), não aviso de rotina: alguém
+                # precisa decidir se reativa. Pasta ativa segue como antes.
+                nivel=(NIVEL_ERRO if fechada else NIVEL_AVISO),
+                acao=(
+                    f"Já existia no L1 — pasta {L1_PASTA_LABEL.get(p.l1_status_id, '?')},"
+                    " precisa reativar"
+                    if fechada else "Já existia no L1 — não recadastrado"
+                ),
                 mensagem=(
-                    f"O CNJ {p.cnj} já tem pasta no Legal One "
-                    f"({m.get('folder') or m['id']}) — o processo foi vinculado à "
-                    f"pasta existente e ficou FORA da planilha (evita duplicar)."
+                    (
+                        f"O CNJ {p.cnj} já tem pasta no Legal One "
+                        f"({m.get('folder') or m['id']}), mas ela está "
+                        f"{L1_PASTA_LABEL.get(p.l1_status_id, 'fechada').upper()}. "
+                        "O cliente reenviou o processo, então ele provavelmente "
+                        "voltou a andar: a pasta precisa ser REATIVADA antes de "
+                        "receber trabalho. Não foi criada pasta nova (evita "
+                        "duplicar) e o processo entrou na fila de reativação."
+                    )
+                    if fechada else (
+                        f"O CNJ {p.cnj} já tem pasta no Legal One "
+                        f"({m.get('folder') or m['id']}) — o processo foi vinculado à "
+                        f"pasta existente e ficou FORA da planilha (evita duplicar)."
+                    )
                 ),
                 processo_id=p.id,
-                dados={"l1_lawsuit_id": int(m["id"]), "folder": m.get("folder")},
+                dados={
+                    "l1_lawsuit_id": int(m["id"]),
+                    "folder": m.get("folder"),
+                    "l1_status_id": p.l1_status_id,
+                    "l1_status": L1_PASTA_LABEL.get(p.l1_status_id),
+                    "precisa_reativar": fechada,
+                },
             )
         return marcados
     except Exception:  # noqa: BLE001

@@ -12,6 +12,7 @@ import {
   Layers,
   Loader2,
   RefreshCw,
+  RotateCcw,
   ScrollText,
   Search,
   Upload,
@@ -20,6 +21,8 @@ import {
 import AcompanhamentoVinculosTab from "@/components/distribuidos-bb/AcompanhamentoVinculosTab";
 import DuplicadosAtivosTab from "@/components/distribuidos-bb/DuplicadosAtivosTab";
 import ImportarAtivosDialog from "@/components/distribuidos-bb/ImportarAtivosDialog";
+import ImportarMasterDialog from "@/components/distribuidos-bb/ImportarMasterDialog";
+import ReativacoesTab from "@/components/distribuidos-bb/ReativacoesTab";
 import PastaAvulsaDialog from "@/components/distribuidos-bb/PastaAvulsaDialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -46,6 +49,7 @@ import {
   Processo,
   baixarPlanilhaArquivada,
   cadastrarPlanilhaL1,
+  contarReativacoes,
   exportarProcessos,
   gerarPlanilhaNoHistorico,
   getAuditoria,
@@ -76,6 +80,7 @@ const ORIGEM_META: Record<string, { label: string; cls: string }> = {
 const CLIENTE_META: Record<string, { label: string; cls: string }> = {
   BB: { label: "Banco do Brasil", cls: "bg-yellow-100 text-yellow-800" },
   ATIVOS: { label: "Ativos", cls: "bg-violet-100 text-violet-700" },
+  MASTER: { label: "Banco Master", cls: "bg-cyan-100 text-cyan-800" },
   OUTRO: { label: "Avulso", cls: "bg-slate-200 text-slate-700" },
 };
 
@@ -83,6 +88,7 @@ const CLIENTE_FILTROS = [
   { value: "", label: "Todos os clientes" },
   { value: "BB", label: "Banco do Brasil" },
   { value: "ATIVOS", label: "Ativos" },
+  { value: "MASTER", label: "Banco Master" },
   { value: "OUTRO", label: "Avulsos (outros clientes)" },
 ];
 
@@ -146,7 +152,9 @@ export default function DistribuidosBBPage() {
   const { toast } = useToast();
   const [searchParams] = useSearchParams();
 
-  const [aba, setAba] = useState<"processos" | "log" | "planilhas" | "vinculos" | "duplicados">("processos");
+  const [aba, setAba] = useState<
+    "processos" | "log" | "planilhas" | "vinculos" | "duplicados" | "reativar"
+  >("processos");
   const [baixando, setBaixando] = useState(false);
 
   const gerarPlanilha = async () => {
@@ -182,6 +190,11 @@ export default function DistribuidosBBPage() {
 
   // Upload de lista Ativos (dialog reusável) + pasta avulsa
   const [ativosOpen, setAtivosOpen] = useState(false);
+  const [masterOpen, setMasterOpen] = useState(false);
+  // Badge da fila de reativação: pasta fechada que o cliente reenviou. Fica no
+  // topo porque, sem ele, o caso continua invisível — que era exatamente o
+  // problema (o processo entrava como "já cadastrado" e ninguém via).
+  const [reativacoesPend, setReativacoesPend] = useState(0);
   const [avulsaOpen, setAvulsaOpen] = useState(false);
   const [cadastroDe, setCadastroDe] = useState<string>("");
   const [cadastroAte, setCadastroAte] = useState<string>("");
@@ -278,6 +291,16 @@ export default function DistribuidosBBPage() {
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const firstRow = total === 0 ? 0 : (page - 1) * pageSize + 1;
   const lastRow = Math.min(total, page * pageSize);
+
+  const loadReativacoes = useCallback(async () => {
+    try {
+      const r = await contarReativacoes();
+      setReativacoesPend(r.total);
+    } catch {
+      /* badge é auxiliar — não pode derrubar a tela */
+    }
+  }, []);
+  useEffect(() => { loadReativacoes(); }, [loadReativacoes]);
 
   const loadProcessos = useCallback(async () => {
     setLoading(true);
@@ -442,6 +465,10 @@ export default function DistribuidosBBPage() {
             <Upload className="mr-2 h-4 w-4" />
             Importar lista (Ativos)
           </Button>
+          <Button variant="outline" size="sm" onClick={() => setMasterOpen(true)}>
+            <Upload className="mr-2 h-4 w-4" />
+            Importar Listagem (Master)
+          </Button>
           <Button size="sm" onClick={gerarPlanilha} disabled={baixando}>
             {baixando ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileSpreadsheet className="mr-2 h-4 w-4" />}
             Gerar planilha
@@ -452,7 +479,7 @@ export default function DistribuidosBBPage() {
         </div>
       </div>
 
-      <Tabs value={aba} onValueChange={(v) => setAba(v as "processos" | "log" | "planilhas" | "vinculos" | "duplicados")}>
+      <Tabs value={aba} onValueChange={(v) => setAba(v as "processos" | "log" | "planilhas" | "vinculos" | "duplicados" | "reativar")}>
         <TabsList>
           <TabsTrigger value="processos">
             <FileText className="mr-1.5 h-4 w-4" /> Processos
@@ -462,6 +489,14 @@ export default function DistribuidosBBPage() {
           </TabsTrigger>
           <TabsTrigger value="duplicados">
             <Layers className="mr-1.5 h-4 w-4" /> Duplicados
+          </TabsTrigger>
+          <TabsTrigger value="reativar">
+            <RotateCcw className="mr-1.5 h-4 w-4" /> Reativar
+            {reativacoesPend > 0 && (
+              <Badge className="ml-1.5 bg-amber-100 text-amber-700 hover:bg-amber-100" variant="secondary">
+                {reativacoesPend}
+              </Badge>
+            )}
           </TabsTrigger>
           <TabsTrigger value="planilhas">
             <History className="mr-1.5 h-4 w-4" /> Planilhas
@@ -479,6 +514,7 @@ export default function DistribuidosBBPage() {
 
       {aba === "vinculos" && <AcompanhamentoVinculosTab />}
       {aba === "duplicados" && <DuplicadosAtivosTab />}
+      {aba === "reativar" && <ReativacoesTab />}
 
       {aba === "processos" && (
         <>
@@ -1283,6 +1319,13 @@ export default function DistribuidosBBPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      {/* Importar Listagem (Banco Master) — Listagem de Ações Judiciais */}
+      <ImportarMasterDialog
+        open={masterOpen}
+        onOpenChange={setMasterOpen}
+        onDone={() => { if (aba === "processos") loadProcessos(); }}
+      />
 
       {/* Importar lista (Ativos) — dialog reusável (mesmo do Acompanhamento) */}
       <ImportarAtivosDialog

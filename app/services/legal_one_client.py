@@ -120,7 +120,13 @@ class LegalOneApiClient:
     # quebrava com 'Processo nao encontrado no Legal One' em todas as
     # linhas. Com batch=10, maximo 30 filter_parts -> cabe no limite.
     _CNJ_LOOKUP_BATCH_SIZE = 10
-    _PROCESS_LOOKUP_SELECT = "id,identifierNumber,responsibleOfficeId,creationDate"
+    # `statusId` e `closingDate` entram aqui porque quem casa um CNJ com uma
+    # pasta existente precisa saber se ela esta' ATIVA — pasta baixada/arquivada
+    # que o cliente reenviou nao e' "ja' resolvido", e' processo que voltou a
+    # andar. Ambos validados nas duas entities (/Lawsuits e /Litigations).
+    _PROCESS_LOOKUP_SELECT = (
+        "id,identifierNumber,responsibleOfficeId,creationDate,statusId,closingDate"
+    )
     # Lookup por numero da pasta (campo `folder`). folder eq nao expande
     # variantes (1 filtro por pasta), entao cabe mais por chunk que o CNJ.
     # 25 fica abaixo do teto de 30 do $top em /Lawsuits e /Litigations.

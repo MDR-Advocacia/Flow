@@ -36,6 +36,7 @@ import {
   YAxis,
 } from "recharts";
 import ImportarAtivosDialog from "@/components/distribuidos-bb/ImportarAtivosDialog";
+import ImportarMasterDialog from "@/components/distribuidos-bb/ImportarMasterDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -50,6 +51,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
+import { type RunResumo, listarRuns } from "@/services/distribuidos-bb";
 import {
   DashboardData,
   RunResumo,
@@ -135,6 +137,31 @@ export default function DistribuidosBBDashboardPage() {
   // Coleta
   const [coletaOpen, setColetaOpen] = useState(false);
   const [ativosOpen, setAtivosOpen] = useState(false);
+  const [masterOpen, setMasterOpen] = useState(false);
+
+  // Histórico de passagens (runs de coleta): modal paginado sobre o /runs.
+  const [runsOpen, setRunsOpen] = useState(false);
+  const [runsItems, setRunsItems] = useState<RunResumo[]>([]);
+  const [runsTotal, setRunsTotal] = useState(0);
+  const [runsOffset, setRunsOffset] = useState(0);
+  const [runsLoading, setRunsLoading] = useState(false);
+  const RUNS_PAGE = 15;
+
+  const loadRuns = useCallback(async (offset: number) => {
+    setRunsLoading(true);
+    try {
+      const r = await listarRuns({ limit: RUNS_PAGE, offset });
+      setRunsItems(r.items);
+      setRunsTotal(r.total);
+      setRunsOffset(offset);
+    } catch (e) {
+      toast({ title: "Erro ao carregar passagens", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setRunsLoading(false);
+    }
+  }, [toast]);
+
+  const abrirRuns = () => { setRunsOpen(true); loadRuns(0); };
   const [dataIni, setDataIni] = useState("");
   const [dataFim, setDataFim] = useState("");
   const [confirmarCiencia, setConfirmarCiencia] = useState(false);
@@ -166,10 +193,16 @@ export default function DistribuidosBBDashboardPage() {
   // resposta do dashboard já traz a quebra por cliente por dia.
   const [clienteFiltro, setClienteFiltro] = useState<string | null>(null);
 
-  const labelCliente = (tag: string) =>
-    tag === "ATIVOS" ? "Ativos" : tag === "BB" ? "Banco do Brasil" : "Outros clientes";
-  const corCliente = (tag: string) =>
-    tag === "ATIVOS" ? "bg-violet-500" : tag === "BB" ? "bg-yellow-500" : "bg-slate-400";
+  // Carteiras conhecidas do módulo. O que não estiver aqui cai em "Outros
+  // clientes" (pasta avulsa), então toda carteira nova precisa entrar nos dois
+  // mapas — senão some no cinza do gráfico de capturas por dia.
+  const CARTEIRAS: Record<string, { label: string; cor: string }> = {
+    BB: { label: "Banco do Brasil", cor: "bg-yellow-500" },
+    ATIVOS: { label: "Ativos", cor: "bg-violet-500" },
+    MASTER: { label: "Banco Master", cor: "bg-cyan-500" },
+  };
+  const labelCliente = (tag: string) => CARTEIRAS[tag]?.label ?? "Outros clientes";
+  const corCliente = (tag: string) => CARTEIRAS[tag]?.cor ?? "bg-slate-400";
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -303,6 +336,10 @@ export default function DistribuidosBBDashboardPage() {
             <Upload className="mr-2 h-4 w-4" />
             Importar lista (Ativos)
           </Button>
+          <Button variant="outline" size="sm" onClick={() => setMasterOpen(true)}>
+            <Upload className="mr-2 h-4 w-4" />
+            Importar Listagem (Master)
+          </Button>
           <Button variant="outline" size="sm" onClick={() => navigate("/distribuidos-bb")}>
             <ListChecks className="mr-2 h-4 w-4" />
             Processos
@@ -422,10 +459,17 @@ export default function DistribuidosBBDashboardPage() {
             )}
           </CardTitle>
           {data?.ultima_passagem?.data && (
-            <span className="rounded-md bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground">
+            <span className="flex items-center gap-2 rounded-md bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground">
               Última passagem:{" "}
               <strong className="text-foreground">{fmtDataCurta(data.ultima_passagem.data)}</strong> ·{" "}
               <strong className="text-foreground">{data.ultima_passagem.capturados}</strong> capturados
+              <button
+                type="button"
+                onClick={abrirRuns}
+                className="font-medium text-sky-600 underline-offset-2 hover:underline"
+              >
+                ver todas
+              </button>
             </span>
           )}
         </CardHeader>
@@ -823,7 +867,103 @@ export default function DistribuidosBBDashboardPage() {
       </Dialog>
 
       {/* Importar lista (Ativos) — mesmo dialog da tela de Processos */}
+      {/* Histórico de passagens de coleta — todas as runs, paginado */}
+      <Dialog open={runsOpen} onOpenChange={setRunsOpen}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Passagens de coleta</DialogTitle>
+            <DialogDescription>
+              Cada linha é uma rodagem no portal do BB — agendada (03h, 12h e 20h) ou manual.
+              Os totais são cumulativos entre as retentativas da mesma rodagem.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="max-h-[55vh] overflow-y-auto rounded-md border">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-background">
+                <tr className="border-b text-left text-xs text-muted-foreground">
+                  <th className="px-3 py-2">#</th>
+                  <th className="px-3 py-2">Início</th>
+                  <th className="px-3 py-2">Duração</th>
+                  <th className="px-3 py-2">Status</th>
+                  <th className="px-3 py-2 text-right">Capturados</th>
+                  <th className="px-3 py-2 text-right">Ciência</th>
+                  <th className="px-3 py-2 text-right">Cadastrados</th>
+                  <th className="px-3 py-2 text-right">Erros</th>
+                </tr>
+              </thead>
+              <tbody>
+                {runsLoading && runsItems.length === 0 && (
+                  <tr><td colSpan={8} className="px-3 py-8 text-center text-muted-foreground">Carregando…</td></tr>
+                )}
+                {!runsLoading && runsItems.length === 0 && (
+                  <tr><td colSpan={8} className="px-3 py-8 text-center text-muted-foreground">Nenhuma passagem registrada.</td></tr>
+                )}
+                {runsItems.map((r) => {
+                  const dur = r.iniciado_em && r.concluido_em
+                    ? Math.max(0, Math.round((new Date(r.concluido_em).getTime() - new Date(r.iniciado_em).getTime()) / 60000))
+                    : null;
+                  const stCls = r.status === "CONCLUIDO"
+                    ? "bg-emerald-100 text-emerald-700"
+                    : r.status === "EM_ANDAMENTO"
+                      ? "bg-sky-100 text-sky-700"
+                      : "bg-rose-100 text-rose-700";
+                  const stLabel = r.status === "CONCLUIDO" ? "Concluída"
+                    : r.status === "EM_ANDAMENTO" ? "Em andamento" : "Erro";
+                  return (
+                    <tr key={r.id} className="border-b last:border-0 align-top">
+                      <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{r.id}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">{fmtDataCurta(r.iniciado_em)}</td>
+                      <td className="px-3 py-2 whitespace-nowrap text-muted-foreground">
+                        {dur === null ? "—" : dur < 1 ? "menos de 1 min" : `${dur} min`}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${stCls}`}>{stLabel}</span>
+                        {r.erro && (
+                          <div className="mt-1 max-w-[280px] truncate text-xs text-rose-600" title={r.erro}>
+                            {r.erro}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-right font-medium">{r.total_coletados}</td>
+                      <td className="px-3 py-2 text-right">{r.total_ciencia}</td>
+                      <td className="px-3 py-2 text-right">{r.total_cadastrados}</td>
+                      <td className={`px-3 py-2 text-right ${r.total_erros > 0 ? "font-medium text-rose-600" : "text-muted-foreground"}`}>
+                        {r.total_erros}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-muted-foreground">
+              {runsTotal === 0 ? "0" : `${runsOffset + 1}–${Math.min(runsOffset + runsItems.length, runsTotal)}`} de {runsTotal} passagem(ns)
+            </span>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline" size="sm"
+                onClick={() => loadRuns(Math.max(0, runsOffset - RUNS_PAGE))}
+                disabled={runsOffset === 0 || runsLoading}
+              >
+                Anterior
+              </Button>
+              <Button
+                variant="outline" size="sm"
+                onClick={() => loadRuns(runsOffset + RUNS_PAGE)}
+                disabled={runsOffset + RUNS_PAGE >= runsTotal || runsLoading}
+              >
+                Próxima
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <ImportarAtivosDialog open={ativosOpen} onOpenChange={setAtivosOpen} onDone={load} />
+      <ImportarMasterDialog open={masterOpen} onOpenChange={setMasterOpen} onDone={load} />
     </div>
   );
 }
