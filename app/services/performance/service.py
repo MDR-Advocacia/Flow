@@ -1042,4 +1042,3 @@ class PerformanceService:
             "total": sum(i["total"] for i in itens),
             "itens": itens,
         }
-

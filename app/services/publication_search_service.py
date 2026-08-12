@@ -2732,6 +2732,7 @@ class PublicationSearchService:
             )
             .all()
         )
+        self._attach_onenotify_bb_links(records)
 
         # Agrupa em Python (apenas os records da página — conjunto pequeno)
         groups_map: dict = defaultdict(list)
@@ -2782,7 +2783,46 @@ class PublicationSearchService:
         record = self.db.query(PublicationRecord).filter_by(id=record_id).first()
         if not record:
             raise ValueError(f"Registro #{record_id} não encontrado.")
+        self._attach_onenotify_bb_links([record])
         return self._record_to_dict(record, include_full_text=True)
+
+    def _attach_onenotify_bb_links(self, records: list[PublicationRecord]) -> None:
+        """Anexa contexto OneNotify BB às publicações já carregadas."""
+        record_ids = [r.id for r in records if r.id is not None]
+        if not record_ids:
+            return
+        try:
+            from app.models.onenotify_bb import OneNotifyBBNotification
+        except Exception:
+            return
+
+        rows = (
+            self.db.query(OneNotifyBBNotification)
+            .filter(OneNotifyBBNotification.matched_publication_record_id.in_(record_ids))
+            .order_by(
+                OneNotifyBBNotification.notification_date_iso.desc().nullslast(),
+                OneNotifyBBNotification.id.desc(),
+            )
+            .all()
+        )
+        by_record: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            by_record[row.matched_publication_record_id].append({
+                "id": row.id,
+                "notify_ids": row.notify_ids or [],
+                "npj": row.npj,
+                "data_notificacao": row.data_notificacao,
+                "notification_date_iso": row.notification_date_iso,
+                "publication_date": row.publication_date,
+                "flow_status": row.flow_status,
+                "match_score": row.match_score,
+                "cnj_publicacao": row.cnj_publicacao,
+                "cnj_principal_notify": row.cnj_principal_notify,
+                "cnj_divergent": row.cnj_divergent,
+                "posicao_cliente": row.posicao_cliente,
+            })
+        for record in records:
+            setattr(record, "_onenotify_bb_notifications", by_record.get(record.id, []))
 
     # ──────────────────────────────────────────────
     # Busca por CNJ (diagnóstico)
@@ -4478,6 +4518,7 @@ class PublicationSearchService:
             "ignored_at": record.ignored_at.isoformat() if record.ignored_at else None,
             "created_at": record.created_at.isoformat() if record.created_at else None,
             "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+            "onenotify_bb_notifications": getattr(record, "_onenotify_bb_notifications", []),
         }
         if include_full_text:
             result["description"] = record.description

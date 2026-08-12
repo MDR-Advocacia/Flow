@@ -19,6 +19,7 @@ import CreateTaskByTemplatePage from './pages/CreateTaskByTemplatePage';
 import LoginPage from './pages/LoginPage';
 import CreateTaskFromSpreadsheetPage from './pages/CreateTaskFromSpreadsheetPage';
 import PublicationsPage from './pages/PublicationsPage';
+import OneNotifyBBPage from './pages/OneNotifyBBPage';
 import TaskTemplatesPage from './pages/TaskTemplatesPage';
 import TemplateReviewPage from './pages/TemplateReviewPage';
 import OfficePoloScopePage from './pages/OfficePoloScopePage';
@@ -75,6 +76,7 @@ function AppContent() {
             <Route path="/cancelamento-duplicadas" element={<CancelamentoDuplicadasPage />} />
             <Route path="/encerramentos-legalone" element={<EncerramentosL1Page />} />
             <Route path="/publications" element={<PublicationsPage />} />
+            <Route path="/publications/onenotify-bb" element={<OneNotifyBBPage />} />
             <Route path="/publications/dashboard" element={<PublicationsDashboardPage />} />
             <Route path="/publications/lookup" element={<LookupByCnjPage />} />
             <Route path="/publications/treatment" element={<PublicationTreatmentPage />} />

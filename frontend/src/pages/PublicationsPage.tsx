@@ -12,6 +12,7 @@ import { useEffect, useMemo, useRef, useState, useCallback, type ComponentType }
 import {
   AlertCircle,
   BarChart as BarChartIcon,
+  Bell,
   BookOpen,
   Building2,
   Calendar,
@@ -327,6 +328,20 @@ interface PublicationRecord {
   scheduled_by_email?: string | null;
   scheduled_by_name?: string | null;
   scheduled_at?: string | null;
+  onenotify_bb_notifications?: Array<{
+    id: number;
+    notify_ids: number[];
+    npj: string | null;
+    data_notificacao: string | null;
+    notification_date_iso: string | null;
+    publication_date: string | null;
+    flow_status: string | null;
+    match_score: number | null;
+    cnj_publicacao: string | null;
+    cnj_principal_notify: string | null;
+    cnj_divergent: boolean;
+    posicao_cliente: string | null;
+  }>;
   created_at: string | null;
   raw_relationships?: any;
 }
@@ -4198,12 +4213,22 @@ const PublicationsPage = () => {
                           <TableCell className="text-xs">
                             {(() => {
                               const first = group.records[0];
+                              const notify = first.onenotify_bb_notifications?.[0];
                               return (
                                 <div className="space-y-1">
                                   <div title="Data da publicação (tribunal) — para contagem de prazo">
                                     <div className="text-[10px] text-muted-foreground">Publicação</div>
                                     <div className="font-medium">{formatDateShort(first.publication_date)}</div>
                                   </div>
+                                  {notify && (
+                                    <div
+                                      className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-700"
+                                      title={`Notificado pelo cliente em ${formatDateShort(notify.notification_date_iso || notify.data_notificacao)}`}
+                                    >
+                                      <Bell className="h-3 w-3" />
+                                      Notificado: {formatDateShort(notify.notification_date_iso || notify.data_notificacao)}
+                                    </div>
+                                  )}
                                   <div title="Data de captura (Ajus) — referência do fluxo de trabalho">
                                     <div className="text-[10px] text-muted-foreground">Captura</div>
                                     <div>{formatDateShort(first.creation_date)}</div>
@@ -4584,6 +4609,19 @@ const PublicationsPage = () => {
                   <span className="font-medium text-muted-foreground">Data da Publicação: </span>
                   {formatDate(selectedRecord.publication_date)}
                 </div>
+                {selectedRecord.onenotify_bb_notifications?.[0] && (
+                  <div className="col-span-2">
+                    <span className="font-medium text-muted-foreground">Notificação do cliente: </span>
+                    <span className="inline-flex items-center gap-1 rounded border border-violet-300 bg-violet-50 px-2 py-0.5 text-xs font-medium text-violet-700">
+                      <Bell className="h-3 w-3" />
+                      Notificado pelo cliente em{" "}
+                      {formatDate(
+                        selectedRecord.onenotify_bb_notifications[0].notification_date_iso ||
+                          selectedRecord.onenotify_bb_notifications[0].data_notificacao,
+                      )}
+                    </span>
+                  </div>
+                )}
                 {selectedRecord.creation_date && (
                   <div>
                     <span className="font-medium text-muted-foreground">Data de Captura (Ajus): </span>
