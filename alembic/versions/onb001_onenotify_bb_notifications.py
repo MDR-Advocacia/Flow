@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 revision = "onb001_onenotify_bb"
-down_revision = "pub008_captura_conhecimento"
+down_revision = "bbd019"
 branch_labels = None
 depends_on = None
 
