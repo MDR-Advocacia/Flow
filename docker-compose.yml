@@ -56,6 +56,18 @@ services:
     # exatamente pra colher órfão. Zumbi não gasta CPU, mas consome slot de PID
     # e polui todo diagnóstico do servidor (foi lido como "112 Chromes vivos").
     init: true
+    # Teto de PROCESSOS do container. Operação normal usa ~30 PIDs (com
+    # runners Playwright ativos, ~60), então 300 nunca é tocado no dia a dia —
+    # ele existe pra vazamento: se um bug voltar a acumular processos (como os
+    # 122 chrome defunct de 12/08/2026, ou os ~1.979 PIDs que o onesid juntou
+    # no mesmo servidor), o crescimento PARA no teto e o erro aparece no log
+    # DESTE container ("fork failed"), em vez de esgotar a tabela de processos
+    # do host e derrubar o desempenho de todos os projetos.
+    #
+    # De propósito NÃO há mem_limit: limite de memória apertado mataria um
+    # Chromium da coleta ou um worker do uvicorn no meio do trabalho — decisão
+    # do operador em 12/08/2026 (só PIDs por enquanto).
+    pids_limit: 300
     # Chromium (Playwright) crasha com "Target closed" se /dev/shm for muito
     # pequeno. Padrão do Docker é 64MB — subimos pra 1GB.
     shm_size: "1gb"
@@ -107,6 +119,11 @@ services:
       dockerfile: Dockerfile
       target: ajus-runner
     restart: unless-stopped
+    # Mesmo racional do api: roda Chromium via Playwright, então herda o mesmo
+    # risco de vazamento de processo. init colhe órfão; pids_limit trava
+    # qualquer acúmulo no teto sem afetar o host.
+    init: true
+    pids_limit: 300
     # Chromium precisa de /dev/shm grande pra não travar.
     shm_size: "1gb"
     environment:
