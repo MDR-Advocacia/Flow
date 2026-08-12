@@ -16,7 +16,7 @@ testar toda a lógica com um fake.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -63,6 +63,10 @@ def _fechar_sem_ciencia(notificacao: Any) -> None:
         logger.warning("Distribuídos BB: falha ao fechar notificação com NÃO.", exc_info=True)
 
 
+class ColetaEmAndamentoError(RuntimeError):
+    """Ja existe uma coleta rodando — a nova nao pode nascer."""
+
+
 def criar_run(
     db: Session,
     *,
@@ -71,6 +75,30 @@ def criar_run(
     confirmar_ciencia: bool,
     disparado_por_user_id: Optional[int],
 ) -> BbRun:
+    # Trava de SIMULTANEIDADE. Duas coletas em paralelo iteram a mesma lista
+    # de pendências do BB e colidem — aconteceu em 12/08/2026 (runs 137 e 138,
+    # 97s de diferença entre o clique do operador no painel e um disparo
+    # operacional): corrida de fingerprint, UniqueViolation e uma coleta morta.
+    # O agendador tem lock próprio, mas ele não enxerga o painel; aqui cobre
+    # TODAS as portas de entrada.
+    #
+    # A janela de 45 min existe pra um run ZUMBI não bloquear pra sempre: run
+    # travado além disso é anomalia (coleta real fecha em 10–30 min com as
+    # retentativas), então deixa a coleta nova nascer e o zumbi pra trás.
+    limite = datetime.now(timezone.utc) - timedelta(minutes=45)
+    ativa = (
+        db.query(BbRun)
+        .filter(BbRun.status == RUN_EM_ANDAMENTO, BbRun.iniciado_em > limite)
+        .order_by(BbRun.id.desc())
+        .first()
+    )
+    if ativa is not None:
+        raise ColetaEmAndamentoError(
+            f"Já existe uma coleta em andamento (run {ativa.id}, iniciada às "
+            f"{ativa.iniciado_em:%H:%M}). Aguarde ela terminar — duas coletas "
+            "ao mesmo tempo disputam a mesma lista do BB e se atropelam."
+        )
+
     run = BbRun(
         data_inicial=data_inicial,
         data_final=data_final,
@@ -366,6 +394,14 @@ def executar_coleta(
                         gate_ciencia=gate_ciencia, coletar_envolvidos=coletar_envolvidos,
                     )
                 except Exception as exc:  # noqa: BLE001
+                    # ROLLBACK PRIMEIRO. Se a falha foi num flush (ex.: a
+                    # UniqueViolation da colisão de coletas em 12/08/2026), a
+                    # sessão está invalidada — escrever nela sem rollback
+                    # levanta PendingRollbackError e UMA notificação ruim
+                    # derruba a coleta inteira (e as retentativas, que reusam
+                    # esta mesma sessão). O rollback perde só o que ainda não
+                    # tinha sido commitado DESTA notificação.
+                    db.rollback()
                     run.total_erros += 1
                     registrar_evento(
                         db, secao=SECAO_COLETA, nivel=NIVEL_ERRO, acao="Erro na notificação",
@@ -482,6 +518,10 @@ def executar_coleta(
                     run_id=run.id,
                 )
     except Exception as exc:  # noqa: BLE001
+        # Mesma razão do handler acima: se a sessão morreu num flush, gravar o
+        # ERRO sem rollback também falha — e o run fica EM_ANDAMENTO eterno
+        # (destino do run 138 em 12/08/2026, que precisou de fechamento manual).
+        db.rollback()
         run.status = RUN_ERRO
         run.erro = str(exc)
         run.concluido_em = datetime.now(timezone.utc)

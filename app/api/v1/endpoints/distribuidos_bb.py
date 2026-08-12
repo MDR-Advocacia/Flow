@@ -1207,13 +1207,18 @@ def coletar(
             ),
         )
 
-    run = coleta_service.criar_run(
-        db,
-        data_inicial=payload.data_inicial,
-        data_final=payload.data_final,
-        confirmar_ciencia=payload.confirmar_ciencia,
-        disparado_por_user_id=current_user.id,
-    )
+    try:
+        run = coleta_service.criar_run(
+            db,
+            data_inicial=payload.data_inicial,
+            data_final=payload.data_final,
+            confirmar_ciencia=payload.confirmar_ciencia,
+            disparado_por_user_id=current_user.id,
+        )
+    except coleta_service.ColetaEmAndamentoError as exc:
+        # Colisão de coletas (12/08/2026): melhor um 409 dizendo "já tem uma
+        # rodando" do que duas coletas disputando a mesma lista do BB.
+        raise HTTPException(status_code=409, detail=str(exc))
 
     # Aviso claro quando o operador pediu ciência mas a trava global bloqueia.
     ciencia_efetiva = payload.confirmar_ciencia and settings.distribuidos_bb_confirmar_ciencia
