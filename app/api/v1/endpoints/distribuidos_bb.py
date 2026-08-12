@@ -262,6 +262,7 @@ def exportar_processos(
 def _lote_dto(lote) -> dict[str, Any]:
     return {
         "id": lote.id,
+        "cliente": lote.cliente,
         "nome_arquivo": lote.nome_arquivo,
         "total": lote.total,
         "processados": lote.processados,
@@ -322,9 +323,199 @@ def listar_lotes_ativos(
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
     _require_gestao(current_user)
-    from app.models.distribuidos_bb import BbAtivosLote
+    from app.models.distribuidos_bb import CLIENTE_ATIVOS, BbAtivosLote
 
-    q = db.query(BbAtivosLote).order_by(BbAtivosLote.id.desc())
+    q = (
+        db.query(BbAtivosLote)
+        .filter(BbAtivosLote.cliente == CLIENTE_ATIVOS)
+        .order_by(BbAtivosLote.id.desc())
+    )
+    total = q.count()
+    rows = q.limit(limit).offset(offset).all()
+    return {"total": total, "items": [_lote_dto(x) for x in rows]}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Reativação — pasta fechada que o cliente reenviou
+#
+# Vale pros três motores (BB, Ativos, Master). Quando a ingestão acha pasta do
+# mesmo cliente pro CNJ ela não recadastra — mas até 11/08/2026 também não
+# olhava o STATUS dessa pasta, então processo que voltou a andar entrava como
+# "já resolvido" e sumia sem tarefa. Aqui ele vira fila com alerta.
+# ─────────────────────────────────────────────────────────────────────
+
+
+@router.get("/reativacoes", summary="Fila de pastas fechadas que o cliente reenviou")
+def listar_reativacoes(
+    cliente: Optional[str] = Query(None, description="BB | ATIVOS | MASTER"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb import reativacao_service as rs
+
+    return rs.listar_pendentes(db, cliente=cliente, limit=limit, offset=offset)
+
+
+@router.get("/reativacoes/contagem", summary="Quantas pastas aguardam reativacao (badge)")
+def contar_reativacoes(
+    cliente: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb import reativacao_service as rs
+
+    return {"total": rs.contar_pendentes(db, cliente=cliente)}
+
+
+@router.post("/reativacoes/dispensar", summary="Tira da fila SEM reativar")
+def dispensar_reativacoes(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb import reativacao_service as rs
+
+    ids = [int(x) for x in (payload.get("processo_ids") or [])]
+    if not ids:
+        raise HTTPException(status_code=422, detail="Selecione ao menos um processo.")
+    return {"dispensados": rs.dispensar(db, processo_ids=ids)}
+
+
+@router.post("/reativacoes/preview", summary="Dry-run leve: o que seria reativado e pra quem")
+def preview_reativacoes(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb import reativacao_service as rs
+
+    return rs.preview(
+        db,
+        processo_ids=[int(x) for x in (payload.get("processo_ids") or [])],
+        responsavel_ids=[int(x) for x in (payload.get("responsavel_ids") or [])],
+        dividir_igual=bool(payload.get("dividir_igual", True)),
+    )
+
+
+@router.post("/reativacoes/executar", summary="Reativa as pastas no L1 e agenda a tarefa (com progresso)")
+def executar_reativacoes(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb import reativacao_service as rs
+
+    config = payload.get("config") or {}
+    dry_run = bool(payload.get("dry_run", False))
+    # Sem subtipo não dá pra criar tarefa — e o worker checa duplicidade por
+    # subtipo, então a ausência viraria KeyError lá dentro, longe daqui.
+    if not dry_run and not config.get("subtype_id"):
+        raise HTTPException(
+            status_code=422,
+            detail="Escolha o subtipo da tarefa que será criada após a reativação.",
+        )
+    try:
+        return rs.disparar(
+            db,
+            processo_ids=[int(x) for x in (payload.get("processo_ids") or [])],
+            responsavel_ids=[int(x) for x in (payload.get("responsavel_ids") or [])],
+            dividir_igual=bool(payload.get("dividir_igual", True)),
+            config=config,
+            dry_run=dry_run,
+            user_id=current_user.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/reativacoes/status/{job_id}", summary="Progresso da reativacao em lote")
+def status_reativacao(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    # Mesmo job/worker do agendamento em lote — uma barra de progresso só.
+    from app.services.distribuidos_bb import ativos_agendamento_service as ag
+
+    res = ag.status(db, job_id)
+    if res is None:
+        raise HTTPException(status_code=404, detail="Job nao encontrado.")
+    return res
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Banco Master — ingestão da Listagem de Ações Judiciais (upload)
+#
+# Veio do módulo Administração → Base Banco Master → Conversão L1, que só
+# convertia a planilha e devolvia o xlsx pro operador subir na mão: sem lote,
+# sem métrica, sem saber o que chegou por dia. Aqui usa o mesmo motor das
+# outras carteiras (distribuição → planilha → import no L1 → monitor).
+# ─────────────────────────────────────────────────────────────────────
+
+
+@router.post("/master/importar", summary="Sobe a Listagem de Acoes Judiciais do Banco Master e cadastra no L1")
+async def importar_master(
+    arquivo: UploadFile = File(..., description="Listagem de Acoes Judiciais (xlsx)."),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb.master_service import disparar_ingestao
+
+    conteudo = await arquivo.read()
+    if not conteudo:
+        raise HTTPException(status_code=400, detail="Arquivo vazio.")
+    try:
+        res = disparar_ingestao(
+            db, conteudo=conteudo, nome_arquivo=arquivo.filename or "listagem.xlsx",
+            user_id=current_user.id,
+        )
+    except ValueError as exc:
+        # Arquivo que não é a Listagem (sem a coluna "Polo") cai aqui — é o
+        # erro mais provável do operador, então a mensagem do serviço vai
+        # inteira pra tela em vez de virar um 500 genérico.
+        raise HTTPException(status_code=422, detail=str(exc))
+    return res
+
+
+@router.get("/master/lotes/{lote_id}", summary="Progresso de um lote de ingestao do Banco Master")
+def get_lote_master(
+    lote_id: int,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.models.distribuidos_bb import CLIENTE_MASTER, BbAtivosLote
+
+    lote = db.get(BbAtivosLote, lote_id)
+    if lote is None or lote.cliente != CLIENTE_MASTER:
+        raise HTTPException(status_code=404, detail="Lote nao encontrado.")
+    return _lote_dto(lote)
+
+
+@router.get("/master/lotes", summary="Lista os lotes de ingestao do Banco Master (paginado)")
+def listar_lotes_master(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    _require_gestao(current_user)
+    from app.models.distribuidos_bb import CLIENTE_MASTER, BbAtivosLote
+
+    q = (
+        db.query(BbAtivosLote)
+        .filter(BbAtivosLote.cliente == CLIENTE_MASTER)
+        .order_by(BbAtivosLote.id.desc())
+    )
     total = q.count()
     rows = q.limit(limit).offset(offset).all()
     return {"total": total, "items": [_lote_dto(x) for x in rows]}
@@ -951,10 +1142,24 @@ def testar_onelog(
     try:
         sessao = cliente.obter_sessao()
         cookies = sessao.get("cookies", []) or []
+        # Sessão em cache NÃO prova que o login do zero funciona — e é
+        # justamente o login do zero que trava na renovação de segurança do BB.
+        # Sem esta distinção o teste dá verde enquanto a coleta falha (12/08).
+        em_cache = bool(cliente.sessao_em_cache)
+        detalhe = (
+            "Havia sessão ATIVA no OneLog (cache) — o login do zero não foi "
+            "testado. Se a coleta estiver falhando, é esse caminho que precisa "
+            "ser verificado."
+            if em_cache else
+            "Login feito do zero agora (inclui a renovação de segurança do BB)."
+        )
         registrar_evento(
             db, secao=SECAO_CONFIGURACAO, acao="Teste OneLog",
-            mensagem=f"Login no OneLog OK: {len(cookies)} cookie(s) recebido(s).",
-            dados={"cookies": len(cookies)}, commit=True,
+            mensagem=(
+                f"Login no OneLog OK: {len(cookies)} cookie(s). "
+                + ("Sessão vinha do cache." if em_cache else "Login do zero exercitado.")
+            ),
+            dados={"cookies": len(cookies), "sessao_em_cache": em_cache}, commit=True,
         )
         return {
             "ok": len(cookies) > 0,
@@ -963,6 +1168,8 @@ def testar_onelog(
             "user_agent": sessao.get("user_agent"),
             "api_url": cliente.api_url,
             "usuario": cliente.username,
+            "sessao_em_cache": em_cache,
+            "detalhe": detalhe,
             "erro": None if cookies else "OneLog respondeu, mas não devolveu cookies.",
         }
     except OneLogError as exc:
@@ -970,7 +1177,15 @@ def testar_onelog(
             db, secao=SECAO_CONFIGURACAO, acao="Teste OneLog", nivel="ERRO",
             mensagem=f"Falha no login do OneLog: {exc}", commit=True,
         )
-        return {"ok": False, "configurado": True, "erro": str(exc), "api_url": cliente.api_url, "usuario": cliente.username}
+        return {
+            "ok": False, "configurado": True, "erro": str(exc),
+            "api_url": cliente.api_url, "usuario": cliente.username,
+            "sessao_em_cache": False,
+            "detalhe": (
+                "O login do zero falhou. Quando o motivo é a renovação de "
+                "segurança, a solução é do lado do OneLog — o Flow só aguarda."
+            ),
+        }
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "configurado": True, "erro": f"Erro inesperado: {exc}", "api_url": cliente.api_url}
 

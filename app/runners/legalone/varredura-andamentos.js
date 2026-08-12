@@ -264,12 +264,38 @@ async function dismissCookieBanner(page) {
   } catch (_) {}
 }
 
+
+// ── Guarda de vazamento de browser ─────────────────────────────────────────
+// O Chromium do Playwright não morre junto com o node: se o runner terminar
+// (ou estourar) sem fechar o browser, sobra processo órfão no container — são
+// ~7 por vazamento (pai + zygote + gpu + renderers + crashpad). Em 12/08/2026
+// o container da API acumulou 112 chrome-headless assim, e como o servidor é
+// compartilhado (o OneLog roda no mesmo host) isso derrubou o desempenho de
+// tudo. Mesma família do bug corrigido no cancel-legacy-task.js em 05/08.
+let browserAtivo = null;
+
+async function fecharBrowserAtivo() {
+  const b = browserAtivo;
+  browserAtivo = null;
+  if (b) {
+    await b.close().catch(() => {});
+  }
+}
+
+// Rede de segurança: mesmo fechando o browser, o node às vezes fica pendurado
+// em handle aberto. Sem isso o processo vira zumbi do lado Python.
+const EXIT_WATCHDOG_MS_GUARDA = 5000;
+function armarWatchdogDeSaidaGuarda() {
+  setTimeout(() => process.exit(), EXIT_WATCHDOG_MS_GUARDA).unref();
+}
+
 async function createLoggedInSession(loginConfig) {
   const launchOptions = { headless: true };
   if (process.env.PLAYWRIGHT_CHANNEL) {
     launchOptions.channel = process.env.PLAYWRIGHT_CHANNEL;
   }
   const browser = await chromium.launch(launchOptions);
+  browserAtivo = browser;
   const context = await browser.newContext();
   // Bloqueia recursos pesados (imgs/fonts/media) — pagina interna do
   // L1 nao depende deles e isso acelera o load.
@@ -288,6 +314,7 @@ async function createLoggedInSession(loginConfig) {
 async function closeSession(session) {
   if (!session) return;
   await session.browser?.close().catch(() => {});
+  if (browserAtivo === session.browser) browserAtivo = null;
 }
 
 function detailsUrl(lawsuitId) {
@@ -578,4 +605,7 @@ async function main() {
 main().catch((err) => {
   console.error(err);
   process.exitCode = 1;
+}).finally(async () => {
+  await fecharBrowserAtivo();
+  armarWatchdogDeSaidaGuarda();
 });

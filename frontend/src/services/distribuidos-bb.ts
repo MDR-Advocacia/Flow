@@ -76,6 +76,8 @@ export interface DashboardData {
 
 export interface AtivosLote {
   id: number;
+  /** Carteira dona do lote: ATIVOS | MASTER (a tabela de lote e' compartilhada). */
+  cliente: string;
   nome_arquivo: string | null;
   total: number;
   processados: number;
@@ -92,7 +94,7 @@ export interface AtivosLote {
 
 export interface Processo {
   id: number;
-  cliente: string; // BB | ATIVOS
+  cliente: string; // BB | ATIVOS | MASTER | OUTRO
   cnj: string | null;
   npj: string | null;
   polo: string | null;
@@ -509,6 +511,79 @@ export async function statusAgendamento(jobId: number): Promise<AgendJobStatus> 
   return json(await apiFetch(`${BASE}/ativos/duplicados/agendar/status/${jobId}`));
 }
 
+// ── Reativação: pasta fechada no L1 que o cliente reenviou ───────────────
+// Vale pros três motores (BB, Ativos, Master). A ingestão não recadastra quando
+// já existe pasta — mas se essa pasta está baixada/arquivada, o processo voltou
+// a andar e precisa ser reativado antes de receber trabalho.
+export interface ReativacaoItem {
+  id: number;
+  cliente: string;
+  cnj: string | null;
+  adverso: string | null;
+  l1_lawsuit_id: number | null;
+  l1_folder: string | null;
+  l1_status_id: number | null;
+  l1_status: string;
+  escritorio_path: string | null;
+  responsavel_id: number | null;
+  responsavel_nome: string | null;
+  detectado_em: string | null;
+}
+
+export async function listarReativacoes(params: {
+  cliente?: string; limit?: number; offset?: number;
+} = {}): Promise<{ total: number; items: ReativacaoItem[] }> {
+  const qs = new URLSearchParams();
+  if (params.cliente) qs.set("cliente", params.cliente);
+  qs.set("limit", String(params.limit ?? 50));
+  qs.set("offset", String(params.offset ?? 0));
+  return json(await apiFetch(`${BASE}/reativacoes?${qs.toString()}`));
+}
+
+export async function contarReativacoes(cliente?: string): Promise<{ total: number }> {
+  const qs = cliente ? `?cliente=${encodeURIComponent(cliente)}` : "";
+  return json(await apiFetch(`${BASE}/reativacoes/contagem${qs}`));
+}
+
+export async function dispensarReativacoes(
+  processoIds: number[],
+): Promise<{ dispensados: number }> {
+  return json(await apiFetch(`${BASE}/reativacoes/dispensar`, {
+    method: "POST", body: JSON.stringify({ processo_ids: processoIds }),
+  }));
+}
+
+export interface ReativPreview {
+  total: number;
+  sem_responsavel: number;
+  por_responsavel: { responsavel_id: number; responsavel_nome: string; total: number }[];
+}
+export async function previewReativacao(body: {
+  processo_ids: number[];
+  responsavel_ids: number[];
+  dividir_igual: boolean;
+}): Promise<ReativPreview> {
+  return json(await apiFetch(`${BASE}/reativacoes/preview`, {
+    method: "POST", body: JSON.stringify(body),
+  }));
+}
+
+export async function dispararReativacao(body: {
+  processo_ids: number[];
+  responsavel_ids: number[];
+  dividir_igual: boolean;
+  dry_run: boolean;
+  config: Record<string, unknown>;
+}): Promise<{ job_id: number; total: number }> {
+  return json(await apiFetch(`${BASE}/reativacoes/executar`, {
+    method: "POST", body: JSON.stringify(body),
+  }));
+}
+
+export async function statusReativacao(jobId: number): Promise<AgendJobStatus> {
+  return json(await apiFetch(`${BASE}/reativacoes/status/${jobId}`));
+}
+
 export async function verificarCadastroAgora(): Promise<{
   verificados: number;
   confirmados: number;
@@ -583,6 +658,13 @@ export interface TesteOnelog {
   user_agent?: string | null;
   api_url?: string;
   usuario?: string | null;
+  /**
+   * true = havia sessão ATIVA no OneLog e o login do zero NÃO foi exercitado.
+   * É a distinção que faltava: em 12/08/2026 o teste deu verde com sessão em
+   * cache enquanto a coleta falhava no login do zero (renovação de segurança).
+   */
+  sessao_em_cache?: boolean;
+  detalhe?: string;
   erro: string | null;
 }
 
@@ -791,6 +873,21 @@ export async function importarAtivos(file: File): Promise<{ lote_id: number; tot
 
 export async function getLoteAtivos(id: number): Promise<AtivosLote> {
   return json(await apiFetch(`${BASE}/ativos/lotes/${id}`));
+}
+
+// ── Banco Master: ingestão da Listagem de Ações Judiciais ─────────────────
+// A Listagem já traz a capa completa (partes, valor, ação, comarca), então
+// este fluxo não consulta o DataJud — só distribui e cadastra.
+export async function importarMaster(
+  file: File,
+): Promise<{ lote_id: number; total: number; validos: number; invalidos: number }> {
+  const fd = new FormData();
+  fd.append("arquivo", file);
+  return json(await apiFetch(`${BASE}/master/importar`, { method: "POST", body: fd }));
+}
+
+export async function getLoteMaster(id: number): Promise<AtivosLote> {
+  return json(await apiFetch(`${BASE}/master/lotes/${id}`));
 }
 
 // ── Pasta avulsa (modal de criação manual — cadastro imediato no L1) ───────

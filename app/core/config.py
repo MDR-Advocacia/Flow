@@ -81,7 +81,13 @@ class Settings(BaseSettings):
     classificacao_alert_email: str | None = "ti@mdradvocacia.com,jonilsonvilela@mdradvocacia.com"
     # Destinatário(s) do alerta quando o AUTO-CADASTRO dos Distribuídos BB falha
     # (import interno do L1) — mesmo mecanismo do alerta de classificação.
-    distribuidos_bb_alert_email: str | None = "ti@mdradvocacia.com,jonilsonvilela@mdradvocacia.com"
+    # Circuito de erro do cadastro/coleta: TI entra junto porque as falhas
+    # recentes (Xvfb, sessao do OneLog) sao de infra e quem resolve e' a TI,
+    # nao o operador do juridico.
+    distribuidos_bb_alert_email: str | None = (
+        "ti@mdradvocacia.com,jonilsonvilela@mdradvocacia.com,"
+        "rildon@mdradvocacia.com,neto@mdradvocacia.com"
+    )
     system_name: str | None = None
     app_name: str | None = None
 

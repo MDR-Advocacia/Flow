@@ -84,6 +84,10 @@ PLANILHA_MANUAL = "MANUAL"          # gerada pelo botão "Gerar planilha"
 # enriquecida via DataJud. Default BB (os existentes são todos do Banco do Brasil).
 CLIENTE_BB = "BB"
 CLIENTE_ATIVOS = "ATIVOS"
+# MASTER vem da Listagem de Acoes Judiciais que o operador exporta do sistema
+# do cliente — a planilha ja' traz a capa inteira (partes, valor, acao,
+# comarca), entao esse fluxo NAO consulta o DataJud: nao ha o que enriquecer.
+CLIENTE_MASTER = "MASTER"
 # Pasta avulsa de outro cliente (modal de criação manual): a tag fica OUTRO e o
 # nome/CNPJ reais vão em cliente_nome/cliente_cpf_cnpj do processo.
 CLIENTE_OUTRO = "OUTRO"
@@ -121,6 +125,33 @@ POOL_NOVO = "NOVO"
 POOL_PENDENTE_CADASTRO = "PENDENTE_CADASTRO"
 POOL_CADASTRADO_L1 = "CADASTRADO_L1"
 
+# Status da PASTA no Legal One — não confundir com o status do processo aqui
+# no Flow (PROC_*) nem com o do pool (POOL_*). Validado em produção; é o mesmo
+# código que o modal de alteração em lote usa (ver docs do Arquivar/Ativar).
+L1_PASTA_ATIVO = 1
+L1_PASTA_SUSPENSO = 2
+L1_PASTA_BAIXADO = 3
+L1_PASTA_ARQUIVADO = 4
+L1_PASTA_LABEL = {
+    L1_PASTA_ATIVO: "Ativo",
+    L1_PASTA_SUSPENSO: "Suspenso",
+    L1_PASTA_BAIXADO: "Baixado",
+    L1_PASTA_ARQUIVADO: "Arquivado",
+}
+# Pasta FECHADA: existe, mas está fora da carteira ativa. Quando o cliente
+# reenvia um processo nesse estado, ele voltou a andar — precisa reativar.
+L1_PASTA_FECHADAS = (L1_PASTA_BAIXADO, L1_PASTA_ARQUIVADO)
+
+# Fila de reativação (pasta fechada que o cliente reenviou):
+#   PENDENTE = detectada, aguardando o operador mandar reativar;
+#   REATIVADO = pasta voltou pra Ativo no L1;
+#   FALHOU = nem o PATCH nem o caminho web conseguiram (fica na fila);
+#   DISPENSADA = o operador olhou e decidiu que continua fechada mesmo.
+REATIV_PENDENTE = "PENDENTE"
+REATIV_REATIVADO = "REATIVADO"
+REATIV_FALHOU = "FALHOU"
+REATIV_DISPENSADA = "DISPENSADA"
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # Configuração editável (tabelas que substituem os hardcodes do script)
@@ -145,7 +176,7 @@ class BbEscritorio(Base):
     escritorio_path = Column(Text, nullable=False)
 
     # Critérios de roteamento (o motor escolhe este escritório quando batem)
-    criterio_cliente = Column(String(20), nullable=True)   # BB | ATIVOS | None(qualquer)
+    criterio_cliente = Column(String(20), nullable=True)   # BB | ATIVOS | MASTER | None(qualquer)
     criterio_polo = Column(String(20), nullable=True)      # Passivo | Ativo | Neutro
     criterio_natureza = Column(String(80), nullable=True)  # ex.: "Trabalhista"
 
@@ -358,6 +389,13 @@ class BbProcesso(Base):
     cadastro_confirmado_em = Column(DateTime(timezone=True), nullable=True)
     l1_verificado_em = Column(DateTime(timezone=True), nullable=True)
     l1_folder = Column(String(40), nullable=True)
+    # Status da PASTA no L1 no momento em que a duplicata foi detectada
+    # (1 Ativo | 2 Suspenso | 3 Baixado | 4 Arquivado). Sem isto, "já existe
+    # pasta" era indistinguível de "já está resolvido".
+    l1_status_id = Column(Integer, nullable=True, index=True)
+    # Fila de reativação: preenchida quando a pasta encontrada está fechada.
+    reativacao_status = Column(String(20), nullable=True, index=True)
+    reativado_em = Column(DateTime(timezone=True), nullable=True)
 
     # Vínculos da parte (processos em comum com o MDR no portal BB)
     vinculo_cenario = Column(String(12), nullable=True, index=True)  # CENARIO_1 | CENARIO_2 | None
@@ -545,7 +583,7 @@ class BbRegraObservacao(Base):
     # O cliente vem carimbado pela PORTA DE ENTRADA do processo (coleta RPA = BB;
     # "Importar lista (Ativos)" = ATIVOS), então é um critério confiável — e é o
     # que impede a regra do BB ("Réu → Cadastro") de vazar pro Ativos e vice-versa.
-    criterio_cliente = Column(String(20), nullable=True)     # BB | ATIVOS | None
+    criterio_cliente = Column(String(20), nullable=True)     # BB | ATIVOS | MASTER | None
     criterio_posicao = Column(String(20), nullable=True)     # Réu | Autor | Interessado
     criterio_natureza = Column(String(80), nullable=True)    # ex.: "Trabalhista"
     criterio_cnj = Column(String(10), nullable=True)         # "com" | "sem" | None
@@ -677,16 +715,28 @@ DUP_MOTIVO_LABEL = {
 
 
 class BbAtivosLote(Base):
-    """Um upload de lista seca da Ativos (números de processo).
+    """Um upload de planilha que entra pelo Cadastro (Ativos ou Banco Master).
 
-    Rastreia o enriquecimento via DataJud com progresso (server-backed): cada CNJ
-    vira um processo (cliente=ATIVOS) com a capa preenchida; partes e valor ficam
-    de lacuna manual.
+    Nasceu para a Ativos (lista seca -> DataJud), mas os contadores de progresso
+    servem igual para qualquer carteira que entre por upload, então o Master
+    reusa a mesma tabela — a coluna `cliente` diz de quem é o lote. Tabela
+    própria para o Master duplicaria endpoint, UI e auto-poll de progresso sem
+    ganhar nada.
+
+    O que difere por carteira:
+    - ATIVOS: lista seca de números; o DataJud preenche a capa (`encontrados` /
+      `nao_encontrados` contam essa consulta); partes e valor ficam de lacuna
+      manual.
+    - MASTER: a Listagem de Ações Judiciais já traz a capa completa, então NÃO
+      há consulta ao DataJud e os dois contadores acima ficam zerados.
     """
 
     __tablename__ = "bbd_ativos_lotes"
 
     id = Column(Integer, primary_key=True, index=True)
+    # Carteira dona do lote. Default ATIVOS porque todos os lotes que existiam
+    # quando esta coluna nasceu eram da Ativos.
+    cliente = Column(String(20), nullable=False, server_default=CLIENTE_ATIVOS, index=True)
     nome_arquivo = Column(String(200), nullable=True)
     total = Column(Integer, nullable=False, server_default="0")
     processados = Column(Integer, nullable=False, server_default="0")

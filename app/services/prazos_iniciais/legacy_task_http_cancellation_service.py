@@ -73,6 +73,10 @@ CANCEL_ENDPOINT_PATH = "/processos/CompromissoTarefa/ModalEnvolvimentoEmLote"
 # em 05/08/2026). Assincrono: Success=true significa "enfileirado", nao "feito".
 PROCESSOS_LOTE_ENDPOINT_PATH = "/processos/Processos/ModalAlterarEmLote"
 CAMPO_ID_ESCRITORIO_RESPONSAVEL = 10
+CAMPO_ID_STATUS = 3
+# Status de PASTA no L1 (o mesmo do painel): 1 Ativo, 2 Suspenso, 3 Baixado,
+# 4 Arquivado. Reativar = voltar pra 1.
+STATUS_PASTA_TEXTO = {1: "Ativo", 2: "Suspenso", 3: "Baixado", 4: "Arquivado"}
 
 # 9 campos minimos validados como suficientes pelo Teste 2.4 (2026-05-07).
 # `parentId` e' decorativo (Teste 2.3); 0 evita expor um id real por engano.
@@ -864,6 +868,126 @@ class LegacyTaskHttpCancellationService:
             return {"ok": True, "count": len(lawsuit_ids), "raw": payload}
         raise _CancelHttpError(
             "loop de retry HTTP (escritorio) esgotado", category="runner_error"
+        )
+
+    def post_alterar_status_pasta(
+        self,
+        *,
+        lawsuit_ids: list[int],
+        status_id: int,
+    ) -> dict[str, Any]:
+        """Muda o STATUS de um lote de pastas (usado pra REATIVAR: status_id=1).
+
+        Mesmo modal do escritorio responsavel, trocando o `CampoId` — o
+        `ModalAlterarEmLote` e' generico e o campo escolhe o que muda. Payload
+        validado em ~6.900 pastas no arquivamento em massa de 08/2026.
+
+        Por que nao usar so' o PATCH REST: ele funciona apenas nas pastas
+        "limpas". Nas travadas pela config de honorario obrigatorio do tenant
+        (a maioria) devolve 400 Validation reclamando de custom fields que o
+        proprio schema OData nao aceita no PATCH — paradoxo sem saida via REST.
+        Por isso o caminho web e' o fallback obrigatorio, nao um luxo.
+
+        LIMITACAO CONHECIDA: o modal web so' mexe no status — NAO limpa a
+        `closingDate`. Pasta reativada por aqui fica com a data de baixa
+        residual (cosmetico: `closed=False` e `statusId=1` ficam corretos).
+        Quem consegue passar pelo PATCH limpa as duas coisas de uma vez.
+
+        SEGURANCA: `SelectAll=false` + `SelectedIds` explicitos — so' as pastas
+        listadas mudam, sem caminho pro filtro da tela vazar pro lote.
+
+        Assincrono: 200 com Success=true quer dizer "alteracao iniciada"; a
+        confirmacao real vem de reler `statusId` na API depois.
+        """
+        if not lawsuit_ids:
+            return {"ok": True, "count": 0, "raw": None}
+        status_id = int(status_id)
+        status_text = STATUS_PASTA_TEXTO.get(status_id, "")
+        url = f"{self._web_base_url()}{PROCESSOS_LOTE_ENDPOINT_PATH}"
+        headers = {"X-Requested-With": "XMLHttpRequest", "Accept": "*/*"}
+        # Os campos vazios NAO sao decorativos: o modal posta o formulario
+        # inteiro e o binder do L1 le' cada um. Campo ausente ja' devolveu
+        # 200 com Success=false em outros modais da casa.
+        body_base: list[tuple[str, str]] = [
+            ("RequirirNegociacaoDeHonorarioPreenchida", "True"),
+            ("ShowJustificationModal", "False"),
+            ("CampoText", "Status"),
+            ("CampoId", str(CAMPO_ID_STATUS)),
+            ("NegociacaoText", ""), ("NegociacaoId", ""),
+            ("ResponsavelText", ""), ("ResponsavelId", ""),
+            ("StatusText", status_text), ("StatusId", str(status_id)),
+            ("TituloText", ""),
+            ("OriginOfficeText", ""), ("OriginOfficeId", ""),
+            ("ResponsibleOfficeText", ""), ("ResponsibleOfficeId", ""),
+            ("DischargeDate", ""),
+            ("PhaseText", ""), ("PhaseId", ""),
+            ("NatureText", ""), ("NatureId", ""),
+            ("ClosingDate", ""), ("DecisionDate", ""), ("ResultDate", ""),
+            ("ReasonForClosing", ""), ("Value", ""), ("Id", ""),
+            ("selectionViewModel[SelectAll]", "false"),
+            ("selectionViewModel[SelectFirsts]", "false"),
+            ("selectionViewModel[UseStringIds]", "false"),
+            ("selectionViewModel[UnselectedIds]", ""),
+        ]
+        for attempt in range(2):
+            cookies = self._ensure_session()
+            body = list(body_base)
+            for lid in lawsuit_ids:
+                body.append(("selectionViewModel[SelectedIds][]", str(int(lid))))
+            try:
+                response = self._http.post(
+                    url, data=body, cookies=cookies, headers=headers, timeout=60
+                )
+            except requests.exceptions.RequestException as exc:
+                raise _CancelHttpError(
+                    f"erro de rede no POST de status: {exc}", category="timeout"
+                ) from exc
+            if self._is_session_invalid(response):
+                self._invalidate_session()
+                if attempt == 0:
+                    logger.info(
+                        "legacy_task_http.session_invalid: re-login (status n=%s)",
+                        len(lawsuit_ids),
+                    )
+                    continue
+                raise _CancelHttpError(
+                    "sessao invalida persistente apos re-login (403)",
+                    category="auth_failure",
+                )
+            if response.status_code >= 500:
+                raise _CancelHttpError(
+                    f"L1 retornou {response.status_code}", category="timeout"
+                )
+            if response.status_code != 200:
+                raise _CancelHttpError(
+                    f"L1 retornou {response.status_code}: {(response.text or '')[:256]}",
+                    category="runner_error",
+                )
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise _CancelHttpError(
+                    f"resposta L1 nao e JSON: {(response.text or '')[:256]}",
+                    category="runner_error",
+                ) from exc
+            if not payload.get("Success"):
+                err = (
+                    payload.get("ErrorMessage")
+                    or payload.get("Message")
+                    or "Success=false"
+                )
+                raise _CancelHttpError(
+                    f"L1 rejeitou alteracao de status: {err}",
+                    category="runner_error",
+                )
+            logger.info(
+                "legacy_task_http.post_status_ok status=%s n=%s elapsed_ms=%s",
+                status_id, len(lawsuit_ids),
+                int(response.elapsed.total_seconds() * 1000),
+            )
+            return {"ok": True, "count": len(lawsuit_ids), "raw": payload}
+        raise _CancelHttpError(
+            "loop de retry HTTP (status) esgotado", category="runner_error"
         )
 
     # ── Interface publica (compat com LegacyTaskHelper (legacy_task_helpers)) ──

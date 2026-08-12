@@ -209,14 +209,19 @@ export default function DistribuidosBBConfigPage() {
     try {
       const r = await testarOnelog();
       if (r.ok) {
+        // Verde com sessão em cache NÃO é garantia: o login do zero (que é o
+        // que trava na renovação de segurança do BB) não foi exercitado.
         toast({
-          title: "OneLog conectado ✓",
-          description: `Login OK como ${r.usuario ?? "robô"} — ${r.cookies} cookie(s) recebido(s).`,
+          title: r.sessao_em_cache ? "OneLog respondeu — mas com sessão em cache" : "OneLog conectado ✓",
+          description:
+            `Login OK como ${r.usuario ?? "robô"} — ${r.cookies} cookie(s). ` +
+            (r.detalhe ?? ""),
+          variant: r.sessao_em_cache ? "default" : undefined,
         });
       } else {
         toast({
           title: r.configurado ? "OneLog respondeu com problema" : "OneLog não configurado",
-          description: r.erro ?? "Falha desconhecida.",
+          description: `${r.erro ?? "Falha desconhecida."} ${r.detalhe ?? ""}`.trim(),
           variant: "destructive",
         });
       }

@@ -30,8 +30,9 @@ import { Progress } from "@/components/ui/progress";
 import {
   type AgendJobStatus, type AgendPreview, type AgendUser, type DuplicadoAtivos,
   type OfficeL1,
-  dispararAgendamento, getTaskTypesMeta, getUsersMeta, listarOfficesL1,
-  previewAgendamento, statusAgendamento,
+  dispararAgendamento, dispararReativacao, getTaskTypesMeta, getUsersMeta,
+  listarOfficesL1, previewAgendamento, previewReativacao, statusAgendamento,
+  statusReativacao,
 } from "@/services/distribuidos-bb";
 import { useToast } from "@/hooks/use-toast";
 
@@ -43,15 +44,28 @@ function amanhaISO(): string {
 }
 
 export default function AgendarTarefaDuplicadosDialog({
-  open, onOpenChange, duplicados, onDone,
+  open, onOpenChange, duplicados, onDone, modo = "duplicados", processoIds = [],
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   duplicados: DuplicadoAtivos[];
   onDone?: () => void;
+  /**
+   * "duplicados" (default) — agenda tarefa nas pastas que já existiam no L1.
+   * "reativacao" — pasta fechada que o cliente reenviou: o worker REATIVA a
+   * pasta e só então cria a tarefa. Mesmo formulário, mesmo job, mesma barra;
+   * o que muda é a origem dos ids e os endpoints.
+   */
+  modo?: "duplicados" | "reativacao";
+  processoIds?: number[];
 }) {
   const { toast } = useToast();
-  const dupIds = useMemo(() => duplicados.map((d) => d.id), [duplicados]);
+  const ehReativacao = modo === "reativacao";
+  const dupIds = useMemo(
+    () => (ehReativacao ? processoIds : duplicados.map((d) => d.id)),
+    [ehReativacao, processoIds, duplicados],
+  );
+  const qtdSelecionada = ehReativacao ? processoIds.length : duplicados.length;
 
   // catálogos
   const [taskTypes, setTaskTypes] = useState<SubtypePickerTaskType[]>([]);
@@ -90,11 +104,21 @@ export default function AgendarTarefaDuplicadosDialog({
   const recalcPreview = useCallback(async () => {
     if (!respSel.length || !dupIds.length) { setPreview(null); return; }
     try {
-      setPreview(await previewAgendamento({
-        duplicado_ids: dupIds, responsavel_ids: respSel, dividir_igual: dividirIgual,
-      }));
+      if (ehReativacao) {
+        const p = await previewReativacao({
+          processo_ids: dupIds, responsavel_ids: respSel, dividir_igual: dividirIgual,
+        });
+        setPreview({
+          total_pastas: p.total, sem_pasta: p.sem_responsavel,
+          por_responsavel: p.por_responsavel,
+        });
+      } else {
+        setPreview(await previewAgendamento({
+          duplicado_ids: dupIds, responsavel_ids: respSel, dividir_igual: dividirIgual,
+        }));
+      }
     } catch { /* silencioso — preview é auxiliar */ }
-  }, [respSel, dividirIgual, dupIds]);
+  }, [respSel, dividirIgual, dupIds, ehReativacao]);
   useEffect(() => { if (open) recalcPreview(); }, [open, recalcPreview]);
 
   const toggleResp = (id: number) => {
@@ -119,7 +143,9 @@ export default function AgendarTarefaDuplicadosDialog({
   const acompanhar = (jobId: number) => {
     const tick = async () => {
       try {
-        const st = await statusAgendamento(jobId);
+        const st = ehReativacao
+          ? await statusReativacao(jobId)
+          : await statusAgendamento(jobId);
         setJob(st);
         if (st.status === "EM_ANDAMENTO") setTimeout(tick, 1500);
         else if (st.status === "CONCLUIDO") {
@@ -140,8 +166,19 @@ export default function AgendarTarefaDuplicadosDialog({
     if (!podeDisparar) return;
     setDisparando(true); setJob(null);
     try {
-      const r = await dispararAgendamento({ ...baseConfig(), dry_run: dryRun });
-      acompanhar(r.job_id);
+      let jobId: number;
+      if (ehReativacao) {
+        const { duplicado_ids: _d, responsavel_ids, dividir_igual, ...cfg } = baseConfig();
+        const r = await dispararReativacao({
+          processo_ids: dupIds, responsavel_ids, dividir_igual,
+          dry_run: dryRun, config: cfg,
+        });
+        jobId = r.job_id;
+      } else {
+        const r = await dispararAgendamento({ ...baseConfig(), dry_run: dryRun });
+        jobId = r.job_id;
+      }
+      acompanhar(jobId);
     } catch (e) {
       toast({ title: "Erro ao disparar", description: String((e as Error).message), variant: "destructive" });
     } finally {
@@ -156,10 +193,23 @@ export default function AgendarTarefaDuplicadosDialog({
     <Dialog open={open} onOpenChange={(o) => { if (!rodando) onOpenChange(o); }}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Agendar tarefa em lote</DialogTitle>
+          <DialogTitle>
+            {ehReativacao ? "Reativar pastas e agendar tarefa" : "Agendar tarefa em lote"}
+          </DialogTitle>
           <DialogDescription>
-            {duplicados.length} pasta(s) selecionada(s). Cria uma tarefa em cada, dividindo os
-            responsáveis igual ou pra uma pessoa. O prazo padrão é amanhã.
+            {ehReativacao ? (
+              <>
+                {qtdSelecionada} pasta(s) <strong>fechada(s)</strong> que o cliente reenviou.
+                Cada uma volta pro status <strong>Ativo</strong> no Legal One e recebe uma
+                tarefa. Se a reativação falhar, a tarefa <strong>não</strong> é criada —
+                tarefa em pasta arquivada não aparece pra ninguém.
+              </>
+            ) : (
+              <>
+                {qtdSelecionada} pasta(s) selecionada(s). Cria uma tarefa em cada, dividindo os
+                responsáveis igual ou pra uma pessoa. O prazo padrão é amanhã.
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
 

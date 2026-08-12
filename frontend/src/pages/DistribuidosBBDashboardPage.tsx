@@ -36,6 +36,7 @@ import {
   YAxis,
 } from "recharts";
 import ImportarAtivosDialog from "@/components/distribuidos-bb/ImportarAtivosDialog";
+import ImportarMasterDialog from "@/components/distribuidos-bb/ImportarMasterDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -135,6 +136,7 @@ export default function DistribuidosBBDashboardPage() {
   // Coleta
   const [coletaOpen, setColetaOpen] = useState(false);
   const [ativosOpen, setAtivosOpen] = useState(false);
+  const [masterOpen, setMasterOpen] = useState(false);
   const [dataIni, setDataIni] = useState("");
   const [dataFim, setDataFim] = useState("");
   const [confirmarCiencia, setConfirmarCiencia] = useState(false);
@@ -166,10 +168,16 @@ export default function DistribuidosBBDashboardPage() {
   // resposta do dashboard já traz a quebra por cliente por dia.
   const [clienteFiltro, setClienteFiltro] = useState<string | null>(null);
 
-  const labelCliente = (tag: string) =>
-    tag === "ATIVOS" ? "Ativos" : tag === "BB" ? "Banco do Brasil" : "Outros clientes";
-  const corCliente = (tag: string) =>
-    tag === "ATIVOS" ? "bg-violet-500" : tag === "BB" ? "bg-yellow-500" : "bg-slate-400";
+  // Carteiras conhecidas do módulo. O que não estiver aqui cai em "Outros
+  // clientes" (pasta avulsa), então toda carteira nova precisa entrar nos dois
+  // mapas — senão some no cinza do gráfico de capturas por dia.
+  const CARTEIRAS: Record<string, { label: string; cor: string }> = {
+    BB: { label: "Banco do Brasil", cor: "bg-yellow-500" },
+    ATIVOS: { label: "Ativos", cor: "bg-violet-500" },
+    MASTER: { label: "Banco Master", cor: "bg-cyan-500" },
+  };
+  const labelCliente = (tag: string) => CARTEIRAS[tag]?.label ?? "Outros clientes";
+  const corCliente = (tag: string) => CARTEIRAS[tag]?.cor ?? "bg-slate-400";
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -302,6 +310,10 @@ export default function DistribuidosBBDashboardPage() {
           <Button variant="outline" size="sm" onClick={() => setAtivosOpen(true)}>
             <Upload className="mr-2 h-4 w-4" />
             Importar lista (Ativos)
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setMasterOpen(true)}>
+            <Upload className="mr-2 h-4 w-4" />
+            Importar Listagem (Master)
           </Button>
           <Button variant="outline" size="sm" onClick={() => navigate("/distribuidos-bb")}>
             <ListChecks className="mr-2 h-4 w-4" />
@@ -824,6 +836,7 @@ export default function DistribuidosBBDashboardPage() {
 
       {/* Importar lista (Ativos) — mesmo dialog da tela de Processos */}
       <ImportarAtivosDialog open={ativosOpen} onOpenChange={setAtivosOpen} onDone={load} />
+      <ImportarMasterDialog open={masterOpen} onOpenChange={setMasterOpen} onDone={load} />
     </div>
   );
 }
