@@ -666,6 +666,16 @@ class PublicationBatchClassifier:
         failed = 0
         skipped = 0
         error_details: dict[str, str] = {}
+        # Telemetria de token. Somada por lote pra responder duas perguntas que
+        # hoje ninguem consegue responder: quanto a classificacao custa, e
+        # (depois do prompt caching) se o cache pegou de verdade.
+        uso_total = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        }
+        uso_itens = 0
 
         for item in results:
             custom_id = item.get("custom_id")
@@ -687,6 +697,15 @@ class PublicationBatchClassifier:
             if not rec:
                 skipped += 1
                 continue
+
+            # Usage ANTES de tentar extrair a classificação: item que falhou
+            # no parse também queimou token, e ignorá-lo subcontaria o custo
+            # real do lote exatamente nos casos que mais interessam.
+            u = AnthropicClassifierClient.extract_usage_from_batch_result(item)
+            if any(u.values()):
+                for k in uso_total:
+                    uso_total[k] += u[k]
+                uso_itens += 1
 
             # Extrai classificação
             try:
@@ -800,6 +819,11 @@ class PublicationBatchClassifier:
         batch.applied_at = datetime.now(timezone.utc)
         batch.succeeded_count = succeeded
         batch.errored_count = failed
+        batch.usage_input_tokens = uso_total["input_tokens"]
+        batch.usage_output_tokens = uso_total["output_tokens"]
+        batch.usage_cache_read_tokens = uso_total["cache_read_input_tokens"]
+        batch.usage_cache_creation_tokens = uso_total["cache_creation_input_tokens"]
+        batch.usage_itens_contados = uso_itens
         if error_details:
             batch.error_details = error_details
         self.db.commit()
@@ -833,12 +857,47 @@ class PublicationBatchClassifier:
             "failed": failed,
             "skipped": skipped,
             "total": len(results),
+            "usage": {**uso_total, "itens_contados": uso_itens},
         }
         logger.info(
             "Batch %s aplicado: %s",
             batch.anthropic_batch_id,
             summary,
         )
+        # Linha separada e legivel — e' o que o operador vai ler no log pra
+        # comparar antes/depois do prompt caching.
+        try:
+            from app.services.classifier.anthropic_pricing import calcular_custo_usd
+
+            custo = calcular_custo_usd(
+                modelo=batch.model_used,
+                input_tokens=uso_total["input_tokens"],
+                output_tokens=uso_total["output_tokens"],
+                cache_read_tokens=uso_total["cache_read_input_tokens"],
+                cache_creation_tokens=uso_total["cache_creation_input_tokens"],
+                batch=True,
+            )
+            if custo:
+                summary["custo"] = custo
+                logger.info(
+                    "Batch %s — CUSTO: US$ %.4f (%s itens, entrada total %s tok, "
+                    "saida %s tok). Cache: leitura %s / gravacao %s tok. "
+                    "Sem cache custaria US$ %.4f (economia US$ %.4f).",
+                    batch.anthropic_batch_id, custo["custo_total_usd"], uso_itens,
+                    custo["entrada_total_tokens"], uso_total["output_tokens"],
+                    uso_total["cache_read_input_tokens"],
+                    uso_total["cache_creation_input_tokens"],
+                    custo["custo_sem_cache_usd"], custo["economia_usd"],
+                )
+            else:
+                logger.warning(
+                    "Batch %s — usage somado (%s tok entrada) mas modelo %r nao "
+                    "esta na tabela de precos; custo nao calculado.",
+                    batch.anthropic_batch_id, uso_total["input_tokens"],
+                    batch.model_used,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao calcular custo do batch (ignorado).")
         return summary
 
     # ──────────────────────────────────────────────────────────────────
@@ -882,7 +941,40 @@ class PublicationBatchClassifier:
             "ended_at": batch.ended_at.isoformat() if batch.ended_at else None,
             "applied_at": batch.applied_at.isoformat() if batch.applied_at else None,
             "error_details": batch.error_details,
+            # Telemetria de token (migration pub009). `usage_input_tokens` é só
+            # o que vem DEPOIS do último breakpoint de cache — a entrada total
+            # é input + cache_read + cache_creation. Sem caching ligado, os dois
+            # de cache são 0 e o input é a entrada inteira.
+            "usage": {
+                "input_tokens": batch.usage_input_tokens,
+                "output_tokens": batch.usage_output_tokens,
+                "cache_read_tokens": batch.usage_cache_read_tokens,
+                "cache_creation_tokens": batch.usage_cache_creation_tokens,
+                "itens_contados": batch.usage_itens_contados,
+            },
+            "custo": self._custo_do_batch(batch),
         }
+
+    @staticmethod
+    def _custo_do_batch(batch: PublicationBatchClassification) -> Optional[dict]:
+        """Custo estimado a partir do usage gravado. None em lote antigo (sem
+        telemetria) ou modelo fora da tabela de preços."""
+        if not batch.usage_itens_contados:
+            return None
+        try:
+            from app.services.classifier.anthropic_pricing import calcular_custo_usd
+
+            return calcular_custo_usd(
+                modelo=batch.model_used,
+                input_tokens=batch.usage_input_tokens or 0,
+                output_tokens=batch.usage_output_tokens or 0,
+                cache_read_tokens=batch.usage_cache_read_tokens or 0,
+                cache_creation_tokens=batch.usage_cache_creation_tokens or 0,
+                batch=True,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao calcular custo do batch %s (ignorado).", batch.id)
+            return None
 
     def collect_errored_records_from_batch(
         self, batch: PublicationBatchClassification

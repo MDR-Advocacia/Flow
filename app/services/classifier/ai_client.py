@@ -127,6 +127,20 @@ class AnthropicClassifierClient:
                 if not content_blocks:
                     raise Exception("Resposta da API sem conteúdo.")
 
+                # Telemetria de token no caminho síncrono. Aqui só loga (o
+                # retorno é contrato usado por vários callers e não vou mudá-lo
+                # por causa de medição); o número que interessa pro estudo de
+                # custo vem do batch, que é onde está o volume.
+                u = data.get("usage") or {}
+                if u:
+                    logger.info(
+                        "Classificação síncrona — usage: entrada=%s saída=%s "
+                        "cache_leitura=%s cache_gravação=%s",
+                        u.get("input_tokens"), u.get("output_tokens"),
+                        u.get("cache_read_input_tokens", 0),
+                        u.get("cache_creation_input_tokens", 0),
+                    )
+
                 raw_text = content_blocks[0].get("text", "")
                 return self._parse_classification_response(raw_text)
             except Exception as exc:
@@ -349,6 +363,36 @@ class AnthropicClassifierClient:
         return AnthropicClassifierClient._parse_classification_response(
             raw_text, stop_reason=stop_reason
         )
+
+    @staticmethod
+    def extract_usage_from_batch_result(
+        batch_result: dict[str, Any],
+    ) -> dict[str, int]:
+        """Contadores de token de UM item do batch. Nunca levanta exceção.
+
+        Tolerante de propósito: usage é telemetria, não pode derrubar a
+        aplicação de um lote que classificou certo. Item que falhou costuma vir
+        sem `message`, e aí devolve tudo zerado — quem chama soma e conta
+        quantos itens de fato trouxeram número.
+
+        Os dois campos de cache só ficam diferentes de zero quando o prompt
+        caching estiver ligado; hoje vêm 0 e é isso que queremos medir.
+        """
+        vazio = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        }
+        try:
+            usage = (
+                (batch_result.get("result") or {}).get("message") or {}
+            ).get("usage") or {}
+            if not isinstance(usage, dict):
+                return vazio
+            return {k: int(usage.get(k) or 0) for k in vazio}
+        except Exception:  # noqa: BLE001
+            return vazio
 
     @staticmethod
     def _try_repair_truncated_array(text: str) -> list | None:
