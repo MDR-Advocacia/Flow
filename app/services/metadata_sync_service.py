@@ -88,31 +88,42 @@ class MetadataSyncService:
             return False
 
     def sync_users(self) -> bool:
-        """NAO sincroniza usuarios. Apenas VINCULA o contato do L1 por e-mail.
+        """Mantem o CATALOGO operacional em dia com o Legal One.
 
-        DECISAO DO OPERADOR (07/08/2026, definitiva): a identidade do Flow e' o
-        Entra ID e nada mais. Usuario nasce do login SSO; papel quem define e' o
-        gestor. Nao existe mais usuario criado a partir do cadastro do L1, nem
-        ativacao de conta, nem senha provisoria.
+        `legal_one_users` acumula DOIS papeis, e a fronteira entre eles e' o
+        ponto inteiro desta funcao:
 
-        O que ESTA funcao ainda faz, e o motivo de nao ter sido simplesmente
-        apagada: a tarefa no Legal One exige o ID DE CONTATO de quem sera' o
-        responsavel. Esse id nao e' identidade, e' um ATRIBUTO operacional. Aqui
-        ele e' preenchido casando o e-mail do usuario do Entra com o cadastro de
-        contatos do L1 — e SO isso:
+          CATALOGO (vem do Legal One) -> quem PODE ser RESPONSAVEL/EXECUTANTE
+            de tarefa. E' o que alimenta o agendamento, o rodizio das filas e o
+            seletor de Minha Equipe. Sem a entrada aqui, a pessoa simplesmente
+            NAO EXISTE pra operacao, mesmo trabalhando na casa.
 
-          - nunca CRIA usuario (o cadastro do L1 nao gera acesso ao Flow);
-          - nunca DESATIVA usuario (quem tira acesso e' o Entra ou o gestor);
-          - nunca SOBRESCREVE e-mail (o e-mail e' a identidade, e' do Entra);
-          - so' preenche `external_id` onde ele esta' VAZIO, e so' quando o
-            e-mail bate exatamente.
+          CONTA (vem do Entra ID) -> quem PODE ENTRAR no Flow. Nasce do login
+            SSO; papel e permissao quem define e' o gestor.
 
-        O historico dessa decisao: o sync antigo espelhava `isActive` do L1 e
-        desativava quem nao estivesse na lista. Isso derrubou o acesso de gente
-        que trabalha aqui (cadastro antigo em gmail no L1) e criou usuario
+        Sao independentes: advogado novo precisa entrar no catalogo no dia em
+        que e' cadastrado no L1, muito antes de logar no Flow pela primeira vez
+        (as vezes nunca loga — nem todo responsavel por tarefa usa o sistema).
+
+        Criar entrada de catalogo NAO da acesso a ninguem: o portao do login e'
+        a sessao Microsoft validada no `sso_session`, e a linha nasce sem senha,
+        com `role="user"` e TODAS as permissoes em False. Quando/se a pessoa
+        logar, o match por e-mail encontra esta mesma linha.
+
+        O que esta funcao faz:
+          - CRIA entrada de catalogo pro contato do L1 que ainda nao existe;
+          - preenche `external_id` onde esta' VAZIO, casando por e-mail;
+          - nunca DESATIVA ninguem (quem tira acesso e' o Entra ou o gestor);
+          - nunca SOBRESCREVE e-mail (identidade e' do Entra);
+          - nunca mexe em papel, permissao ou nome de quem ja' existe.
+
+        As tres ultimas travas sao cicatriz: o sync antigo espelhava `isActive`
+        do L1 e desativava quem nao estivesse na lista, o que derrubou o acesso
+        de gente da casa (cadastro antigo em gmail no L1) e gerou usuario
         duplicado — dois registros com o mesmo nome, um sem `external_id`, que
-        quebrou EM SILENCIO o seletor de responsavel (o campo voltava em branco,
-        caso da Ana Carolina em 07/08). Cada rodada do sync reabria o problema.
+        quebrou EM SILENCIO o seletor de responsavel (caso da Ana Carolina em
+        07/08). Manter a criacao SEM tocar em quem ja' existe e' o que permite
+        ter catalogo completo sem reabrir aquilo.
         """
         self.logger.info("Vinculando contatos do L1 aos usuarios do Entra...")
         try:
@@ -156,7 +167,55 @@ class MetadataSyncService:
                 elif not ext:
                     sem_contato.append(user.email or f"id={user.id}")
 
+            # ── Catalogo: contato do L1 que ainda nao existe aqui ──────
+            # Sem isto, advogado recem-cadastrado no L1 nao aparece pra ser
+            # escolhido como responsavel — foi o que aconteceu com o Gabriel
+            # Rocha (contato 78164) e mais dois em 13/08/2026.
+            emails_existentes = {
+                (e or "").strip().lower()
+                for (e,) in self.db.query(LegalOneUser.email).all() if e
+            }
+            criados = 0
+            for u in users_data:
+                ext = u.get("id")
+                if not ext or int(ext) in ja_usados:
+                    continue
+                email = (u.get("email") or "").strip().lower()
+                if email and email in emails_existentes:
+                    continue  # ja' tem conta; o vinculo acima cuida do external_id
+                nome = (u.get("name") or "").strip()
+                if not nome:
+                    continue
+                novo = LegalOneUser(
+                    external_id=int(ext),
+                    name=nome,
+                    email=email or None,
+                    # Ativo como CATALOGO (pode receber tarefa). Isso nao e'
+                    # acesso: acesso depende de conta no Entra.
+                    is_active=True,
+                    hashed_password=None,
+                    must_change_password=False,
+                    role="user",
+                    can_schedule_batch=False,
+                    can_use_publications=False,
+                    can_use_prazos_iniciais=False,
+                )
+                self.db.add(novo)
+                ja_usados.add(int(ext))
+                if email:
+                    emails_existentes.add(email)
+                criados += 1
+                self.logger.info(
+                    "Catalogo: %s (contato L1 %s) adicionado — pode ser "
+                    "responsavel por tarefa. Sem acesso ao Flow.", nome, ext,
+                )
+
             self.db.commit()
+            if criados:
+                self.logger.info(
+                    "Catalogo do Legal One: %s pessoa(s) nova(s) disponivel(is) "
+                    "pro agendamento.", criados,
+                )
             if sem_contato:
                 # Nao e' erro: a pessoa usa o Flow normalmente, so' nao pode ser
                 # RESPONSAVEL por tarefa no L1 ate' ter contato la'. O admin ve
@@ -166,7 +225,10 @@ class MetadataSyncService:
                     "ser responsaveis por tarefa): %s",
                     len(sem_contato), ", ".join(sem_contato[:10]),
                 )
-            self.logger.info("Vinculo de contatos concluido: %s novo(s).", vinculados)
+            self.logger.info(
+                "Sincronizacao do catalogo concluida: %s vinculo(s), %s "
+                "entrada(s) nova(s).", vinculados, criados,
+            )
             return True
         except Exception as exc:
             self.db.rollback()
