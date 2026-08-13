@@ -57,9 +57,82 @@ from app.services.batch_worker import BatchExecutionWorker
 logger = logging.getLogger(__name__)
 batch_worker = BatchExecutionWorker()
 
+# ── Eleição do worker que roda o trabalho de fundo ────────────────────────
+# Ver o docstring de `_sou_o_lider`. Guardado em módulo pra o lock viver
+# enquanto o processo viver (soltar a referência liberaria o flock).
+_LOCK_TRABALHO_FUNDO = None
+_LOCK_PATH = "/tmp/flow-scheduler.lock"
+
+
+def _sou_o_lider() -> bool:
+    """Este worker é o que deve rodar scheduler e batch worker?
+
+    O uvicorn roda com --workers N e cada worker executa este startup. Sem
+    eleição, os N processos sobem N schedulers e cada job agendado dispara N
+    vezes (medido: 4x em produção, 13/08/2026). `max_instances=1` não cobre
+    isso — ele só age dentro de um mesmo scheduler.
+
+    Lock de arquivo não-bloqueante: quem pega, lidera. Quem não pega, continua
+    servindo HTTP normalmente. O flock é liberado pelo SO se o processo morrer,
+    então o worker respawnado pelo uvicorn assume sozinho.
+
+    Se o `filelock` não estiver disponível por algum motivo, o comportamento
+    volta a ser o de antes (todos lideram) — degradar pro conhecido é melhor
+    que ficar SEM trabalho de fundo nenhum.
+    """
+    global _LOCK_TRABALHO_FUNDO
+    try:
+        from filelock import FileLock, Timeout
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "filelock indisponível — este worker vai rodar o trabalho de fundo "
+            "sem eleição (comportamento antigo)."
+        )
+        return True
+
+    try:
+        _LOCK_TRABALHO_FUNDO = FileLock(_LOCK_PATH)
+        _LOCK_TRABALHO_FUNDO.acquire(timeout=0)
+        return True
+    except Timeout:
+        _LOCK_TRABALHO_FUNDO = None
+        return False
+    except Exception:  # noqa: BLE001
+        logger.exception("Falha na eleição do worker de fundo; assumindo liderança.")
+        return True
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    lider = _sou_o_lider()
+    if not lider:
+        logger.info(
+            "Worker secundário: serve HTTP, sem scheduler nem batch worker "
+            "(o trabalho de fundo roda no worker líder)."
+        )
+        try:
+            yield
+        finally:
+            # O acumulador do relatório de utilização é POR PROCESSO: este
+            # worker atende requisição e acumula o seu próprio pedaço. O flush
+            # periódico se dispara sozinho dentro do `registrar()` (não depende
+            # do scheduler), mas o da PARADA precisa acontecer aqui também —
+            # sem isso, todo redeploy perderia o acumulado dos secundários e o
+            # relatório subcontaria justamente quem estava trabalhando na hora.
+            try:
+                from app.services import uso_service
+
+                gravadas = uso_service.descarregar()
+                if gravadas:
+                    logger.info(
+                        "uso: %s linha(s) gravadas no shutdown (worker secundário)",
+                        gravadas,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("uso: flush de shutdown falhou (%s)", exc)
+        return
+
+    logger.info("Worker LÍDER: iniciando scheduler e trabalho de fundo.")
     batch_worker.start()
     scheduler.start()
     logger.info("APScheduler started")
@@ -357,6 +430,19 @@ async def lifespan(_: FastAPI):
         logger.exception(
             "Falha ao registrar job de verificação de processo no L1 do OneRequest no startup."
         )
+
+    # Retenção dos artefatos do Playwright: as capturas de tela dos runners
+    # eram 5,21 GB de 5,8 GB em /app/output, sem nenhuma política de descarte,
+    # num disco a 83%. Apaga só `artifacts/` de run com mais de 14 dias — o
+    # status.json (que a tela lê) e os logs ficam.
+    try:
+        from app.services.playwright_artifacts_cleanup import (
+            register_playwright_artifacts_cleanup_job,
+        )
+
+        register_playwright_artifacts_cleanup_job(scheduler)
+    except Exception:
+        logger.exception("Falha ao registrar a retenção de artefatos do Playwright.")
 
     # Minha Equipe: ingestão diária via download do relatório "Agenda Analytics"
     # do L1 (9h-12h30 BRT, 30/30min até o relatório do dia aparecer).
