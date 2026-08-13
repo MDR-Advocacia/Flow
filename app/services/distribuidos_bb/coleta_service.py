@@ -522,6 +522,9 @@ def executar_coleta(
         # ERRO sem rollback também falha — e o run fica EM_ANDAMENTO eterno
         # (destino do run 138 em 12/08/2026, que precisou de fechamento manual).
         db.rollback()
+        # Atributo transiente (nao persistido) lido pelo wrapper de retentativa:
+        # quando o OneLog declarou falha temporaria, ele diz quando reprocessa.
+        run._onelog_retry_after = getattr(exc, "retry_after_seconds", None)
         run.status = RUN_ERRO
         run.erro = str(exc)
         run.concluido_em = datetime.now(timezone.utc)
@@ -717,7 +720,21 @@ def executar_coleta_background(
             run._pos_coleta_restantes = 0
             db.commit()
 
-            if espera:
-                _t.sleep(espera)
+            # Contrato do OneLog: quando a falha e' TEMPORARIA o proprio worker
+            # reprocessa, e ele informa em `retry_after_seconds` quando isso
+            # acontece. Tentar antes disso so' gera login inutil — o documento
+            # pede explicitamente pra nao reabrir /login nesse caso. Entao a
+            # espera vira o intervalo que o servidor pediu, quando ele e' maior.
+            espera_agora = espera
+            retry_sv = getattr(run, "_onelog_retry_after", None)
+            if retry_sv:
+                espera_agora = max(espera, int(retry_sv))
+                logger.info(
+                    "Distribuídos BB: OneLog pediu %ss até a nova tentativa "
+                    "(run %s) — aguardando isso em vez dos %ss padrão.",
+                    retry_sv, run.id, espera,
+                )
+            if espera_agora:
+                _t.sleep(espera_agora)
     finally:
         db.close()

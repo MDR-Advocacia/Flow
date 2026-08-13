@@ -41,6 +41,10 @@ TIMEOUT_DIAGNOSTICO_SEGUNDOS = 90
 # Veredito
 OK = "OK"
 PROBLEMA = "PROBLEMA"
+# O servidor declarou falha TEMPORARIA e disse que reprocessa sozinho
+# (`retryable` do contrato de clientes). Nao e' problema de infra nossa nem
+# do OneLog estar fora: e' uma espera anunciada. Nao vira alarme.
+TEMPORARIO = "TEMPORARIO"
 INDEFINIDO = "INDEFINIDO"
 
 
@@ -76,6 +80,26 @@ def diagnosticar(*, timeout_segundos: int = TIMEOUT_DIAGNOSTICO_SEGUNDOS) -> dic
             # renovação de segurança...") — é ela que diz de quem é o problema.
             detalhes["segundos"] = round(time.time() - t0, 1)
             detalhes["mensagem_onelog"] = cliente.ultima_mensagem
+            detalhes["retryable"] = getattr(exc, "retryable", False)
+            detalhes["retry_after_seconds"] = getattr(exc, "retry_after_seconds", None)
+            if getattr(cliente, "ultimo_request_id", None):
+                detalhes["request_id"] = cliente.ultimo_request_id
+
+            if getattr(exc, "retryable", False):
+                # Contrato: falha temporária, o worker retoma sozinho. Reportar
+                # como PROBLEMA aqui geraria alarme de infra pra uma espera que
+                # o próprio servidor anunciou.
+                quando = (f" Nova tentativa automática prevista em ~"
+                          f"{exc.retry_after_seconds}s." if exc.retry_after_seconds else "")
+                return {
+                    "veredito": TEMPORARIO,
+                    "resumo": (
+                        "O OneLog sinalizou falha TEMPORÁRIA e vai reprocessar "
+                        f"sozinho.{quando} Último retorno: "
+                        f"\"{cliente.ultima_mensagem or '—'}\"."
+                    ),
+                    "detalhes": detalhes,
+                }
             return {
                 "veredito": PROBLEMA,
                 "resumo": f"O login no OneLog não passou: {exc}",
@@ -140,6 +164,8 @@ def diagnosticar_e_registrar(
     nivel = (
         NIVEL_INFO if veredito == OK
         else NIVEL_ERRO if veredito == PROBLEMA
+        # TEMPORARIO e INDEFINIDO ficam em AVISO: aparecem no Log de tudo,
+        # mas nao gritam como falha de infra.
         else NIVEL_AVISO
     )
     try:
