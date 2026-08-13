@@ -825,6 +825,7 @@ def list_records_grouped(
     polo: Optional[str] = Query(None, description="Filtra por polo indicado (ativo, passivo, ambos)."),
     cnj_search: Optional[str] = Query(None, description="Busca tolerante por CNJ (match por dígitos, ignora máscara)."),
     scheduled_by_user_id: Optional[str] = Query(None, description="CSV de user_ids do operador que cadastrou (Cadastrado por)."),
+    etiqueta: Optional[str] = Query(None, description="CSV de etiquetas do L1 (ex.: BASE NERC,Adverso Réu/Autor)."),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     service: PublicationSearchService = Depends(_get_service),
@@ -843,6 +844,7 @@ def list_records_grouped(
         polo=polo,
         cnj_search=cnj_search,
         scheduled_by_user_id=scheduled_by_user_id,
+        etiqueta=etiqueta,
         limit=limit,
         offset=offset,
     )
@@ -862,6 +864,7 @@ def export_records_grouped(
     polo: Optional[str] = Query(None, description="Filtra por polo indicado (ativo, passivo, ambos)."),
     cnj_search: Optional[str] = Query(None, description="Busca tolerante por CNJ (match por dígitos)."),
     scheduled_by_user_id: Optional[str] = Query(None, description="CSV de user_ids do operador que cadastrou."),
+    etiqueta: Optional[str] = Query(None, description="CSV de etiquetas do L1 (ex.: BASE NERC,Adverso Réu/Autor)."),
     db: Session = Depends(get_db),
 ):
     """
@@ -884,6 +887,7 @@ def export_records_grouped(
         polo=polo,
         cnj_search=cnj_search,
         scheduled_by_user_id=scheduled_by_user_id,
+        etiqueta=etiqueta,
     )
     return Response(
         content=content,

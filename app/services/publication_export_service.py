@@ -244,6 +244,7 @@ def export_records_grouped_xlsx(
     polo: Optional[str] = None,
     cnj_search: Optional[str] = None,
     scheduled_by_user_id: Optional[str] = None,
+    etiqueta: Optional[str] = None,
 ) -> tuple[bytes, str]:
     """Gera o XLSX e devolve ``(bytes, filename)``."""
 
@@ -266,6 +267,7 @@ def export_records_grouped_xlsx(
         polo=polo,
         cnj_search=cnj_search,
         scheduled_by_user_id=scheduled_by_user_id,
+        etiqueta=etiqueta,
     )
 
     records = (
@@ -344,6 +346,7 @@ def export_records_grouped_xlsx(
         ("polo", polo or ""),
         ("cnj_search", cnj_search or ""),
         ("scheduled_by_user_id", scheduled_by_user_id or ""),
+        ("etiqueta", etiqueta or ""),
     ]
     for row_idx, (label, value) in enumerate(meta_rows, start=1):
         meta.cell(row=row_idx, column=1, value=label).font = Font(bold=True)
