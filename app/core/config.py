@@ -355,6 +355,12 @@ class Settings(BaseSettings):
     # (rotação sem downtime). Vazio = endpoint de intake desativado.
     onerequest_intake_api_key: str | None = None
 
+    # ── Intake OneNotify BB (notificações do portal do cliente) ───────
+    # Chave(s) que autenticam o OneNotify no endpoint
+    # /api/v1/onenotify-bb/intake. Aceita múltiplas separadas por vírgula.
+    # Vazio = endpoint de intake desativado.
+    onenotify_bb_intake_api_key: str | None = None
+
     # ── Intake Encerramentos (Sistema de Encerramentos MDR) ───────────
     # Chave(s) que autenticam o Sistema de Encerramentos no endpoint
     # /api/v1/legalone/encerramento (encerrar processo no Legal One).
@@ -607,6 +613,12 @@ class Settings(BaseSettings):
     def onerequest_intake_api_keys(self) -> set[str]:
         """Chaves válidas pro intake do OneRequest (motor RPA externo, rotação)."""
         raw = self.onerequest_intake_api_key or ""
+        return {key.strip() for key in raw.split(",") if key.strip()}
+
+    @property
+    def onenotify_bb_intake_api_keys(self) -> set[str]:
+        """Chaves válidas pro intake do OneNotify BB (rotação)."""
+        raw = self.onenotify_bb_intake_api_key or ""
         return {key.strip() for key in raw.split(",") if key.strip()}
 
     @property

@@ -29,6 +29,7 @@ from app.api.v1.endpoints import (
     ged_legalone,
     offices,
     encerramentos,
+    onenotify_bb,
     onerequest,
     performance,
     prazos_iniciais,
@@ -507,6 +508,10 @@ app.include_router(publications_performance.router, prefix="/api/v1/publications
 # Citações BM — monitoramento de citação via DataJud (CNJ). Seção dentro de
 # Tratamento de Publicações. JWT + permissão publications.
 app.include_router(citacoes_bm.router, prefix="/api/v1/publications", tags=["Citações BM"], dependencies=protected_dependencies)
+# OneNotify BB — notificações do portal do cliente conciliadas com publicações.
+app.include_router(onenotify_bb.router, prefix="/api/v1", dependencies=protected_dependencies)
+# Intake externo do OneNotify BB: auth via X-Onenotify-Api-Key, SEM JWT.
+app.include_router(onenotify_bb.intake_router, prefix="/api/v1")
 # Intake externo: autenticado por API key (header X-Intake-Api-Key), SEM JWT.
 app.include_router(prazos_iniciais.intake_router, prefix="/api/v1")
 # Intake do OneRequest (motor RPA externo): auth via header
