@@ -218,6 +218,8 @@ class PublicationBatchClassifier:
         audiencia_data: Optional[str] = None,
         audiencia_hora: Optional[str] = None,
         audiencia_link: Optional[str] = None,
+        quem_pratica_ato: Optional[str] = None,
+        exige_providencia_nossa: Optional[bool] = None,
     ) -> int:
         """
         Copia a classificação do registro `rec` para os registros "irmãos"
@@ -261,6 +263,11 @@ class PublicationBatchClassifier:
             sib.audiencia_data = audiencia_data
             sib.audiencia_hora = audiencia_hora
             sib.audiencia_link = audiencia_link
+            # pub010 — irmão é a MESMA publicação deduplicada, então de quem é
+            # o ato é o mesmo. Não propagar deixaria o irmão fora da r6 sem
+            # motivo e criaria assimetria entre cópias do mesmo texto.
+            sib.quem_pratica_ato = quem_pratica_ato
+            sib.exige_providencia_nossa = exige_providencia_nossa
             sib.status = RECORD_STATUS_CLASSIFIED
             count += 1
         return count
@@ -763,6 +770,8 @@ class PublicationBatchClassifier:
             classification["audiencia_data"] = clean.audiencia_data
             classification["audiencia_hora"] = clean.audiencia_hora
             classification["audiencia_link"] = clean.audiencia_link
+            classification["quem_pratica_ato"] = clean.quem_pratica_ato
+            classification["exige_providencia_nossa"] = clean.exige_providencia_nossa
 
             polo = clean.polo
             aud_data = clean.audiencia_data
@@ -776,6 +785,11 @@ class PublicationBatchClassifier:
                 rec.audiencia_data = aud_data
                 rec.audiencia_hora = aud_hora
                 rec.audiencia_link = aud_link
+                # pub010 — de quem é o ato. Fica NULL quando a IA não emitiu
+                # ou emitiu fora do enum (o schema descarta com warning); a
+                # regra r6 do shadow simplesmente não dispara nesses casos.
+                rec.quem_pratica_ato = clean.quem_pratica_ato
+                rec.exige_providencia_nossa = clean.exige_providencia_nossa
                 # Natureza do processo: só pra publicações sem pasta vinculada
                 if rec.linked_lawsuit_id is None:
                     rec.natureza_processo = clean.natureza_processo
@@ -798,6 +812,7 @@ class PublicationBatchClassifier:
                 # mesmo dia) que foram descartados pela deduplicação.
                 propagated = self._propagate_to_siblings(
                     rec, cat, sub, polo, aud_data, aud_hora, aud_link,
+                    clean.quem_pratica_ato, clean.exige_providencia_nossa,
                 )
                 if propagated:
                     logger.debug(
