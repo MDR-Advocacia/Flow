@@ -338,6 +338,22 @@ def _tick() -> None:
             logger.exception("Monitor cadastro L1: erro no retry de planilhas órfãs.")
         finally:
             db.close()
+        # Um degrau ANTES do retry acima: run que concluiu a coleta e cujo
+        # auto-cadastro nem chegou a gerar planilha (processo morto no meio por
+        # redeploy — run 143 em 13/08/2026). Sem isto o pool fica parado em NOVO
+        # até alguém reparar na tela. Roda depois do retry de propósito: se a
+        # recuperação gerar planilha e o import falhar, quem assume é o retry,
+        # no tick seguinte.
+        db = SessionLocal()
+        try:
+            from app.services.distribuidos_bb.coleta_service import recuperar_pool_orfao
+
+            recuperar_pool_orfao(db)
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            logger.exception("Monitor cadastro L1: erro na recuperação do pool órfão.")
+        finally:
+            db.close()
 
 
 def register_distribuidos_bb_monitor_cadastro_job(scheduler) -> None:

@@ -112,6 +112,13 @@ def criar_run(
     return run
 
 
+def _sem_identidade(dados: dict[str, Any]) -> bool:
+    """A linha do portal veio sem CNJ e sem NPJ (captura vazia)?"""
+    cnj = norm.normalizar_cnj(dados.get("Processo") or dados.get("cnj"))
+    npj = (dados.get("NPJ") or dados.get("npj") or "").strip() or None
+    return norm.fingerprint(cnj, npj) == "sem-identidade"
+
+
 def _upsert_processo(db: Session, dados: dict[str, Any], run: BbRun) -> BbProcesso:
     """Write-ahead: grava/atualiza o processo (COLETADO) por fingerprint."""
     cnj = norm.normalizar_cnj(dados.get("Processo") or dados.get("cnj"))
@@ -226,6 +233,35 @@ def _processar_notificacao(
     gate_ciencia: bool, coletar_envolvidos: bool,
 ) -> None:
     """Persiste (write-ahead), captura envolvidos, aplica ciência sob gate e distribui."""
+    # CAPTURA VAZIA — aborta ANTES de gravar e ANTES de tocar no botão.
+    #
+    # Sem CNJ e sem NPJ o processo não tem identidade: não dá pra deduplicar,
+    # não dá pra cadastrar no L1 e não dá pra reencontrar a pendência depois.
+    # Pior: com o gate ligado a ciência seria dada assim mesmo e a notificação
+    # sumiria da lista do BB, deixando uma linha fantasma no Flow — foi o que
+    # aconteceu com o processo #1499 em 13/08/2026. Fechando com NÃO, a
+    # pendência FICA no portal e a próxima coleta tenta de novo; se a linha
+    # estiver mesmo quebrada na origem, o erro reaparece a cada coleta, que é
+    # exatamente a visibilidade que faltou.
+    if _sem_identidade(notificacao.dados):
+        _fechar_sem_ciencia(notificacao)
+        run.total_erros += 1
+        registrar_evento(
+            db, secao=SECAO_EXTRACAO, nivel=NIVEL_ERRO, acao="Notificação sem identidade",
+            mensagem=(
+                "Notificação lida sem CNJ e sem NPJ — nada foi gravado e a ciência "
+                "NÃO foi dada (fechada com NÃO, segue pendente no BB). Conferir a "
+                "notificação no portal: provável falha de carregamento da página."
+            ),
+            dados={"raw": notificacao.dados}, run_id=run.id,
+        )
+        # Commit aqui é obrigatório: o laço da coleta dá `db.rollback()` quando
+        # QUALQUER notificação posterior falha, e sem o commit este evento (e o
+        # total_erros) seriam desfeitos junto — a captura vazia voltaria a ser
+        # invisível, que é justamente o que este guarda existe pra impedir.
+        db.commit()
+        return
+
     proc = _upsert_processo(db, notificacao.dados, run)
     run.total_coletados += 1
 
@@ -349,6 +385,96 @@ def _auto_cadastrar(db: Session, run: BbRun) -> None:
         dados={"novos": novos, "planilha_id": planilha.id}, run_id=run.id,
     )
     db.commit()
+
+
+# --- Recuperação do pool órfão -------------------------------------------
+#
+# Janela de graça: run recém-concluído pode estar com o auto-cadastro rodando
+# AGORA (ele leva minutos), e disparar outro em paralelo geraria duas planilhas
+# do mesmo pool.
+_ORFAO_GRACA_MIN = 20
+_ORFAO_IDADE_MAX_H = 72
+# Provas de que o auto-cadastro daquele run já aconteceu — a presença de
+# qualquer uma tira o run da varredura (inclui a retomada manual, senão o run
+# 143, resolvido à mão em 13/08/2026, voltaria a ser candidato).
+_ACOES_CADASTRO_FEITO = (
+    "Auto-cadastro iniciado",
+    "Cadastro retomado manualmente",
+    "Recuperação do pool órfão",
+)
+_ACAO_ORFAO = "Recuperação do pool órfão"
+
+
+def recuperar_pool_orfao(db: Session) -> Optional[int]:
+    """Cadastra o pool que ficou órfão quando o auto-cadastro nem chegou a rodar.
+
+    Caso real (run 143, 13/08/2026): a coleta fechou às 15:10:59 e o container
+    foi substituído por redeploy às 15:15:37 — o `_auto_cadastrar` morreu no
+    meio, sem exceção e sem evento de falha, e 30 processos ficaram
+    DISTRIBUIDO/NOVO. Ninguém percebeu até o operador conferir a tela.
+
+    `retentar_planilhas_orfas` não cobre isso: ela re-tenta planilha gerada e
+    não subida, e aqui a execução parou ANTES de existir planilha.
+
+    Assinatura do órfão: run CONCLUÍDO, com distribuídos, passada a janela de
+    graça, e SEM nenhum evento de auto-cadastro. Só age com o auto-cadastro
+    ligado — desligado, pool NOVO é a escolha do operador, não um órfão.
+
+    Devolve o id do run recuperado, ou None quando não havia o que fazer.
+    """
+    if not settings.distribuidos_bb_auto_cadastro_ativo:
+        return None
+
+    from app.models.distribuidos_bb import BbEvento
+    from app.services.distribuidos_bb.planilha_service import contar_pool_novos
+
+    # Pool vazio → nada a recuperar (uma contagem barata por tick).
+    if contar_pool_novos(db, cliente=CLIENTE_BB) == 0:
+        return None
+
+    agora = datetime.now(timezone.utc)
+    candidatos = (
+        db.query(BbRun)
+        .filter(
+            BbRun.status == RUN_CONCLUIDO,
+            BbRun.total_distribuidos > 0,
+            BbRun.concluido_em <= agora - timedelta(minutes=_ORFAO_GRACA_MIN),
+            BbRun.concluido_em >= agora - timedelta(hours=_ORFAO_IDADE_MAX_H),
+        )
+        .order_by(BbRun.id.desc())
+        .limit(10)
+        .all()
+    )
+    for run in candidatos:
+        feito = (
+            db.query(BbEvento.id)
+            .filter(
+                BbEvento.run_id == run.id,
+                BbEvento.acao.in_(_ACOES_CADASTRO_FEITO),
+            )
+            .first()
+        )
+        if feito is not None:
+            continue
+
+        # Evento ANTES da tentativa: se o import estourar, o run sai da
+        # varredura mesmo assim e o retry de planilha órfã assume daqui.
+        registrar_evento(
+            db, secao=SECAO_CADASTRO, nivel=NIVEL_AVISO, acao=_ACAO_ORFAO,
+            mensagem=(
+                f"O run {run.id} concluiu a coleta mas o auto-cadastro nunca "
+                "rodou (interrupção do processo — tipicamente um redeploy no "
+                "meio). Retomando o cadastro do pool automaticamente."
+            ),
+            dados={"run_id": run.id}, run_id=run.id,
+        )
+        db.commit()
+        logger.warning("Distribuídos BB: recuperando pool órfão do run %s.", run.id)
+        _auto_cadastrar(db, run)
+        db.commit()
+        return run.id
+
+    return None
 
 
 def executar_coleta(
