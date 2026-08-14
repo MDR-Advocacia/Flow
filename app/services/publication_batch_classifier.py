@@ -398,8 +398,9 @@ class PublicationBatchClassifier:
             is_unlinked=True, feedback_examples=fb_global,
         )
 
-        # Monta as requisições do batch
-        batch_requests = []
+        # Monta as requisições do batch. Guarda (custom_id, system, user) e só
+        # materializa o payload depois de decidir se o cache entra.
+        pendentes: list[tuple[str, str, str]] = []
         record_ids: list[int] = []
         for rec in records:
             text = (rec.description or "").strip()
@@ -452,22 +453,61 @@ class PublicationBatchClassifier:
                 office_path=office_path_by_id.get(rec.linked_office_id or 0),
                 office_polo=office_polo_by_id.get(rec.linked_office_id or 0),
             )
-            batch_requests.append(
-                self.ai.build_batch_request(
-                    custom_id=str(rec.id),
-                    system_prompt=prompt,
-                    user_message=user_msg,
-                )
-            )
+            pendentes.append((str(rec.id), prompt, user_msg))
             record_ids.append(rec.id)
 
-        if not batch_requests:
+        if not pendentes:
             raise ValueError("Nenhum registro com texto útil para classificar.")
 
+        # ── Prompt caching ────────────────────────────────────────────────
+        # 92% da entrada deste lote é system prompt (medido no lote 146), e
+        # dentro do lote cada variante é byte-idêntica porque `office_prompts`
+        # memoiza por (escritório, sem-pasta). Cacheando o prefixo, a segunda
+        # requisição em diante paga 10% pelo mesmo texto.
+        #
+        # O aquecimento precisa vir ANTES do envio: na Batches API o acerto é
+        # "melhor esforço" — as 600+ requisições rodam concorrentes e nada
+        # garante que a primeira grave antes das outras lerem.
+        usar_cache = bool(settings.classifier_prompt_cache_enabled)
+        if usar_cache:
+            distintos = list(dict.fromkeys(p for _, p, _ in pendentes))
+            ok = 0
+            for prompt_unico in distintos:
+                r = await self.ai.aquecer_cache(prompt_unico)
+                if r.get("ok"):
+                    ok += 1
+                else:
+                    logger.warning(
+                        "Aquecimento de cache falhou: %s", r.get("erro"),
+                    )
+            if ok == 0:
+                # CANÁRIO: nenhuma gravação passou (TTL recusado, chave sem
+                # permissão, etc.). Manda o lote SEM cache em vez de arriscar
+                # 600+ requisições com um payload que a API está rejeitando.
+                usar_cache = False
+                logger.error(
+                    "Nenhum dos %d prefixos aqueceu — enviando o lote SEM "
+                    "prompt caching (comportamento anterior, sem risco).",
+                    len(distintos),
+                )
+            else:
+                logger.info(
+                    "Prompt caching: %d/%d prefixo(s) aquecido(s) (TTL %s).",
+                    ok, len(distintos), settings.classifier_prompt_cache_ttl,
+                )
+
+        batch_requests = [
+            self.ai.build_batch_request(
+                custom_id=cid, system_prompt=p, user_message=u, cache=usar_cache,
+            )
+            for cid, p, u in pendentes
+        ]
+
         logger.info(
-            "Enviando batch de classificação: %d publicações (solicitante=%s)",
+            "Enviando batch de classificação: %d publicações (solicitante=%s, cache=%s)",
             len(batch_requests),
             requested_by_email or "-",
+            "ligado" if usar_cache else "desligado",
         )
 
         # Envia para a Anthropic
