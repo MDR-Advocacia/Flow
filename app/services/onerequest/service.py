@@ -842,6 +842,27 @@ class OnerequestService:
                 return res[0]
         return None
 
+    def _reresolver(
+        self, solicitacao: OnerequestSolicitacao, client: LegalOneApiClient
+    ) -> Optional[dict]:
+        """Refaz a cascata CNJ -> NPJ ignorando o cache de lawsuit_id.
+
+        Serve pra quando a leitura por id falha: a busca sabe procurar em
+        /Lawsuits E /Litigations, entao costuma achar o que o GET nao achou.
+        Se o id resolvido divergir do que estava em cache, o cache e' corrigido.
+        """
+        law = None
+        if _proc_utilizavel(solicitacao.numero_processo):
+            law = client.search_lawsuit_by_cnj(solicitacao.numero_processo)
+        if not (law and law.get("id")):
+            law = self._resolver_por_npj(client, solicitacao.npj_direcionador)
+        if law and law.get("id"):
+            if law["id"] != solicitacao.linked_lawsuit_id:
+                solicitacao.linked_lawsuit_id = law["id"]
+                self.db.commit()
+            return law
+        return None
+
     def resolver_lawsuit(
         self, solicitacao: OnerequestSolicitacao, client: LegalOneApiClient
     ) -> Optional[dict]:
@@ -851,8 +872,27 @@ class OnerequestService:
         if solicitacao.linked_lawsuit_id:
             try:
                 return client.get_lawsuit_by_id(solicitacao.linked_lawsuit_id)
-            except Exception:
-                return {"id": solicitacao.linked_lawsuit_id}
+            except Exception as exc:
+                # NAO devolver {"id": ...} pelado aqui. O dict sem
+                # `responsibleOfficeId` faz o agendamento levantar "Processo X
+                # sem responsibleOfficeId no L1", que MENTE sobre a causa: a
+                # pasta tem escritorio, o que falhou foi a leitura. Foi assim
+                # que a DMI 2026/0000389451 travou em 14/08/2026 (pasta em
+                # /Litigations, 404 em /Lawsuits — ja' corrigido na raiz pelo
+                # fallback do get_lawsuit_by_id).
+                #
+                # Em vez de degradar, re-resolve pelo caminho de busca, que
+                # sabe procurar nas duas entidades. So' se isso tambem falhar
+                # e' que devolvemos o id pelado, e ai' o erro e' verdadeiro.
+                logger.warning(
+                    "Leitura da pasta %s falhou (%s); re-resolvendo por CNJ/NPJ.",
+                    solicitacao.linked_lawsuit_id, exc,
+                )
+                try:
+                    refeito = self._reresolver(solicitacao, client)
+                except Exception:
+                    refeito = None
+                return refeito or {"id": solicitacao.linked_lawsuit_id}
 
         law = None
         if _proc_utilizavel(solicitacao.numero_processo):

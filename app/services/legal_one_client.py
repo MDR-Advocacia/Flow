@@ -979,11 +979,40 @@ class LegalOneApiClient:
         lawsuit_id: int,
         params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        """Le a pasta por id, tentando /Lawsuits e caindo pra /Litigations.
+
+        O L1 separa as duas entidades e o MESMO id existe em uma OU na outra —
+        pasta que vive em Litigations devolve 404 em /Lawsuits. Toda a busca
+        POR CNJ ja' fazia esse fallback (`search_lawsuits_by_cnj_numbers`), mas
+        a busca POR ID nao fazia, e isso quebrava quem ja' tinha o id em cache.
+
+        Caso real (14/08/2026): a DMI 2026/0000389451 apontava pro id 21522
+        (pasta 'Proc - 0020607/001', escritorio 22, ATIVA). O `GET /Lawsuits/21522`
+        dava 404, o chamador engolia o erro e seguia com um dict sem
+        `responsibleOfficeId` — e o agendamento morria dizendo que a pasta nao
+        tinha escritorio responsavel, quando tinha. Pior: quem colocava o id no
+        cache era o proprio botao "Verificar L1", entao verificar o processo era
+        o que passava a IMPEDIR o agendamento.
+        """
         self.logger.info("Buscando processo ID %s.", lawsuit_id)
-        endpoint = f"/Lawsuits/{lawsuit_id}"
-        url = f"{self.base_url}{endpoint}"
-        response = self._request_with_retry("GET", url, params=params)
-        return response.json()
+        for endpoint in ("/Lawsuits", "/Litigations"):
+            url = f"{self.base_url}{endpoint}/{lawsuit_id}"
+            try:
+                response = self._request_with_retry("GET", url, params=params)
+            except requests.exceptions.HTTPError as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                # 404 aqui significa "nao e' desta entidade" — tenta a outra.
+                # Qualquer outro erro (401, 500...) e' problema de verdade e sobe.
+                if status == 404 and endpoint == "/Lawsuits":
+                    self.logger.info(
+                        "Processo %s nao esta em /Lawsuits; tentando /Litigations.",
+                        lawsuit_id,
+                    )
+                    continue
+                raise
+            return response.json()
+        # Inalcancavel: o ultimo endpoint ou retorna ou levanta.
+        raise RuntimeError(f"Processo {lawsuit_id} nao encontrado em Lawsuits nem Litigations.")
 
     def close_lawsuit(
         self,
