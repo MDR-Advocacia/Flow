@@ -647,17 +647,51 @@ Na duvida real entre "nos" e "parte_adversa", responda "indeterminado".
 NUNCA chute "parte_adversa": essa resposta pode fazer a publicacao ser
 descartada, e prazo perdido nao se recupera — tarefa a mais se cancela.
 
-Exemplos (escritorio de polo PASSIVO, nos somos o reu):
+EXEMPLOS — a fronteira que decide e "expediente" x "determinacao" x "de quem e o prazo".
+
+Mero expediente / ninguem age agora (juizo_expediente):
+  - "Conclusos para sentenca." -> "juizo_expediente", false
+  - "Autos conclusos ao relator." -> "juizo_expediente", false
+  - "Junte-se aos autos. Publique-se." -> "juizo_expediente", false
+  - "Vista ao Ministerio Publico." -> "juizo_expediente", false
+      (o MP age, nao nos — e nao abre prazo nosso)
+  - "Remetam-se os autos ao contador judicial para atualizacao do debito."
+        -> "juizo_expediente", false (auxiliar do juizo age; nos aguardamos)
+  - "Suspendo o processo pelo prazo de 90 dias." -> "juizo_expediente", false
+
+O juizo determinou algo que ALGUEM cumpre (juizo_determina):
+  - "Expeca-se mandado de penhora." -> "juizo_determina", false
+      (a serventia cumpre; nao abre prazo nosso AGORA)
+  - "Cumpra-se o acordao. Oficie-se ao banco depositario." -> "juizo_determina", false
+  - "Intime-se o perito para entrega do laudo em 30 dias." -> "juizo_determina", false
+      (o prazo e do PERITO, nao nosso)
+  - "Defiro a pesquisa via SISBAJUD. Aguarde-se o resultado." -> "juizo_determina", false
+
+CUIDADO 1 — determinacao que abre prazo NOSSO por tabela e "nos":
+  - "Expeca-se alvara em favor do exequente" com POLO ATIVO -> "nos", true
+      (o levantamento e ato NOSSO)
+  - "Cumpra-se a decisao, intimando-se o reu para pagamento em 15 dias" com
+    POLO PASSIVO -> "nos", true (a determinacao tem a NOS como destinatario)
+
+CUIDADO 2 — decurso de prazo muda de dono conforme de quem ERA o prazo:
+  - "Certifico o decurso do prazo sem manifestacao do autor" com POLO PASSIVO
+        -> "parte_adversa", false (o prazo perdido era DELES)
+  - "Certifico o decurso do prazo sem manifestacao do executado" com POLO
+    PASSIVO -> "indeterminado", false (o executado somos NOS — algo ficou sem
+    resposta; nao descarte: deixe o operador ver)
+
+CUIDADO 3 — expediente que sinaliza fase de resultado NAO e descartavel as cegas:
+  - "Transitado em julgado. Arquivem-se." -> "juizo_expediente", false
+  - "Iniciada a fase de cumprimento de sentenca. Intimem-se." -> "nos", true
+      (o "intimem-se" alcanca as partes — nos inclusive)
+
+Exemplos basicos (escritorio de polo PASSIVO, nos somos o reu):
   - "Intime-se o autor para manifestar em 15 dias"
         -> quem_pratica_ato: "parte_adversa", exige_providencia_nossa: false
   - "Intimem-se as partes da pericia designada"
         -> quem_pratica_ato: "nos", exige_providencia_nossa: true
   - "Cite-se o reu para contestar"
         -> quem_pratica_ato: "nos", exige_providencia_nossa: true
-  - "Conclusos para sentenca"
-        -> quem_pratica_ato: "juizo_expediente", exige_providencia_nossa: false
-  - "Junte-se aos autos. Publique-se."
-        -> quem_pratica_ato: "juizo_expediente", exige_providencia_nossa: false
 """
 
 
