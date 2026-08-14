@@ -967,7 +967,12 @@ class PublicationBatchClassifier:
                 "cache_creation_tokens": batch.usage_cache_creation_tokens,
                 "itens_contados": batch.usage_itens_contados,
             },
-            "custo": self._custo_do_batch(batch),
+            # Referência pela CLASSE, não por `self`: batch_to_dict é
+            # @staticmethod e não recebe self — o `self.` aqui derrubou a
+            # listagem de lotes da UI com NameError em 14/08 (o 500 era
+            # engolido pelo catch silencioso do front, que mostrava
+            # "nenhum lote enviado" com 146 lotes no banco).
+            "custo": PublicationBatchClassifier._custo_do_batch(batch),
         }
 
     @staticmethod
