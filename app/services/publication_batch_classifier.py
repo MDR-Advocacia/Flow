@@ -29,6 +29,7 @@ from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.classification import CLF_ITEM_FAILED, CLF_ITEM_SUCCESS
 from app.models.publication_batch import (
     ANTHROPIC_STATUS_ENDED,
