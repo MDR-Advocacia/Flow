@@ -66,6 +66,12 @@ def capturar_manha(db: Session) -> dict:
             WHERE t.l1_task_id IS NOT NULL
               AND t.status = 'Pendente'
               AND t.prazo_previsto IS NOT NULL
+              -- Só tarefa com dono conhecido. Desde 17/08/2026 o snapshot
+              -- guarda também pendente fora do roster (pessoa_id nulo), pra
+              -- não cegar o cancelamento de duplicadas; aqui elas NÃO entram,
+              -- porque este módulo mede adiamento POR PESSOA/EQUIPE e linha
+              -- sem dono viraria registro órfão na tela.
+              AND t.pessoa_id IS NOT NULL
             ORDER BY t.l1_task_id
             """
         ),

@@ -206,8 +206,23 @@ def seed_tarefas(db, name_to_id: dict, agenda_path: str = AGENDA_XLSX) -> int:
             env = norm(r[ENV]) if len(r) > ENV else ""
             # Cumprido -> executor (Cumprido por); Pendente -> responsável (Envolvido).
             pid = name_to_id.get(cumpr) if status == "Cumprido" else name_to_id.get(env)
-            if not pid:
-                continue  # fora do roster = ruído (escopo: só a planilha)
+            # O roster filtra ATRIBUIÇÃO, não EXISTÊNCIA.
+            #
+            # Cumprido fora do roster continua sendo descartado: produção que
+            # não dá pra creditar a ninguém do time é ruído pras métricas de
+            # produtividade, que é pra isso que o roster existe.
+            #
+            # Pendente fora do roster ENTRA (com pessoa_id nulo). Tarefa aberta
+            # numa pasta é um FATO, independente de quem responde por ela — e
+            # descartá-la cegava o cancelamento de duplicadas, que só precisa de
+            # pasta + subtipo + status. Media em 17/08/2026: o relatório trazia
+            # 12.907 pendentes e o snapshot ficava com 11.587; as ~1.320
+            # perdidas escondiam 14 pastas com habilitação duplicada do Banco
+            # Master, que a operação via abertas no L1 enquanto o Flow jurava
+            # "0 candidatos". Todas as 19 conferidas contra o L1 estavam no
+            # relatório — o dado nunca faltou, a gente é que jogava fora.
+            if not pid and status == "Cumprido":
+                continue
             batch.append(
                 PerfTarefa(
                     pessoa_id=pid,
