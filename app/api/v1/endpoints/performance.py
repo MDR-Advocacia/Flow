@@ -576,3 +576,51 @@ def roster_excluir(
     if out is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pessoa não encontrada.")
     return out
+
+
+# ── Análise de Risco BB Réu (aba extra do time bb-reu) ────────────────────
+# Espelho persistente das tarefas do subtipo (fonte: perf_l1_tarefa do Agenda
+# Analytics) + esteira de verificação no portal BB. Gate: mesmo `_team` das
+# demais rotas — o front sempre chama com team=bb-reu.
+
+
+@router.get(
+    "/analise-risco",
+    summary="Painel Análise de Risco: tarefas do subtipo com status L1 + verificação no portal",
+    dependencies=[_team],
+)
+def analise_risco_listar(
+    team: str = Query(...),
+    status_l1: Optional[str] = Query(None, description="Pendente | Cumprido"),
+    responsavel: Optional[str] = Query(None),
+    divergente: Optional[bool] = Query(None),
+    busca: Optional[str] = Query(None, description="NPJ, CNJ ou responsável"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    from app.services.analise_risco import service as ar_service
+
+    # Mantém o painel fresco sem worker: re-sincroniza do espelho se passou da
+    # janela (barato — só tabelas locais). Falha de sync nunca derruba o GET.
+    ar_service.sync_se_stale(db)
+    return ar_service.listar(
+        db,
+        status_l1=status_l1,
+        responsavel=responsavel,
+        divergente=divergente,
+        busca=busca,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post(
+    "/analise-risco/sync",
+    summary="Força o sync do espelho de Análise de Risco agora",
+    dependencies=[_team],
+)
+def analise_risco_sync(team: str = Query(...), db: Session = Depends(get_db)):
+    from app.services.analise_risco import service as ar_service
+
+    return ar_service.sync_do_espelho(db)

@@ -69,6 +69,7 @@ from .citacoes_bm import (
     CitacaoBMProcesso,
 )
 from .onerequest import OnerequestAnotacao, OnerequestSolicitacao
+from .analise_risco import AnaliseRiscoTarefa
 from .onenotify_bb import OneNotifyBBNotification
 from .analise_recursal import (
     AnaliseRecursal,

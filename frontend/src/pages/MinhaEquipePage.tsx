@@ -27,6 +27,7 @@ import {
   Search,
   UserCog,
   Users,
+  ShieldAlert,
 } from "lucide-react";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -64,6 +65,7 @@ import BalanceadorSection from "@/components/performance/BalanceadorSection";
 import ReagendamentosSection from "@/components/performance/ReagendamentosSection";
 import RedistribuicoesLog from "@/components/balanceador/RedistribuicoesLog";
 import AcompanhamentoVinculosTab from "@/components/distribuidos-bb/AcompanhamentoVinculosTab";
+import AnaliseRiscoTab from "@/components/minha-equipe/AnaliseRiscoTab";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/hooks/useAuth";
 import {
@@ -199,6 +201,10 @@ export default function MinhaEquipePage() {
   // Equipe Mista tem uma aba extra com a base de processos vinculados.
   const ehMista = team === "equipe-mista";
   const [abaMista, setAbaMista] = useState<"desempenho" | "base">("desempenho");
+  // BB Réu tem a aba "Análise de Risco": tarefas do subtipo espelhadas do L1
+  // com a verificação no portal BB (cumprida no L1 != análise feita no banco).
+  const ehBbReu = team === "bb-reu";
+  const [abaBbReu, setAbaBbReu] = useState<"desempenho" | "analise-risco">("desempenho");
 
   // Estado GLOBAL da atualização (vem do servidor): true = alguém está
   // atualizando AGORA (qualquer equipe, qualquer usuário). Trava o botão e
@@ -427,6 +433,30 @@ export default function MinhaEquipePage() {
         </Tabs>
       ) : null}
 
+      {ehBbReu ? (
+        <Tabs value={abaBbReu} onValueChange={(v) => setAbaBbReu(v as "desempenho" | "analise-risco")}>
+          <TabsList>
+            <TabsTrigger value="desempenho">
+              <Gauge className="mr-1.5 h-4 w-4" /> Desempenho
+            </TabsTrigger>
+            <TabsTrigger value="analise-risco">
+              <ShieldAlert className="mr-1.5 h-4 w-4" /> Análise de Risco
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
+      ) : null}
+
+      {ehBbReu && abaBbReu === "analise-risco" && (
+        <div className="space-y-3">
+          <p className="text-sm text-muted-foreground">
+            Tarefas de <strong>Análise de Risco</strong> agendadas pro time (espelhadas do Legal One)
+            e a conferência no portal do BB se a análise foi <strong>realmente registrada</strong> —
+            tarefa cumprida no L1 sem análise no portal aparece como <strong>divergente</strong>.
+          </p>
+          <AnaliseRiscoTab team={team} />
+        </div>
+      )}
+
       {ehMista && abaMista === "base" && (
         <div className="space-y-3">
           <p className="text-sm text-muted-foreground">
@@ -438,7 +468,7 @@ export default function MinhaEquipePage() {
         </div>
       )}
 
-      {(!ehMista || abaMista === "desempenho") && (
+      {(!ehMista || abaMista === "desempenho") && (!ehBbReu || abaBbReu === "desempenho") && (
       <>
       <CollapsibleSection title="Desempenho da equipe" subtitle={`Últimos ${days} dias`}>
       {/* KPIs */}
