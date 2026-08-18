@@ -23,8 +23,10 @@ from sqlalchemy.orm import Session
 
 from app.models.analise_risco import (
     AnaliseRiscoTarefa,
+    VERIF_ERRO,
     VERIF_NA_FILA,
     VERIF_PENDENTE,
+    VERIF_VERIFICADA,
 )
 from app.models.performance import PerfTarefa
 from app.services.app_settings import get_setting, set_setting
@@ -123,6 +125,34 @@ def sync_do_espelho(db: Session) -> dict:
     }
     logger.info("Análise de Risco sync: %s", resultado)
     return resultado
+
+
+def aplicar_verificacao(
+    row: AnaliseRiscoTarefa,
+    *,
+    pendencia_aberta: bool,
+    estado: Optional[str] = None,
+    exito: Optional[str] = None,
+) -> None:
+    """Grava o resultado de UMA verificação no portal. Regra única (worker
+    interno e intake do RPA externo aplicam a mesma): pendência aberta depois
+    da tarefa cumprida = análise NÃO feita = divergente."""
+    row.portal_analise_feita = not pendencia_aberta
+    row.portal_estado = estado
+    row.portal_exito = exito
+    row.divergente = pendencia_aberta
+    row.verif_status = VERIF_VERIFICADA
+    row.verif_ultimo_erro = None
+    row.portal_verificado_em = _agora()
+
+
+def aplicar_erro_verificacao(row: AnaliseRiscoTarefa, erro: str) -> None:
+    """Falha de verificação: fica na fila (status ERRO) e vai pro fim do
+    round-robin — o próximo ciclo re-tenta."""
+    row.verif_status = VERIF_ERRO
+    row.verif_tentativas = (row.verif_tentativas or 0) + 1
+    row.verif_ultimo_erro = (erro or "erro não informado")[:500]
+    row.portal_verificado_em = _agora()
 
 
 def sync_se_stale(db: Session) -> Optional[dict]:

@@ -81,6 +81,17 @@ export async function listarAnaliseRisco(
   return json(await apiFetch(`${BASE}?${qs.toString()}`));
 }
 
+export async function reverificarAnaliseRisco(
+  id: number,
+  team: string,
+): Promise<{ ok: boolean; verif_status: string }> {
+  return json(
+    await apiFetch(`${BASE}/${id}/reverificar?team=${encodeURIComponent(team)}`, {
+      method: "POST",
+    }),
+  );
+}
+
 export async function syncAnaliseRisco(team: string): Promise<{
   fonte: number;
   tarefas: number;

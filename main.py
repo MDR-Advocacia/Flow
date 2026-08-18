@@ -48,6 +48,7 @@ from app.api.v1.endpoints import (
     varredura,
     cargos,
     uso,
+    analise_risco_intake,
 )
 from app.core import auth as auth_security
 from app.core.config import settings
@@ -509,6 +510,19 @@ async def lifespan(_: FastAPI):
             "Falha ao registrar o monitor de cadastro L1 Distribuídos BB no startup."
         )
 
+    # Análise de Risco BB Réu: esteira que confere no portal do BB se a análise
+    # foi realmente feita quando a tarefa é cumprida no L1 (sessão OneLog).
+    try:
+        from app.services.analise_risco.portal_verify_worker import (
+            register_analise_risco_verify_job,
+        )
+
+        register_analise_risco_verify_job(scheduler)
+    except Exception:
+        logger.exception(
+            "Falha ao registrar a esteira de verificação da Análise de Risco no startup."
+        )
+
     # Ativos: a consulta ao DataJud acontece SÓ na ingestão (decisão do operador
     # 2026-07-17: sem worker recorrente depois do cadastro — o que o DataJud não
     # tiver na hora, fica com o dado da planilha e pronto).
@@ -600,6 +614,9 @@ app.include_router(onenotify_bb.router, prefix="/api/v1", dependencies=protected
 app.include_router(onenotify_bb.intake_router, prefix="/api/v1")
 # Intake externo: autenticado por API key (header X-Intake-Api-Key), SEM JWT.
 app.include_router(prazos_iniciais.intake_router, prefix="/api/v1")
+# Intake do RPA de Análise de Risco BB Réu (servidor AWS): auth via header
+# X-AnaliseRisco-Api-Key, SEM JWT. Entrega a fila e recebe os vereditos do portal.
+app.include_router(analise_risco_intake.intake_router, prefix="/api/v1")
 # Intake do OneRequest (motor RPA externo): auth via header
 # X-Onerequest-Api-Key, SEM JWT. Recebe números/detalhes das DMIs do BB.
 app.include_router(onerequest.intake_router, prefix="/api/v1")

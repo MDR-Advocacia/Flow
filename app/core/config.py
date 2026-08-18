@@ -365,6 +365,12 @@ class Settings(BaseSettings):
     # (rotação sem downtime). Vazio = endpoint de intake desativado.
     onerequest_intake_api_key: str | None = None
 
+    # ── Intake Análise de Risco BB Réu (RPA externo na AWS) ───────────
+    # Chave(s) que autenticam o RPA que verifica a análise no portal BB e
+    # devolve o resultado em /api/v1/analise-risco/intake/*. Aceita múltiplas
+    # separadas por vírgula. Vazio = endpoint de intake desativado.
+    analise_risco_intake_api_key: str | None = None
+
     # ── Intake OneNotify BB (notificações do portal do cliente) ───────
     # Chave(s) que autenticam o OneNotify no endpoint
     # /api/v1/onenotify-bb/intake. Aceita múltiplas separadas por vírgula.
@@ -496,6 +502,16 @@ class Settings(BaseSettings):
     distribuidos_bb_vinculos_ativo: bool = True
     # Base dos endpoints JSON do PAJ (mesma origem do portal).
     distribuidos_bb_paj_base: str = "https://juridico.bb.com.br/paj"
+
+    # ── Análise de Risco BB Réu: esteira de verificação no portal ──
+    # Tarefa cumprida no L1 entra na fila; quem consome é o RPA EXTERNO no
+    # servidor AWS (via /analise-risco/intake/*, decisão do supervisor — o
+    # acesso ao portal não sai do Coolify). Este flag liga o worker INTERNO
+    # (fallback via OneLog) — manter False com o RPA externo ativo, senão os
+    # dois disputam a mesma fila.
+    analise_risco_verificacao_ativa: bool = False
+    analise_risco_verificacao_intervalo_min: int = 10
+    analise_risco_verificacao_lote: int = 50
 
 
     # Cadastro 100% automático: ao fim de uma coleta com processos distribuídos,
@@ -629,6 +645,12 @@ class Settings(BaseSettings):
     def onenotify_bb_intake_api_keys(self) -> set[str]:
         """Chaves válidas pro intake do OneNotify BB (rotação)."""
         raw = self.onenotify_bb_intake_api_key or ""
+        return {key.strip() for key in raw.split(",") if key.strip()}
+
+    @property
+    def analise_risco_intake_api_keys(self) -> set[str]:
+        """Chaves válidas pro intake do RPA de Análise de Risco (rotação)."""
+        raw = self.analise_risco_intake_api_key or ""
         return {key.strip() for key in raw.split(",") if key.strip()}
 
     @property

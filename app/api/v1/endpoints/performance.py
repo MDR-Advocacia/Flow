@@ -624,3 +624,21 @@ def analise_risco_sync(team: str = Query(...), db: Session = Depends(get_db)):
     from app.services.analise_risco import service as ar_service
 
     return ar_service.sync_do_espelho(db)
+
+
+@router.post(
+    "/analise-risco/{tarefa_id}/reverificar",
+    summary="Re-enfileira a tarefa pra nova verificação no portal BB",
+    dependencies=[_team],
+)
+def analise_risco_reverificar(
+    tarefa_id: int, team: str = Query(...), db: Session = Depends(get_db)
+):
+    from app.models.analise_risco import AnaliseRiscoTarefa, VERIF_NA_FILA
+
+    row = db.query(AnaliseRiscoTarefa).filter(AnaliseRiscoTarefa.id == tarefa_id).first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tarefa não encontrada.")
+    row.verif_status = VERIF_NA_FILA
+    db.commit()
+    return {"ok": True, "verif_status": row.verif_status}

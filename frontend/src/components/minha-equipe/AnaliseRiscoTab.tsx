@@ -29,6 +29,7 @@ import {
   AnaliseRiscoItem,
   AnaliseRiscoResponse,
   listarAnaliseRisco,
+  reverificarAnaliseRisco,
   syncAnaliseRisco,
 } from "@/services/analise-risco";
 
@@ -122,6 +123,16 @@ export default function AnaliseRiscoTab({ team }: { team: string }) {
   useEffect(() => {
     load();
   }, [load]);
+
+  const reverificar = async (id: number) => {
+    try {
+      await reverificarAnaliseRisco(id, team);
+      toast({ title: "Na fila", description: "A tarefa será re-verificada no portal no próximo ciclo." });
+      await load();
+    } catch (e) {
+      toast({ title: "Erro ao re-enfileirar", description: String((e as Error).message), variant: "destructive" });
+    }
+  };
 
   const forcarSync = async () => {
     setSyncing(true);
@@ -264,7 +275,22 @@ export default function AnaliseRiscoTab({ team }: { team: string }) {
                         <Badge variant="outline">{item.status_l1 || "—"}</Badge>
                       )}
                     </TableCell>
-                    <TableCell><VerificacaoBadge item={item} /></TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1.5">
+                        <VerificacaoBadge item={item} />
+                        {item.status_l1 === "Cumprido" && item.verif_status !== "NA_FILA" && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6"
+                            title="Re-verificar no portal BB (entra na fila da esteira)"
+                            onClick={() => reverificar(item.id)}
+                          >
+                            <RefreshCw className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                      </div>
+                    </TableCell>
                   </TableRow>
                 ))
               )}
