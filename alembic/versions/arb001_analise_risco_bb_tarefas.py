@@ -3,14 +3,14 @@ das tarefas do subtipo + campos da esteira de verificação no portal BB e do
 tratamento de divergência pelo supervisor).
 
 Revision ID: arb001_analise_risco_bb
-Revises: onb001_onenotify_bb
+Revises: pub010_quem_pratica_ato
 """
 
 import sqlalchemy as sa
 from alembic import op
 
 revision = "arb001_analise_risco_bb"
-down_revision = "onb001_onenotify_bb"
+down_revision = "pub010_quem_pratica_ato"
 branch_labels = None
 depends_on = None
 
