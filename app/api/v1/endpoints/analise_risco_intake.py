@@ -7,6 +7,10 @@ resultado. Autenticação por API key no header `X-AnaliseRisco-Api-Key`
 (env ANALISE_RISCO_INTAKE_API_KEY, CSV pra rotação) — mesmo padrão do intake
 do OneRequest. Registrado SEM protected_dependencies em main.py.
 
+O RPA vive no repo próprio (github.com/MDR-Advocacia/RPA_AnaliseRisco),
+deployado pelo Coolify do servidor de testes. Mudou o contrato aqui?
+Atualiza o README de lá junto.
+
 Contrato:
   GET  /analise-risco/intake/fila?limit=N
        -> {"total": <tamanho da fila>, "itens": [{id, l1_task_id, npj, cnj,
