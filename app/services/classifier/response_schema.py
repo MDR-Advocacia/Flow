@@ -73,6 +73,19 @@ _AUDIENCIA_CATEGORIES = {"Audiências", "Audiência Agendada"}
 # evitar inflar a arvore principal com uma cat por sistema.
 _VALID_SISTEMAS = {"SISBAJUD", "RENAJUD", "INFOJUD", "SNIPER", "CCS", "CNIB", "OUTRO"}
 
+# pub010 — de quem é o ato. O `juizo` aparece SEPARADO em dois porque medir
+# ensinou: como balde único ele era 44% do volume com 35% de pureza (moeda ao
+# ar), e tê-lo tratado como descartável derrubou a primeira versão da regra
+# (falso-ignorar de 46,6%). A separação é hipótese ainda não validada —
+# nenhuma regra a usa hoje; ela existe pra o próximo lote poder medi-la.
+_VALID_QUEM_PRATICA = {
+    "nos",               # nós temos que fazer algo
+    "parte_adversa",     # quem tem que agir é a parte contrária
+    "juizo_expediente",  # conclusos / mero expediente — ninguém age agora
+    "juizo_determina",   # o juízo determinou algo que alguém deve cumprir
+    "indeterminado",     # o texto não permite dizer
+}
+
 
 @dataclass
 class CleanClassification:
@@ -94,6 +107,11 @@ class CleanClassification:
     # bloqueio patrimonial o texto cita (SISBAJUD, RENAJUD, INFOJUD,
     # SNIPER, CCS, CNIB, OUTRO). Null quando nao aplicavel ou ausente.
     sistema_mencionado: Optional[str] = None
+    # pub010 — de quem é o ato. Campo separado da `categoria` de propósito:
+    # a categoria diz o ASSUNTO, este diz QUEM AGE, e a medição mostrou que
+    # 83% dos erros do shadow vinham de nunca perguntarmos o segundo.
+    quem_pratica_ato: Optional[str] = None
+    exige_providencia_nossa: Optional[bool] = None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -258,6 +276,33 @@ def validate_response(payload: Any) -> CleanClassification:
     else:
         sistema_mencionado = None
 
+    # pub010 — quem pratica o ato. Fechado no enum: valor fora dele vira None
+    # e a `r6` não dispara. Preferir NÃO decidir a decidir com vocabulário que
+    # não medimos — a regra só ignora publicação, e ignorar errado perde prazo.
+    quem_raw = (_coerce_str(payload.get("quem_pratica_ato")) or "").lower()
+    quem_pratica_ato: Optional[str]
+    if quem_raw in _VALID_QUEM_PRATICA:
+        quem_pratica_ato = quem_raw
+    else:
+        if quem_raw:
+            warnings.append(
+                f"quem_pratica_ato='{quem_raw}' fora do enum — descartado"
+            )
+        quem_pratica_ato = None
+
+    # Só aceita booleano de verdade. String "true"/"sim" não é coagida: um
+    # false inventado por coerção frouxa mandaria a publicação pro descarte.
+    exige_raw = payload.get("exige_providencia_nossa")
+    exige_providencia_nossa: Optional[bool]
+    if isinstance(exige_raw, bool):
+        exige_providencia_nossa = exige_raw
+    else:
+        if exige_raw is not None:
+            warnings.append(
+                f"exige_providencia_nossa não-booleano ({exige_raw!r}) — descartado"
+            )
+        exige_providencia_nossa = None
+
     return CleanClassification(
         categoria=categoria,
         subcategoria=subcategoria,
@@ -272,5 +317,7 @@ def validate_response(payload: Any) -> CleanClassification:
         justificativa=justificativa,
         natureza_processo=natureza_processo,
         sistema_mencionado=sistema_mencionado,
+        quem_pratica_ato=quem_pratica_ato,
+        exige_providencia_nossa=exige_providencia_nossa,
         warnings=warnings,
     )

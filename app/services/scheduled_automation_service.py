@@ -394,10 +394,21 @@ class ScheduledAutomationService:
                                 message=f"Etapa {step_idx}/{total_steps}: Classificando publicações",
                             )
                             result = self._execute_classify(automation.office_ids, run_id=run_id)
+                            # `_execute_classify` NÃO levanta: ele captura a
+                            # exceção e devolve {"error": ...}. Marcar "success"
+                            # fixo aqui foi o que escondeu, de 15 a 17/08/2026,
+                            # um NameError que derrubou TODA classificação: a
+                            # automação gravou `success` por 3 noites seguidas
+                            # enquanto 612 publicações se acumulavam sem
+                            # ninguém receber alerta. Quem chama um método que
+                            # devolve erro em vez de levantar precisa olhar o
+                            # que voltou.
+                            erro_classify = result.get("error")
                             steps_executed.append({
                                 "step": "classify",
-                                "status": "success",
+                                "status": "failed" if erro_classify else "success",
                                 "records_classified": result.get("records_classified", 0),
+                                **({"error": erro_classify} if erro_classify else {}),
                             })
                     elif step == "treat_publications":
                         self._update_progress(
@@ -433,19 +444,40 @@ class ScheduledAutomationService:
                         "error": str(e),
                     })
 
-            # Update run and automation
-            run.status = "success"
+            # Etapa que falhou tem que aparecer NO ESTADO DA AUTOMAÇÃO. Antes,
+            # o laço registrava a falha só dentro de `steps_executed` (que
+            # ninguém lê no dia a dia) e a automação gravava `success` do mesmo
+            # jeito — foi assim que o NameError da classificação passou 3
+            # noites despercebido, com o painel dizendo "sucesso" enquanto 612
+            # publicações se acumulavam.
+            falhas = [s for s in steps_executed if s.get("status") == "failed"]
+            resumo_falhas = "; ".join(
+                f"{s['step']}: {s.get('error', 'erro não detalhado')}" for s in falhas
+            )
+
+            run.status = "failed" if falhas else "success"
+            run.error_message = resumo_falhas or None
             run.steps_executed = steps_executed
             run.finished_at = datetime.now(timezone.utc)
             run.progress_phase = "done"
-            run.progress_message = "Execução concluída"
+            run.progress_message = (
+                f"Concluída com {len(falhas)} etapa(s) com falha" if falhas
+                else "Execução concluída"
+            )
             run.progress_updated_at = datetime.now(timezone.utc)
 
             automation.last_run_at = datetime.now(timezone.utc)
-            automation.last_status = "success"
-            automation.last_error = None
+            automation.last_status = "failed" if falhas else "success"
+            automation.last_error = resumo_falhas or None
 
-            logger.info("Automation %d completed successfully", automation_id)
+            if falhas:
+                logger.error(
+                    "Automation %d terminou com %d etapa(s) falha(s): %s",
+                    automation_id, len(falhas), resumo_falhas,
+                )
+                self._alertar_etapas_falhas(automation, falhas)
+            else:
+                logger.info("Automation %d completed successfully", automation_id)
         except Exception as e:
             logger.error("Automation %d failed: %s", automation_id, e)
             run.status = "failed"
@@ -931,6 +963,44 @@ class ScheduledAutomationService:
             "offices_failed": failed,
             "offices_skipped": skipped,
         }
+
+    def _alertar_etapas_falhas(self, automation, falhas: List[Dict[str, Any]]) -> None:
+        """Avisa por e-mail que uma etapa do job noturno falhou.
+
+        Best-effort: qualquer erro aqui é engolido — alertar não pode derrubar
+        o registro da falha. Reusa o mesmo sender do alerta de batch.
+
+        Existe porque falha silenciosa custou 3 dias de classificação parada em
+        agosto/2026: o log tinha o traceback, mas ninguém lê log de container
+        sem motivo — o aviso precisa ir atrás da pessoa.
+        """
+        try:
+            from app.services.mail_service import send_failure_report
+
+            destinatarios = (
+                settings.classificacao_alert_email
+                or settings.mail_to
+                or settings.email_to
+            )
+            if not destinatarios:
+                logger.warning(
+                    "Automação %s falhou em %d etapa(s), mas não há destinatário "
+                    "de alerta configurado.", automation.id, len(falhas),
+                )
+                return
+            send_failure_report(
+                failed_items=[{
+                    "cnj": f"Automação '{automation.name}' · etapa {s['step']}",
+                    "motivo": str(s.get("error", "erro não detalhado"))[:1500],
+                    "execution_id": automation.id,
+                } for s in falhas],
+                batch_source=f"Job agendado de publicações · {automation.name}",
+                recipients=destinatarios,
+                system_name="Flow",
+            )
+            logger.info("Alerta de etapa com falha enviado (automação %s).", automation.id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao enviar alerta de etapa (ignorado).")
 
     def _verificar_cobertura(self, office_ids_varridos) -> None:
         try:

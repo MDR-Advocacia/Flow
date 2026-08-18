@@ -173,6 +173,16 @@ class Settings(BaseSettings):
     classifier_model: str = "claude-haiku-4-5-20251001"
     classifier_max_concurrent: int = 5
     classifier_max_tokens: int = 4096
+    # Prompt caching do classificador de publicações. Medido no lote 146
+    # (14/08/2026): 92% da entrada é system prompt, então cachear o prefixo
+    # corta ~74% do custo do lote. Fica como flag porque mexe no payload de
+    # produção — desligar volta ao comportamento anterior sem redeploy.
+    classifier_prompt_cache_enabled: bool = True
+    # TTL do cache. "1h" é o certo aqui: o lote leva 3–5 min e o relógio do TTL
+    # começa no INÍCIO da requisição, não no fim, então 5m corre risco de
+    # expirar no meio. A gravação de 1h custa 2x a entrada base contra 1,25x da
+    # de 5m — irrelevante em 9 gravações por lote.
+    classifier_prompt_cache_ttl: str = "1h"
 
     # ── Prazos Iniciais ───────────────────────────────────────────────
     # Chave(s) que autenticam a automação externa no endpoint de intake.

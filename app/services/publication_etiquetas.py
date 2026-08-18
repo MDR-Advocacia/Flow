@@ -171,6 +171,34 @@ def etiquetas_por_lawsuit(db: Session, lawsuit_ids: list[int]) -> dict[int, list
     return out
 
 
+def etiquetas_distintas(db: Session) -> list[str]:
+    """Vocabulário de etiquetas que existe no cache — alimenta o filtro da tela.
+
+    Global de propósito, diferente de `available_ufs`/`available_scheduled_by`
+    (que se recalculam a cada filtro): etiqueta é CATÁLOGO do L1, não um valor
+    que emerge dos dados da busca. O operador tem que enxergar o vocabulário
+    inteiro pra saber o que dá pra filtrar — inclusive etiqueta que, com os
+    filtros atuais, não devolveria nada.
+
+    Ordena por frequência (o que a operação mais usa aparece primeiro) e
+    desempata por nome. Hoje são 8 nomes distintos em ~8,8k processos no cache.
+    """
+    try:
+        rows = db.execute(text(
+            "SELECT e->>'name' AS nome, count(DISTINCT c.lawsuit_id) AS qtd "
+            "FROM pub_l1_etiqueta_cache c, "
+            "     LATERAL jsonb_array_elements(CAST(c.etiquetas AS jsonb)) e "
+            "WHERE e->>'name' IS NOT NULL AND btrim(e->>'name') <> '' "
+            "GROUP BY 1 ORDER BY 2 DESC, 1"
+        )).fetchall()
+    except Exception:  # noqa: BLE001
+        # Não derruba a listagem por causa do dropdown (ex.: SQLite nos testes,
+        # que não tem jsonb_array_elements).
+        logger.exception("Falha ao listar etiquetas distintas (ignorado).")
+        return []
+    return [r[0] for r in rows if r[0]]
+
+
 def _job_tick() -> None:
     from app.db.session import SessionLocal
 

@@ -2375,6 +2375,7 @@ class PublicationSearchService:
         polo: Optional[str] = None,
         cnj_search: Optional[str] = None,
         scheduled_by_user_id: Optional[str] = None,
+        etiqueta: Optional[str] = None,
     ):
         """Query base reutilizada por list_records_grouped e contagens."""
         query = self.db.query(PublicationRecord).filter(PublicationRecord.is_duplicate == False)  # noqa: E712
@@ -2462,6 +2463,26 @@ class PublicationSearchService:
                         r"\D", "", "g",
                     ).like(f"%{digits}%")
                 )
+        # Etiqueta (tag do L1). Diferente de todos os filtros acima, ela NÃO é
+        # coluna de publicacao_registros: a API REST do L1 não expõe etiqueta,
+        # então ela vive no cache `pub_l1_etiqueta_cache`, por processo, como
+        # lista JSON. Daí o EXISTS correlacionado em vez de um `filter` simples.
+        #
+        # Consequência que o operador precisa saber: filtrar por etiqueta
+        # esconde publicação sem pasta vinculada (avulsa) e processo que o job
+        # de enriquecimento ainda não visitou — não é "sem etiqueta", é "sem
+        # informação". Por isso o filtro só entra quando pedido.
+        etiquetas = _parse_csv_strs(etiqueta)
+        if etiquetas:
+            query = query.filter(
+                PublicationRecord.linked_lawsuit_id.isnot(None),
+                sa.text(
+                    "EXISTS (SELECT 1 FROM pub_l1_etiqueta_cache c, "
+                    "LATERAL jsonb_array_elements(CAST(c.etiquetas AS jsonb)) e "
+                    "WHERE c.lawsuit_id = publicacao_registros.linked_lawsuit_id "
+                    "AND e->>'name' = ANY(:etq_nomes))"
+                ).bindparams(etq_nomes=etiquetas),
+            )
         return query
 
     @staticmethod
@@ -2544,6 +2565,7 @@ class PublicationSearchService:
         polo: Optional[str] = None,
         cnj_search: Optional[str] = None,
         scheduled_by_user_id: Optional[str] = None,
+        etiqueta: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -2562,6 +2584,7 @@ class PublicationSearchService:
             vinculo=vinculo, natureza=natureza,
             polo=polo, cnj_search=cnj_search,
             scheduled_by_user_id=scheduled_by_user_id,
+            etiqueta=etiqueta,
         )
 
         # ─── Etapa 1: contar e paginar grupos (lawsuit_ids distintos) ───
@@ -2612,6 +2635,7 @@ class PublicationSearchService:
             vinculo=vinculo, natureza=natureza,
             polo=polo, cnj_search=cnj_search,
             scheduled_by_user_id=scheduled_by_user_id,
+            etiqueta=etiqueta,
         )
         available_ufs = [
             row[0] for row in uf_query
@@ -2635,6 +2659,7 @@ class PublicationSearchService:
             vinculo=vinculo, natureza=natureza,
             polo=polo, cnj_search=cnj_search,
             scheduled_by_user_id=None,  # ignora pra descobrir todos
+            etiqueta=etiqueta,
         )
         available_scheduled_by = [
             {"user_id": r[0], "name": r[1] or "", "email": r[2] or ""}
@@ -2672,6 +2697,18 @@ class PublicationSearchService:
                 _seen_by_ids.add(r[0])
         available_scheduled_by.sort(key=lambda d: (d["name"] or "").lower())
 
+        # Vocabulário de etiquetas pro dropdown do filtro. Global de propósito
+        # (ver `etiquetas_distintas`): é catálogo do L1, não valor emergente dos
+        # dados — o operador precisa ver o vocabulário inteiro, senão não
+        # descobre que a etiqueta existe.
+        try:
+            from app.services.publication_etiquetas import etiquetas_distintas
+
+            available_etiquetas = etiquetas_distintas(self.db)
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao listar etiquetas pro filtro (ignorado).")
+            available_etiquetas = []
+
         # Busca as group_keys da página atual
         page_keys_rows = (
             self.db.query(groups_subq.c.group_key)
@@ -2691,6 +2728,7 @@ class PublicationSearchService:
                 "groups": [],
                 "available_ufs": available_ufs,
                 "available_scheduled_by": available_scheduled_by,
+                "available_etiquetas": available_etiquetas,
             }
 
         # ─── Etapa 2: carrega records só dos grupos da página ───────
@@ -2711,6 +2749,7 @@ class PublicationSearchService:
             vinculo=vinculo, natureza=natureza,
             polo=polo, cnj_search=cnj_search,
             scheduled_by_user_id=scheduled_by_user_id,
+            etiqueta=etiqueta,
         )
 
         # Filtro: records que pertencem aos grupos da página
@@ -2777,6 +2816,7 @@ class PublicationSearchService:
             "groups": grouped_list,
             "available_ufs": available_ufs,
             "available_scheduled_by": available_scheduled_by,
+            "available_etiquetas": available_etiquetas,
         }
 
     def get_record(self, record_id: int) -> dict[str, Any]:

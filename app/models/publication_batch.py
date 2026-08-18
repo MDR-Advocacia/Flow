@@ -5,7 +5,16 @@ Cada linha representa um lote enviado ao endpoint /v1/messages/batches
 para classificação assíncrona de publicações em volume.
 """
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    JSON,
+    String,
+    Text,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -84,6 +93,22 @@ class PublicationBatchClassification(Base):
 
     # Detalhes dos erros por item (JSON: {record_id: error_reason})
     error_details = Column(JSON, nullable=True)
+
+    # ── Usage (tokens) somado dos itens do lote — migration pub009 ────────
+    # Guardamos TOKEN, não custo: token é fato e não envelhece, preço muda.
+    # O custo sai de app/services/classifier/anthropic_pricing.py na leitura.
+    #
+    # Atenção ao ler: `usage_input_tokens` NÃO é a entrada total. Por definição
+    # da API é só o que vem DEPOIS do último breakpoint de cache. A entrada
+    # total é input + cache_read + cache_creation. Sem prompt caching ligado,
+    # os dois campos de cache ficam em 0 e o input é a entrada inteira.
+    usage_input_tokens = Column(BigInteger, nullable=True)
+    usage_output_tokens = Column(BigInteger, nullable=True)
+    usage_cache_read_tokens = Column(BigInteger, nullable=True)
+    usage_cache_creation_tokens = Column(BigInteger, nullable=True)
+    # Quantos itens de fato trouxeram usage — distingue soma completa de
+    # parcial (item que falhou não traz usage).
+    usage_itens_contados = Column(Integer, nullable=True)
 
     # Timestamps
     created_at = Column(

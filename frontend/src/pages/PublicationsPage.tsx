@@ -862,6 +862,10 @@ const PublicationsPage = () => {
   const [filterCnj, setFilterCnj] = useState<string>("");
   // CSV de user_ids (LegalOneUser.id) — operador que cadastrou (scheduled_by_user_id).
   const [filterScheduledBy, setFilterScheduledBy] = useState<string>("");
+  // CSV de NOMES de etiqueta do L1 (ex.: "BASE NERC,Adverso Réu/Autor"). A
+  // etiqueta não é coluna do registro: vive no cache pub_l1_etiqueta_cache e o
+  // backend resolve por EXISTS, então este filtro é server-side como os outros.
+  const [filterEtiqueta, setFilterEtiqueta] = useState<string>("");
   // Controla se o painel de filtros está expandido no mobile (no desktop fica sempre visível via md:block)
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [groupPage, setGroupPage] = useState(0);
@@ -1082,7 +1086,7 @@ const PublicationsPage = () => {
   const filterFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadGrouped = useCallback(async (
-    page = 0, status = "", officeId = "", dateFrom = "", dateTo = "", category = "", ufParam = "", vinculoParam = "", naturezaParam = "", poloParam = "", cnjParam = "", scheduledByParam = "",
+    page = 0, status = "", officeId = "", dateFrom = "", dateTo = "", category = "", ufParam = "", vinculoParam = "", naturezaParam = "", poloParam = "", cnjParam = "", scheduledByParam = "", etiquetaParam = "",
   ) => {
     const loadId = ++latestGroupedLoadId.current;
     try {
@@ -1098,6 +1102,7 @@ const PublicationsPage = () => {
       if (poloParam) url += `&polo=${encodeURIComponent(poloParam)}`;
       if (cnjParam) url += `&cnj_search=${encodeURIComponent(cnjParam)}`;
       if (scheduledByParam) url += `&scheduled_by_user_id=${encodeURIComponent(scheduledByParam)}`;
+      if (etiquetaParam) url += `&etiqueta=${encodeURIComponent(etiquetaParam)}`;
       const res = await apiFetch(url);
       if (!res.ok) return;
       const data = await res.json();
@@ -1127,6 +1132,7 @@ const PublicationsPage = () => {
       if (filterPolo) params.set("polo", filterPolo);
       if (filterCnj) params.set("cnj_search", filterCnj);
       if (filterScheduledBy) params.set("scheduled_by_user_id", filterScheduledBy);
+      if (filterEtiqueta) params.set("etiqueta", filterEtiqueta);
       const qs = params.toString();
       const url = `${API}/records/grouped/export${qs ? `?${qs}` : ""}`;
 
@@ -1205,6 +1211,7 @@ const PublicationsPage = () => {
         vinculo: filterVinculo,
         natureza: filterNatureza,
         polo: filterPolo,
+        etiqueta: filterEtiqueta,
       };
       const res = await apiFetch("/api/v1/me/saved-filters", {
         method: "POST",
@@ -1232,7 +1239,7 @@ const PublicationsPage = () => {
   const handleApplySavedFilter = (filter: any) => {
     try {
       const parsed = typeof filter.filters_json === 'string' ? JSON.parse(filter.filters_json) : filter.filters_json;
-      handleFilterChange(parsed.status || "", parsed.office || "", parsed.dateFrom, parsed.dateTo, parsed.category, parsed.uf || "", parsed.vinculo || "", parsed.natureza || "", parsed.polo || "");
+      handleFilterChange(parsed.status || "", parsed.office || "", parsed.dateFrom, parsed.dateTo, parsed.category, parsed.uf || "", parsed.vinculo || "", parsed.natureza || "", parsed.polo || "", undefined, undefined, parsed.etiqueta || "");
     } catch (err) {
       toast({ title: "Erro", description: "Não foi possível aplicar o filtro.", variant: "destructive" });
     }
@@ -1257,7 +1264,7 @@ const PublicationsPage = () => {
     // Passa o estado inicial dos filtros (filterStatus ja nasce com o default
     // de pendentes) — antes ia tudo vazio e a 1a carga trazia TODOS os status,
     // divergindo dos chips de Status exibidos.
-    loadGrouped(0, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
+    loadGrouped(0, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy, filterEtiqueta);
     loadBatches();
     loadSavedFilters();
   }, []);
@@ -1280,7 +1287,7 @@ const PublicationsPage = () => {
     loadGrouped(
       0, filterStatus, filterOffice, filterDateFrom, filterDateTo,
       filterCategory, filterUf, filterVinculo, filterNatureza,
-      filterPolo, filterCnj, filterScheduledBy,
+      filterPolo, filterCnj, filterScheduledBy, filterEtiqueta,
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupPageSize]);
@@ -1374,7 +1381,7 @@ const PublicationsPage = () => {
       clearInterval(t);
       // Quando polling para (busca terminou), recarrega dados
       loadStats();
-      loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
+      loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy, filterEtiqueta);
     };
   }, [activeSearch?.id]);
 
@@ -1406,7 +1413,7 @@ const PublicationsPage = () => {
       }
       toast({ title: "Busca iniciada", description: "Acompanhe o progresso no histórico." });
       [3000, 8000, 15000, 30000].forEach((delay) => {
-        setTimeout(() => { loadSearches(); loadStats(); loadGrouped(0, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy); }, delay);
+        setTimeout(() => { loadSearches(); loadStats(); loadGrouped(0, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy, filterEtiqueta); }, delay);
       });
     } catch (err: any) {
       setError(err.message);
@@ -1479,7 +1486,7 @@ const PublicationsPage = () => {
   };
 
   const handleFilterChange = (
-    status: string, officeId: string, dateFrom?: string, dateTo?: string, category?: string, ufParam?: string, vinculoParam?: string, naturezaParam?: string, poloParam?: string, cnjParam?: string, scheduledByParam?: string,
+    status: string, officeId: string, dateFrom?: string, dateTo?: string, category?: string, ufParam?: string, vinculoParam?: string, naturezaParam?: string, poloParam?: string, cnjParam?: string, scheduledByParam?: string, etiquetaParam?: string,
   ) => {
     setFilterStatus(status);
     setFilterOffice(officeId);
@@ -1492,6 +1499,7 @@ const PublicationsPage = () => {
     if (poloParam !== undefined) setFilterPolo(poloParam);
     if (cnjParam !== undefined) setFilterCnj(cnjParam);
     if (scheduledByParam !== undefined) setFilterScheduledBy(scheduledByParam);
+    if (etiquetaParam !== undefined) setFilterEtiqueta(etiquetaParam);
     const df = dateFrom ?? filterDateFrom;
     const dt = dateTo ?? filterDateTo;
     const cat = category ?? filterCategory;
@@ -1501,6 +1509,7 @@ const PublicationsPage = () => {
     const pol = poloParam ?? filterPolo;
     const cnj = cnjParam ?? filterCnj;
     const sb = scheduledByParam ?? filterScheduledBy;
+    const etq = etiquetaParam ?? filterEtiqueta;
     setGroupPage(0);
     setSelectedGroupKeys(new Set());
     // Debounce: a troca de filtro so dispara o fetch apos 300ms de quietude,
@@ -1508,14 +1517,14 @@ const PublicationsPage = () => {
     // sequencia em loadGrouped descarta qualquer corrida que reste).
     if (filterFetchTimerRef.current) clearTimeout(filterFetchTimerRef.current);
     filterFetchTimerRef.current = setTimeout(() => {
-      loadGrouped(0, status, officeId, df, dt, cat, uf, vin, nat, pol, cnj, sb);
+      loadGrouped(0, status, officeId, df, dt, cat, uf, vin, nat, pol, cnj, sb, etq);
     }, 300);
   };
 
   const handleGroupPageChange = (newPage: number) => {
     setGroupPage(newPage);
     setSelectedGroupKeys(new Set());
-    loadGrouped(newPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
+    loadGrouped(newPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy, filterEtiqueta);
   };
 
   // ── Ciência com MOTIVO (pub006) ──────────────────────────────────────────
@@ -1583,7 +1592,7 @@ const PublicationsPage = () => {
     setIgnoreSubmitting(false);
     setIgnoreDialog(null);
     clearSelection();
-    loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
+    loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy, filterEtiqueta);
     loadStats();
   };
 
@@ -1614,7 +1623,7 @@ const PublicationsPage = () => {
         title: "Reclassificado",
         description: `${category}${subcategory ? " → " + subcategory : ""} aplicado a ${recordIds.length} publicação(ões). Proposta de tarefa atualizada.`,
       });
-      loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
+      loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy, filterEtiqueta);
       loadStats();
     } catch (err: any) {
       toast({ title: "Erro", description: err.message, variant: "destructive" });
@@ -1662,7 +1671,7 @@ const PublicationsPage = () => {
       }
       toast({ title: "Feedback registrado", description: "Obrigado! O classificador vai aprender com essa correção." });
       setFeedbackOpen(false);
-      loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
+      loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy, filterEtiqueta);
     } catch (err: any) {
       toast({ title: "Erro", description: err.message, variant: "destructive" });
     } finally {
@@ -1671,7 +1680,7 @@ const PublicationsPage = () => {
   };
 
   const handleRefreshAll = () => {
-    loadStats(); loadSearches(); loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy); loadBatches();
+    loadStats(); loadSearches(); loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy, filterEtiqueta); loadBatches();
     if (insightsOpen) loadInsights(insightPeriod);
   };
 
@@ -1741,7 +1750,7 @@ const PublicationsPage = () => {
       });
       // Pequeno polling para refletir o efeito na UI
       [3000, 8000, 20000].forEach((delay) => {
-        setTimeout(() => { loadBatches(); loadStats(); loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy); }, delay);
+        setTimeout(() => { loadBatches(); loadStats(); loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy, filterEtiqueta); }, delay);
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1842,7 +1851,7 @@ const PublicationsPage = () => {
         description: `Propostas sendo reconstruídas (escopo: ${scopeLabel}). Atualize em instantes.`,
       });
       setTimeout(() => {
-        loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
+        loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy, filterEtiqueta);
       }, 3000);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -2376,7 +2385,7 @@ const PublicationsPage = () => {
       });
       setScheduleOpen(false);
       setRemovedTaskIndices(new Set());
-      loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
+      loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy, filterEtiqueta);
       loadStats();
     } catch (err: any) {
       // Duration maior pra erros porque o backend agora devolve detalhe
@@ -2446,6 +2455,7 @@ const PublicationsPage = () => {
       if (filterPolo) url += `&polo=${encodeURIComponent(filterPolo)}`;
       if (filterCnj) url += `&cnj_search=${encodeURIComponent(filterCnj)}`;
       if (filterScheduledBy) url += `&scheduled_by_user_id=${encodeURIComponent(filterScheduledBy)}`;
+      if (filterEtiqueta) url += `&etiqueta=${encodeURIComponent(filterEtiqueta)}`;
       const res = await apiFetch(url);
       if (!res.ok) {
         toast({ title: "Erro ao carregar todos", variant: "destructive" });
@@ -2551,7 +2561,7 @@ const PublicationsPage = () => {
 
     clearSelection();
     setBulkProcessing(false);
-    loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
+    loadGrouped(groupPage, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy, filterEtiqueta);
     loadStats();
   };
 
@@ -2604,6 +2614,22 @@ const PublicationsPage = () => {
       available_scheduled_by?: { user_id: number; name: string; email: string }[];
     } | null)?.available_scheduled_by;
     return Array.isArray(raw) ? raw : [];
+  })();
+
+  // Etiquetas do L1 disponíveis pro filtro. Diferente de UF e "Cadastrado por",
+  // este catálogo é GLOBAL: etiqueta é vocabulário do L1, não um valor que
+  // emerge do resultado da busca — o operador precisa enxergar tudo que dá pra
+  // filtrar, mesmo o que os filtros atuais zerariam. A selecionada é sempre
+  // mantida na lista pra não sumir de baixo do próprio chip.
+  const availableEtiquetas: string[] = (() => {
+    const raw = (grouped as unknown as { available_etiquetas?: string[] } | null)?.available_etiquetas;
+    const lista = Array.isArray(raw) ? [...raw] : [];
+    if (filterEtiqueta) {
+      filterEtiqueta.split(",").filter(Boolean).forEach((e) => {
+        if (!lista.includes(e)) lista.push(e);
+      });
+    }
+    return lista;
   })();
 
   // O filtro UF agora é server-side, então os grupos já vêm filtrados.
@@ -3636,7 +3662,7 @@ const PublicationsPage = () => {
                   className="border-blue-200 bg-blue-50 text-blue-900 hover:bg-blue-100"
                   onClick={() => {
                     setFilterStatus("");
-                    handleFilterChange("", filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy);
+                    handleFilterChange("", filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy, filterEtiqueta);
                   }}
                   title="Filtro padrão mostra apenas pendentes (NOVO, CLASSIFICADO, ERRO). Clique pra ver também finalizados (Agendado, Ignorado, Obsoleto, Descartado)."
                 >
@@ -3678,6 +3704,7 @@ const PublicationsPage = () => {
               filterDateTo,
               filterCnj,
               filterScheduledBy,
+              filterEtiqueta,
             ].filter(Boolean).length;
             return (
               <div className="md:hidden">
@@ -3820,6 +3847,33 @@ const PublicationsPage = () => {
                 />
               </div>
 
+              {/* Filtro por ETIQUETA do Legal One (tag do processo, ex.:
+                  "BASE NERC", "Adverso Réu/Autor") — as mesmas que aparecem
+                  como chip na coluna do CNJ. Vem de `available_etiquetas` do
+                  /records/grouped; o catálogo é global (ver availableEtiquetas).
+                  Atenção operacional: filtrar por etiqueta esconde publicação
+                  sem pasta vinculada e processo que o job de enriquecimento
+                  ainda não visitou — é "sem informação", não "sem etiqueta". */}
+              <div className="space-y-1">
+                <Label className="text-[10px] uppercase tracking-wide text-muted-foreground">Etiqueta</Label>
+                <MultiSelect
+                  options={availableEtiquetas.map((e) => ({ value: e, label: e }))}
+                  defaultValue={filterEtiqueta ? filterEtiqueta.split(",").filter(Boolean) : []}
+                  onValueChange={(vals) =>
+                    handleFilterChange(
+                      filterStatus, filterOffice,
+                      undefined, undefined, undefined, undefined,
+                      undefined, undefined, undefined, undefined,
+                      undefined,
+                      vals.join(","),
+                    )
+                  }
+                  placeholder="Todas"
+                  className="h-8 min-w-[180px] text-xs"
+                  maxCount={2}
+                />
+              </div>
+
               {/* Filtro "Cadastrado por" — operador que finalizou o
                   agendamento (PublicationRecord.scheduled_by_user_id). Vem
                   do campo `available_scheduled_by` da resposta /records/grouped,
@@ -3931,7 +3985,7 @@ const PublicationsPage = () => {
                   (so pendentes), nao pro estado completamente vazio. Pra
                   ver finalizados, operador usa "Mostrar todos" no
                   indicador do header da listagem. */}
-              {((filterStatus && filterStatus !== DEFAULT_PENDING_PUBLICATION_STATUSES_CSV) || filterOffice || filterCategory || filterUf || filterVinculo || filterNatureza || filterPolo || filterDateFrom || filterDateTo || filterCnj || filterScheduledBy) && (
+              {((filterStatus && filterStatus !== DEFAULT_PENDING_PUBLICATION_STATUSES_CSV) || filterOffice || filterCategory || filterUf || filterVinculo || filterNatureza || filterPolo || filterDateFrom || filterDateTo || filterCnj || filterScheduledBy || filterEtiqueta) && (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -3939,7 +3993,8 @@ const PublicationsPage = () => {
                   onClick={() => {
                     setFilterCnj("");
                     setFilterScheduledBy("");
-                    handleFilterChange(DEFAULT_PENDING_PUBLICATION_STATUSES_CSV, "", "", "", "", "", "", "", "", "", "");
+                    setFilterEtiqueta("");
+                    handleFilterChange(DEFAULT_PENDING_PUBLICATION_STATUSES_CSV, "", "", "", "", "", "", "", "", "", "", "");
                   }}
                 >
                   <XCircle className="h-3.5 w-3.5 mr-1" />

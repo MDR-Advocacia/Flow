@@ -29,6 +29,7 @@ from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.classification import CLF_ITEM_FAILED, CLF_ITEM_SUCCESS
 from app.models.publication_batch import (
     ANTHROPIC_STATUS_ENDED,
@@ -218,6 +219,8 @@ class PublicationBatchClassifier:
         audiencia_data: Optional[str] = None,
         audiencia_hora: Optional[str] = None,
         audiencia_link: Optional[str] = None,
+        quem_pratica_ato: Optional[str] = None,
+        exige_providencia_nossa: Optional[bool] = None,
     ) -> int:
         """
         Copia a classificação do registro `rec` para os registros "irmãos"
@@ -261,6 +264,11 @@ class PublicationBatchClassifier:
             sib.audiencia_data = audiencia_data
             sib.audiencia_hora = audiencia_hora
             sib.audiencia_link = audiencia_link
+            # pub010 — irmão é a MESMA publicação deduplicada, então de quem é
+            # o ato é o mesmo. Não propagar deixaria o irmão fora da r6 sem
+            # motivo e criaria assimetria entre cópias do mesmo texto.
+            sib.quem_pratica_ato = quem_pratica_ato
+            sib.exige_providencia_nossa = exige_providencia_nossa
             sib.status = RECORD_STATUS_CLASSIFIED
             count += 1
         return count
@@ -391,8 +399,9 @@ class PublicationBatchClassifier:
             is_unlinked=True, feedback_examples=fb_global,
         )
 
-        # Monta as requisições do batch
-        batch_requests = []
+        # Monta as requisições do batch. Guarda (custom_id, system, user) e só
+        # materializa o payload depois de decidir se o cache entra.
+        pendentes: list[tuple[str, str, str]] = []
         record_ids: list[int] = []
         for rec in records:
             text = (rec.description or "").strip()
@@ -445,22 +454,61 @@ class PublicationBatchClassifier:
                 office_path=office_path_by_id.get(rec.linked_office_id or 0),
                 office_polo=office_polo_by_id.get(rec.linked_office_id or 0),
             )
-            batch_requests.append(
-                self.ai.build_batch_request(
-                    custom_id=str(rec.id),
-                    system_prompt=prompt,
-                    user_message=user_msg,
-                )
-            )
+            pendentes.append((str(rec.id), prompt, user_msg))
             record_ids.append(rec.id)
 
-        if not batch_requests:
+        if not pendentes:
             raise ValueError("Nenhum registro com texto útil para classificar.")
 
+        # ── Prompt caching ────────────────────────────────────────────────
+        # 92% da entrada deste lote é system prompt (medido no lote 146), e
+        # dentro do lote cada variante é byte-idêntica porque `office_prompts`
+        # memoiza por (escritório, sem-pasta). Cacheando o prefixo, a segunda
+        # requisição em diante paga 10% pelo mesmo texto.
+        #
+        # O aquecimento precisa vir ANTES do envio: na Batches API o acerto é
+        # "melhor esforço" — as 600+ requisições rodam concorrentes e nada
+        # garante que a primeira grave antes das outras lerem.
+        usar_cache = bool(settings.classifier_prompt_cache_enabled)
+        if usar_cache:
+            distintos = list(dict.fromkeys(p for _, p, _ in pendentes))
+            ok = 0
+            for prompt_unico in distintos:
+                r = await self.ai.aquecer_cache(prompt_unico)
+                if r.get("ok"):
+                    ok += 1
+                else:
+                    logger.warning(
+                        "Aquecimento de cache falhou: %s", r.get("erro"),
+                    )
+            if ok == 0:
+                # CANÁRIO: nenhuma gravação passou (TTL recusado, chave sem
+                # permissão, etc.). Manda o lote SEM cache em vez de arriscar
+                # 600+ requisições com um payload que a API está rejeitando.
+                usar_cache = False
+                logger.error(
+                    "Nenhum dos %d prefixos aqueceu — enviando o lote SEM "
+                    "prompt caching (comportamento anterior, sem risco).",
+                    len(distintos),
+                )
+            else:
+                logger.info(
+                    "Prompt caching: %d/%d prefixo(s) aquecido(s) (TTL %s).",
+                    ok, len(distintos), settings.classifier_prompt_cache_ttl,
+                )
+
+        batch_requests = [
+            self.ai.build_batch_request(
+                custom_id=cid, system_prompt=p, user_message=u, cache=usar_cache,
+            )
+            for cid, p, u in pendentes
+        ]
+
         logger.info(
-            "Enviando batch de classificação: %d publicações (solicitante=%s)",
+            "Enviando batch de classificação: %d publicações (solicitante=%s, cache=%s)",
             len(batch_requests),
             requested_by_email or "-",
+            "ligado" if usar_cache else "desligado",
         )
 
         # Envia para a Anthropic
@@ -666,6 +714,16 @@ class PublicationBatchClassifier:
         failed = 0
         skipped = 0
         error_details: dict[str, str] = {}
+        # Telemetria de token. Somada por lote pra responder duas perguntas que
+        # hoje ninguem consegue responder: quanto a classificacao custa, e
+        # (depois do prompt caching) se o cache pegou de verdade.
+        uso_total = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        }
+        uso_itens = 0
 
         for item in results:
             custom_id = item.get("custom_id")
@@ -687,6 +745,15 @@ class PublicationBatchClassifier:
             if not rec:
                 skipped += 1
                 continue
+
+            # Usage ANTES de tentar extrair a classificação: item que falhou
+            # no parse também queimou token, e ignorá-lo subcontaria o custo
+            # real do lote exatamente nos casos que mais interessam.
+            u = AnthropicClassifierClient.extract_usage_from_batch_result(item)
+            if any(u.values()):
+                for k in uso_total:
+                    uso_total[k] += u[k]
+                uso_itens += 1
 
             # Extrai classificação
             try:
@@ -744,6 +811,8 @@ class PublicationBatchClassifier:
             classification["audiencia_data"] = clean.audiencia_data
             classification["audiencia_hora"] = clean.audiencia_hora
             classification["audiencia_link"] = clean.audiencia_link
+            classification["quem_pratica_ato"] = clean.quem_pratica_ato
+            classification["exige_providencia_nossa"] = clean.exige_providencia_nossa
 
             polo = clean.polo
             aud_data = clean.audiencia_data
@@ -757,6 +826,11 @@ class PublicationBatchClassifier:
                 rec.audiencia_data = aud_data
                 rec.audiencia_hora = aud_hora
                 rec.audiencia_link = aud_link
+                # pub010 — de quem é o ato. Fica NULL quando a IA não emitiu
+                # ou emitiu fora do enum (o schema descarta com warning); a
+                # regra r6 do shadow simplesmente não dispara nesses casos.
+                rec.quem_pratica_ato = clean.quem_pratica_ato
+                rec.exige_providencia_nossa = clean.exige_providencia_nossa
                 # Natureza do processo: só pra publicações sem pasta vinculada
                 if rec.linked_lawsuit_id is None:
                     rec.natureza_processo = clean.natureza_processo
@@ -779,6 +853,7 @@ class PublicationBatchClassifier:
                 # mesmo dia) que foram descartados pela deduplicação.
                 propagated = self._propagate_to_siblings(
                     rec, cat, sub, polo, aud_data, aud_hora, aud_link,
+                    clean.quem_pratica_ato, clean.exige_providencia_nossa,
                 )
                 if propagated:
                     logger.debug(
@@ -800,6 +875,11 @@ class PublicationBatchClassifier:
         batch.applied_at = datetime.now(timezone.utc)
         batch.succeeded_count = succeeded
         batch.errored_count = failed
+        batch.usage_input_tokens = uso_total["input_tokens"]
+        batch.usage_output_tokens = uso_total["output_tokens"]
+        batch.usage_cache_read_tokens = uso_total["cache_read_input_tokens"]
+        batch.usage_cache_creation_tokens = uso_total["cache_creation_input_tokens"]
+        batch.usage_itens_contados = uso_itens
         if error_details:
             batch.error_details = error_details
         self.db.commit()
@@ -833,12 +913,47 @@ class PublicationBatchClassifier:
             "failed": failed,
             "skipped": skipped,
             "total": len(results),
+            "usage": {**uso_total, "itens_contados": uso_itens},
         }
         logger.info(
             "Batch %s aplicado: %s",
             batch.anthropic_batch_id,
             summary,
         )
+        # Linha separada e legivel — e' o que o operador vai ler no log pra
+        # comparar antes/depois do prompt caching.
+        try:
+            from app.services.classifier.anthropic_pricing import calcular_custo_usd
+
+            custo = calcular_custo_usd(
+                modelo=batch.model_used,
+                input_tokens=uso_total["input_tokens"],
+                output_tokens=uso_total["output_tokens"],
+                cache_read_tokens=uso_total["cache_read_input_tokens"],
+                cache_creation_tokens=uso_total["cache_creation_input_tokens"],
+                batch=True,
+            )
+            if custo:
+                summary["custo"] = custo
+                logger.info(
+                    "Batch %s — CUSTO: US$ %.4f (%s itens, entrada total %s tok, "
+                    "saida %s tok). Cache: leitura %s / gravacao %s tok. "
+                    "Sem cache custaria US$ %.4f (economia US$ %.4f).",
+                    batch.anthropic_batch_id, custo["custo_total_usd"], uso_itens,
+                    custo["entrada_total_tokens"], uso_total["output_tokens"],
+                    uso_total["cache_read_input_tokens"],
+                    uso_total["cache_creation_input_tokens"],
+                    custo["custo_sem_cache_usd"], custo["economia_usd"],
+                )
+            else:
+                logger.warning(
+                    "Batch %s — usage somado (%s tok entrada) mas modelo %r nao "
+                    "esta na tabela de precos; custo nao calculado.",
+                    batch.anthropic_batch_id, uso_total["input_tokens"],
+                    batch.model_used,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao calcular custo do batch (ignorado).")
         return summary
 
     # ──────────────────────────────────────────────────────────────────
@@ -882,7 +997,45 @@ class PublicationBatchClassifier:
             "ended_at": batch.ended_at.isoformat() if batch.ended_at else None,
             "applied_at": batch.applied_at.isoformat() if batch.applied_at else None,
             "error_details": batch.error_details,
+            # Telemetria de token (migration pub009). `usage_input_tokens` é só
+            # o que vem DEPOIS do último breakpoint de cache — a entrada total
+            # é input + cache_read + cache_creation. Sem caching ligado, os dois
+            # de cache são 0 e o input é a entrada inteira.
+            "usage": {
+                "input_tokens": batch.usage_input_tokens,
+                "output_tokens": batch.usage_output_tokens,
+                "cache_read_tokens": batch.usage_cache_read_tokens,
+                "cache_creation_tokens": batch.usage_cache_creation_tokens,
+                "itens_contados": batch.usage_itens_contados,
+            },
+            # Referência pela CLASSE, não por `self`: batch_to_dict é
+            # @staticmethod e não recebe self — o `self.` aqui derrubou a
+            # listagem de lotes da UI com NameError em 14/08 (o 500 era
+            # engolido pelo catch silencioso do front, que mostrava
+            # "nenhum lote enviado" com 146 lotes no banco).
+            "custo": PublicationBatchClassifier._custo_do_batch(batch),
         }
+
+    @staticmethod
+    def _custo_do_batch(batch: PublicationBatchClassification) -> Optional[dict]:
+        """Custo estimado a partir do usage gravado. None em lote antigo (sem
+        telemetria) ou modelo fora da tabela de preços."""
+        if not batch.usage_itens_contados:
+            return None
+        try:
+            from app.services.classifier.anthropic_pricing import calcular_custo_usd
+
+            return calcular_custo_usd(
+                modelo=batch.model_used,
+                input_tokens=batch.usage_input_tokens or 0,
+                output_tokens=batch.usage_output_tokens or 0,
+                cache_read_tokens=batch.usage_cache_read_tokens or 0,
+                cache_creation_tokens=batch.usage_cache_creation_tokens or 0,
+                batch=True,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao calcular custo do batch %s (ignorado).", batch.id)
+            return None
 
     def collect_errored_records_from_batch(
         self, batch: PublicationBatchClassification

@@ -65,7 +65,9 @@ class AnthropicClassifierClient:
             "model": self.model,
             "max_tokens": self.max_tokens,
             "temperature": 0,
-            "system": system_prompt,
+            "system": self._system_blocks(
+                system_prompt, cache=settings.classifier_prompt_cache_enabled,
+            ),
             "messages": [
                 {"role": "user", "content": user_message},
             ],
@@ -127,6 +129,20 @@ class AnthropicClassifierClient:
                 if not content_blocks:
                     raise Exception("Resposta da API sem conteúdo.")
 
+                # Telemetria de token no caminho síncrono. Aqui só loga (o
+                # retorno é contrato usado por vários callers e não vou mudá-lo
+                # por causa de medição); o número que interessa pro estudo de
+                # custo vem do batch, que é onde está o volume.
+                u = data.get("usage") or {}
+                if u:
+                    logger.info(
+                        "Classificação síncrona — usage: entrada=%s saída=%s "
+                        "cache_leitura=%s cache_gravação=%s",
+                        u.get("input_tokens"), u.get("output_tokens"),
+                        u.get("cache_read_input_tokens", 0),
+                        u.get("cache_creation_input_tokens", 0),
+                    )
+
                 raw_text = content_blocks[0].get("text", "")
                 return self._parse_classification_response(raw_text)
             except Exception as exc:
@@ -139,11 +155,82 @@ class AnthropicClassifierClient:
     # https://docs.claude.com/en/docs/build-with-claude/batch-processing
     # ─────────────────────────────────────────────────────────────────────
 
+    def _system_blocks(self, system_prompt: str, *, cache: bool):
+        """Monta o campo `system` do payload.
+
+        Sem cache devolve a string crua (comportamento histórico). Com cache
+        devolve UM bloco de texto marcado com `cache_control` — breakpoint
+        EXPLÍCITO, de propósito.
+
+        Nunca usar cache automático aqui: ele põe o breakpoint no último bloco
+        cacheável, que no nosso payload é a mensagem do usuário (o texto da
+        publicação, diferente em toda requisição). Isso gravaria uma entrada
+        nova a cada chamada e não leria nenhuma — pagaria mais caro pra ter
+        zero acerto. O prefixo estável termina no fim do system, e é lá que o
+        breakpoint tem que ficar.
+        """
+        if not cache:
+            return system_prompt
+        return [
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {
+                    "type": "ephemeral",
+                    "ttl": settings.classifier_prompt_cache_ttl,
+                },
+            }
+        ]
+
+    async def aquecer_cache(self, system_prompt: str) -> dict[str, Any]:
+        """Grava o prefixo no cache ANTES do batch, e serve de canário.
+
+        Por que existe: na Batches API o acerto de cache é "melhor esforço" —
+        as requisições do lote rodam concorrentes e em ordem arbitrária, então
+        nada garante que a primeira grave antes das outras lerem. Aquecendo
+        antes, todas as 600+ chegam com o prefixo já gravado.
+
+        `max_tokens=0` lê o prompt no modelo, grava o cache e volta sem gerar
+        saída (a API rejeita isso dentro de um batch, por isso a chamada é
+        síncrona). A mensagem do usuário é um placeholder que nunca é
+        respondido.
+
+        Papel de CANÁRIO: se a configuração de cache for recusada pela API
+        (ex.: TTL não suportado), isto falha aqui, numa chamada barata, e o
+        chamador desliga o cache antes de mandar o lote inteiro — em vez de
+        descobrir com 627 requisições falhando.
+
+        Nunca levanta: devolve {"ok": bool, ...}.
+        """
+        payload = {
+            "model": self.model,
+            "max_tokens": 0,
+            "temperature": 0,
+            "system": self._system_blocks(system_prompt, cache=True),
+            "messages": [{"role": "user", "content": "warmup"}],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    ANTHROPIC_API_URL, headers=self._build_headers(), json=payload,
+                )
+            if resp.status_code != 200:
+                return {"ok": False, "erro": f"HTTP {resp.status_code}: {resp.text[:300]}"}
+            usage = (resp.json() or {}).get("usage") or {}
+            return {
+                "ok": True,
+                "gravado": int(usage.get("cache_creation_input_tokens") or 0),
+                "lido": int(usage.get("cache_read_input_tokens") or 0),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "erro": str(exc)[:300]}
+
     def build_batch_request(
         self,
         custom_id: str,
         system_prompt: str,
         user_message: str,
+        cache: bool = False,
     ) -> dict[str, Any]:
         """
         Constrói um item individual de um batch, no formato esperado pela API.
@@ -165,7 +252,7 @@ class AnthropicClassifierClient:
                 # Mesmo motivo da chamada síncrona — taxonomia fechada
                 # pede determinismo.
                 "temperature": 0,
-                "system": system_prompt,
+                "system": self._system_blocks(system_prompt, cache=cache),
                 "messages": [
                     {"role": "user", "content": user_message},
                 ],
@@ -349,6 +436,36 @@ class AnthropicClassifierClient:
         return AnthropicClassifierClient._parse_classification_response(
             raw_text, stop_reason=stop_reason
         )
+
+    @staticmethod
+    def extract_usage_from_batch_result(
+        batch_result: dict[str, Any],
+    ) -> dict[str, int]:
+        """Contadores de token de UM item do batch. Nunca levanta exceção.
+
+        Tolerante de propósito: usage é telemetria, não pode derrubar a
+        aplicação de um lote que classificou certo. Item que falhou costuma vir
+        sem `message`, e aí devolve tudo zerado — quem chama soma e conta
+        quantos itens de fato trouxeram número.
+
+        Os dois campos de cache só ficam diferentes de zero quando o prompt
+        caching estiver ligado; hoje vêm 0 e é isso que queremos medir.
+        """
+        vazio = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        }
+        try:
+            usage = (
+                (batch_result.get("result") or {}).get("message") or {}
+            ).get("usage") or {}
+            if not isinstance(usage, dict):
+                return vazio
+            return {k: int(usage.get(k) or 0) for k in vazio}
+        except Exception:  # noqa: BLE001
+            return vazio
 
     @staticmethod
     def _try_repair_truncated_array(text: str) -> list | None:

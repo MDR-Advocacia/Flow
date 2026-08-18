@@ -232,6 +232,11 @@ class ShadowService:
         sinais["adversa_peticionou"] = bool(adversa and _PECA_ADVERSA.search(txt))
         sinais["audiencia"] = bool(_AUDIENCIA.search(txt))
         sinais["tem_data_hora"] = bool(_DATA_HORA.search(txt))
+        # pub010 — de quem é o ato, emitido pela IA na classificação. Congelado
+        # aqui junto com os demais sinais: reler do registro na hora de apurar
+        # responderia outra pergunta.
+        sinais["quem_pratica_ato"] = rec.quem_pratica_ato
+        sinais["exige_providencia_nossa"] = rec.exige_providencia_nossa
         return sinais
 
     # ── política v5 ─────────────────────────────────────────────────────
@@ -290,6 +295,28 @@ class ShadowService:
                 return SHADOW_AGENDAR, None, CONF_MEDIA, "r4g_celula_global"
             if tg >= CELULA_IGNORA:
                 return SHADOW_IGNORAR, "informativa", CONF_MEDIA, "r4g_celula_global_ig"
+
+        # r6 — o ato é da parte adversa E não exige providência nossa.
+        #
+        # Fica DELIBERADAMENTE aqui, logo antes do default: a validação mediu o
+        # efeito dela apenas sobre os casos que chegavam ao `r5_default`. Subir
+        # a regra na ordem mudaria a população das regras acima e o número
+        # medido deixaria de valer.
+        #
+        # Lote de 2.781 publicações contra gabarito real (Haiku 4.5, 10/08),
+        # células escolhidas na metade de treino e medidas cegas na validação:
+        #   recuperação 29,9% dos erros | falso-ignorar 2,78%
+        #   acurácia no r5_default: 68,8% → 76,2%
+        #
+        # Exige as DUAS condições. A célula `parte_adversa` + exige=true tinha
+        # 18 casos e 50% de pureza — moeda ao ar, ficou de fora. E `juizo` NÃO
+        # entra em hipótese alguma: como balde único era 44% do volume com 35%
+        # de pureza, e tê-lo tratado como descartável levou o falso-ignorar a
+        # 46,6% na primeira versão desta regra, reprovando-a inteira.
+        if (sinais.get("quem_pratica_ato") == "parte_adversa"
+                and sinais.get("exige_providencia_nossa") is False):
+            return (SHADOW_IGNORAR, "parte_adversa", CONF_MEDIA,
+                    "r6_parte_adversa_sem_providencia")
 
         # r5 — default agendar (prazo perdido é grave; tarefa a mais é cancelável).
         conf = CONF_MEDIA if sinais.get("tem_template") else CONF_BAIXA

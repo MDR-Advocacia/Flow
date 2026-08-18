@@ -611,6 +611,90 @@ operador encontrara mencionado no texto.
 """
 
 
+QUEM_PRATICA_ATO_ADDENDUM = """
+
+# DE QUEM E O ATO (campos extras, nao substituem a categoria)
+
+Alem de classificar o ASSUNTO, responda QUEM tem que agir. Sao dois campos
+independentes da categoria:
+
+`quem_pratica_ato` — um destes valores, exatamente:
+  "nos"               = a parte que representamos precisa fazer algo
+  "parte_adversa"     = quem precisa agir e a parte contraria, nao nos
+  "juizo_expediente"  = conclusos, mero expediente, ato interno do cartorio;
+                        ninguem precisa agir agora
+  "juizo_determina"   = o juizo determinou algo que alguem deve cumprir
+  "indeterminado"     = o texto nao permite dizer
+
+`exige_providencia_nossa` — booleano true/false:
+  true  = precisamos peticionar, recorrer, cumprir determinacao, comparecer
+          ou manifestar, com prazo
+  false = e informativa (mera ciencia, andamento, juntada, expediente que nao
+          abre prazo pra nos)
+
+COMO DECIDIR DE QUEM E O ATO
+Use o POLO DO ESCRITORIO RESPONSAVEL informado no inicio da mensagem. Ele vem
+do cadastro e e CONFIAVEL — nao o deduza do texto:
+  POLO ATIVO   = nos somos autor / exequente / credor; a adversa e re/executada
+  POLO PASSIVO = nos somos reu / executado; a adversa e autora/exequente
+
+Portanto: intimacao dirigida ao "autor" num escritorio de polo PASSIVO e ato
+da PARTE ADVERSA. Intimacao ao "executado" num escritorio de polo ATIVO e ato
+da PARTE ADVERSA. Prazo aberto "as partes" ou "a ambas" e ato NOSSO tambem.
+
+ASSIMETRIA OBRIGATORIA
+Na duvida real entre "nos" e "parte_adversa", responda "indeterminado".
+NUNCA chute "parte_adversa": essa resposta pode fazer a publicacao ser
+descartada, e prazo perdido nao se recupera — tarefa a mais se cancela.
+
+EXEMPLOS — a fronteira que decide e "expediente" x "determinacao" x "de quem e o prazo".
+
+Mero expediente / ninguem age agora (juizo_expediente):
+  - "Conclusos para sentenca." -> "juizo_expediente", false
+  - "Autos conclusos ao relator." -> "juizo_expediente", false
+  - "Junte-se aos autos. Publique-se." -> "juizo_expediente", false
+  - "Vista ao Ministerio Publico." -> "juizo_expediente", false
+      (o MP age, nao nos — e nao abre prazo nosso)
+  - "Remetam-se os autos ao contador judicial para atualizacao do debito."
+        -> "juizo_expediente", false (auxiliar do juizo age; nos aguardamos)
+  - "Suspendo o processo pelo prazo de 90 dias." -> "juizo_expediente", false
+
+O juizo determinou algo que ALGUEM cumpre (juizo_determina):
+  - "Expeca-se mandado de penhora." -> "juizo_determina", false
+      (a serventia cumpre; nao abre prazo nosso AGORA)
+  - "Cumpra-se o acordao. Oficie-se ao banco depositario." -> "juizo_determina", false
+  - "Intime-se o perito para entrega do laudo em 30 dias." -> "juizo_determina", false
+      (o prazo e do PERITO, nao nosso)
+  - "Defiro a pesquisa via SISBAJUD. Aguarde-se o resultado." -> "juizo_determina", false
+
+CUIDADO 1 — determinacao que abre prazo NOSSO por tabela e "nos":
+  - "Expeca-se alvara em favor do exequente" com POLO ATIVO -> "nos", true
+      (o levantamento e ato NOSSO)
+  - "Cumpra-se a decisao, intimando-se o reu para pagamento em 15 dias" com
+    POLO PASSIVO -> "nos", true (a determinacao tem a NOS como destinatario)
+
+CUIDADO 2 — decurso de prazo muda de dono conforme de quem ERA o prazo:
+  - "Certifico o decurso do prazo sem manifestacao do autor" com POLO PASSIVO
+        -> "parte_adversa", false (o prazo perdido era DELES)
+  - "Certifico o decurso do prazo sem manifestacao do executado" com POLO
+    PASSIVO -> "indeterminado", false (o executado somos NOS — algo ficou sem
+    resposta; nao descarte: deixe o operador ver)
+
+CUIDADO 3 — expediente que sinaliza fase de resultado NAO e descartavel as cegas:
+  - "Transitado em julgado. Arquivem-se." -> "juizo_expediente", false
+  - "Iniciada a fase de cumprimento de sentenca. Intimem-se." -> "nos", true
+      (o "intimem-se" alcanca as partes — nos inclusive)
+
+Exemplos basicos (escritorio de polo PASSIVO, nos somos o reu):
+  - "Intime-se o autor para manifestar em 15 dias"
+        -> quem_pratica_ato: "parte_adversa", exige_providencia_nossa: false
+  - "Intimem-se as partes da pericia designada"
+        -> quem_pratica_ato: "nos", exige_providencia_nossa: true
+  - "Cite-se o reu para contestar"
+        -> quem_pratica_ato: "nos", exige_providencia_nossa: true
+"""
+
+
 ATIVO_SCHEME_ADDENDUM = """
 
 # ESQUEMA DO POLO ATIVO - ESTA SEÇÃO SOBREPÕE OS EXEMPLOS ACIMA
@@ -791,6 +875,12 @@ def build_system_prompt_for_office(
 
     if taxonomy_version == "v2":
         base += SISTEMA_MENCIONADO_ADDENDUM
+
+    # pub010 — de quem e o ato. Sempre injetado (a pergunta independe da
+    # versao da taxonomia) e ANTES dos feedback_examples, que variam por
+    # escritorio: o que vem depois deles sai do prefixo estavel e deixa de
+    # ser cacheado.
+    base += QUEM_PRATICA_ATO_ADDENDUM
 
     if feedback_examples:
         base += feedback_examples

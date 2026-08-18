@@ -167,6 +167,17 @@ class PublicationRecord(Base):
     # o sinal ficaria só do lado do agendamento.
     consultou_autos = Column(Boolean, nullable=True)
 
+    # pub010 — de quem é o ato e se ele exige providência nossa, emitidos pela
+    # IA na mesma chamada da classificação. Existem porque a medição do shadow
+    # mostrou que 83% dos erros do `r5_default` são compreensão de texto
+    # (parte_adversa 45% + informativa 36%), não falta de contexto. Alimentam
+    # a regra `r6_parte_adversa_sem_providencia`.
+    # Vocabulário: nos | parte_adversa | juizo_expediente | juizo_determina |
+    # indeterminado. NULL = classificado antes desta migration (a r6 não
+    # dispara), e é distinto de `exige_providencia_nossa = false`.
+    quem_pratica_ato = Column(String(20), nullable=True)
+    exige_providencia_nossa = Column(Boolean, nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
 
