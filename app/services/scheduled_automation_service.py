@@ -1157,6 +1157,16 @@ class ScheduledAutomationService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Classify: resgate de batches zumbis falhou: %s", exc)
 
+        # 1.6) Promove lotes que ficaram AQUECENDO (pub011). O envio virou duas
+        # fases: o lote nasce aguardando o batch de aquecimento fechar e alguém
+        # precisa terminar o serviço. Vem ANTES da coleta pelo mesmo motivo do
+        # resgate acima — AQUECENDO sombreia registros, e lote esquecido nesse
+        # estado esconderia publicação indefinidamente.
+        try:
+            asyncio.run(classifier.promover_aquecidos())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Classify: promoção de lotes aquecidos falhou: %s", exc)
+
         # 2) Coleta pendentes em todos os escritórios selecionados
         if run_id is not None:
             self._update_progress(run_id, phase="classify:collect", message="Coletando publicações pendentes...")

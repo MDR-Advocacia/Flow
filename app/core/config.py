@@ -202,7 +202,18 @@ class Settings(BaseSettings):
     #
     # Validado ao vivo contra a API (19/08): ttl "5m" grava em
     # ephemeral_5m_input_tokens e a chamada seguinte lê a mesma entrada.
-    classifier_prompt_cache_ttl: str = "5m"
+    # Volta a "1h" agora que o aquecimento segue a receita da doc (batch de
+    # aquecimento que CONCLUI antes do lote real, pub011). O "5m" foi remendo
+    # do estado quebrado: com gravação pesada, o TTL de 1h custava 2x e pesava.
+    # Com aquecimento correto as gravações caem pra ~8 (uma por prefixo), então
+    # o multiplicador vira irrelevante — e 1h é o que a doc recomenda pra
+    # Batches, porque entre o fim do aquecimento e a última leitura do lote
+    # real passam mais de 5 minutos.
+    classifier_prompt_cache_ttl: str = "1h"
+    # Quanto esperar o batch de aquecimento antes de desistir e mandar o lote
+    # SEM cache. Fila parada é pior que lote caro: o guarda existe pra nunca
+    # deixar publicação presa em AQUECENDO.
+    classifier_prompt_cache_warm_timeout_min: int = 20
 
     # ── Prazos Iniciais ───────────────────────────────────────────────
     # Chave(s) que autenticam a automação externa no endpoint de intake.

@@ -38,6 +38,7 @@ from app.models.publication_batch import (
     PUB_BATCH_STATUS_IN_PROGRESS,
     PUB_BATCH_STATUS_READY,
     PUB_BATCH_STATUS_SUBMITTED,
+    PUB_BATCH_STATUS_WARMING,
     PublicationBatchClassification,
 )
 from app.models.publication_search import (
@@ -167,6 +168,12 @@ class PublicationBatchClassifier:
             self.db.query(PublicationBatchClassification.record_ids)
             .filter(
                 PublicationBatchClassification.status.in_([
+                    # AQUECENDO entra aqui: o lote ainda nao partiu, mas os
+                    # registros JA estao comprometidos com ele. Sem isto, uma
+                    # segunda coleta durante o aquecimento pegaria os mesmos
+                    # registros e criaria lote duplicado — o bug dos lotes
+                    # #29/#30, agora com uma janela nova pra acontecer.
+                    PUB_BATCH_STATUS_WARMING,
                     PUB_BATCH_STATUS_SUBMITTED,
                     PUB_BATCH_STATUS_IN_PROGRESS,
                     PUB_BATCH_STATUS_READY,
@@ -301,21 +308,18 @@ class PublicationBatchClassifier:
             day_key = f"nodate-{rec.id}"
         return (proc_key, day_key)
 
-    async def submit_batch(
-        self,
-        records: List[PublicationRecord],
-        requested_by_email: Optional[str] = None,
-    ) -> PublicationBatchClassification:
-        """
-        Monta o lote e envia para a Anthropic Batch API.
+    def montar_requisicoes(
+        self, records: List[PublicationRecord],
+    ) -> tuple[list[tuple[str, str, str]], list[int]]:
+        """Monta (custom_id, system_prompt, user_message) para cada registro.
 
-        Args:
-            records: publicações a classificar. Cada uma vira um item do batch,
-                      com custom_id = str(record.id).
-            requested_by_email: email do usuário que disparou (para auditoria).
+        Extraído de `submit_batch` porque a promoção do lote aquecido precisa
+        RECONSTRUIR as mesmas requisições a partir de `record_ids` — persistir
+        o payload inteiro seria guardar megabytes de texto de publicação no
+        banco durante o aquecimento.
 
-        Returns:
-            PublicationBatchClassification persistido com status ENVIADO.
+        Determinístico: os mesmos registros produzem os mesmos prefixos, que é
+        o que faz o aquecimento valer para o lote real.
         """
         if not records:
             raise ValueError("Nenhum registro para classificar.")
@@ -460,6 +464,175 @@ class PublicationBatchClassifier:
         if not pendentes:
             raise ValueError("Nenhum registro com texto útil para classificar.")
 
+        return pendentes, record_ids
+
+    async def submit_batch(
+        self,
+        records: List[PublicationRecord],
+        requested_by_email: Optional[str] = None,
+    ) -> PublicationBatchClassification:
+        """Envia o lote, aquecendo o cache antes quando o caching está ligado.
+
+        DUAS FASES, como a doc da Batches API prescreve. Com o cache ligado
+        este método NÃO envia o lote real: dispara o batch de aquecimento e
+        devolve o registro em AQUECENDO. Quem termina é `promover_aquecidos`,
+        chamado pelo poller — esperar o aquecimento leva minutos e o endpoint
+        HTTP não pode ficar pendurado.
+
+        Com o cache desligado, envia direto (comportamento anterior).
+        """
+        pendentes, record_ids = self.montar_requisicoes(records)
+
+        if not settings.classifier_prompt_cache_enabled:
+            return await self._enviar_lote(
+                pendentes, record_ids, requested_by_email, usar_cache=False,
+            )
+        return await self._iniciar_aquecimento(
+            pendentes, record_ids, requested_by_email,
+        )
+
+    async def _iniciar_aquecimento(
+        self,
+        pendentes: list[tuple[str, str, str]],
+        record_ids: list[int],
+        requested_by_email: Optional[str],
+    ) -> PublicationBatchClassification:
+        """Fase 1: dispara o batch de aquecimento e persiste o lote AQUECENDO."""
+        distintos = list(dict.fromkeys(p for _, p, _ in pendentes))
+        try:
+            resp = await self.ai.submit_batch(self.ai.build_warm_requests(distintos))
+            warm_id = resp.get("id")
+            if not warm_id:
+                raise ValueError("resposta do aquecimento veio sem id de batch")
+        except Exception as exc:  # noqa: BLE001
+            # Aquecer é otimização de custo, não requisito. Falhou, o lote sai
+            # SEM cache: o caro é a fila parar, não o token.
+            logger.error(
+                "Aquecimento em lote falhou (%s) — enviando SEM cache.", exc,
+            )
+            return await self._enviar_lote(
+                pendentes, record_ids, requested_by_email, usar_cache=False,
+            )
+
+        batch = PublicationBatchClassification(
+            status=PUB_BATCH_STATUS_WARMING,
+            total_records=len(pendentes),
+            record_ids=record_ids,
+            model_used=self.ai.model,
+            requested_by_email=requested_by_email,
+            warm_batch_id=warm_id,
+            warm_started_at=datetime.now(timezone.utc),
+            warm_prefixos=len(distintos),
+        )
+        self.db.add(batch)
+        self.db.commit()
+        self.db.refresh(batch)
+        logger.info(
+            "Aquecimento iniciado: local_id=%s warm_batch=%s prefixos=%d "
+            "(o lote real com %d publicações sai quando o aquecimento fechar)",
+            batch.id, warm_id, len(distintos), len(pendentes),
+        )
+        return batch
+
+    async def promover_aquecidos(self) -> dict:
+        """Fase 2: para cada lote AQUECENDO, envia o lote real quando der.
+
+        Três desfechos por lote:
+          - aquecimento concluiu -> envia COM cache (o caso que queremos)
+          - estourou a janela    -> envia SEM cache
+          - aquecimento falhou   -> envia SEM cache
+
+        Nunca deixa lote parado em AQUECENDO: esse estado sombreia os registros
+        na coleta, e foi assim que o batch 114 escondeu 521 publicações por 20
+        dias.
+        """
+        aquecendo = (
+            self.db.query(PublicationBatchClassification)
+            .filter(PublicationBatchClassification.status == PUB_BATCH_STATUS_WARMING)
+            .all()
+        )
+        if not aquecendo:
+            return {"promovidos": 0, "sem_cache": 0, "aguardando": 0}
+
+        promovidos = sem_cache = aguardando = 0
+        for batch in aquecendo:
+            situacao = None
+            try:
+                st = await self.ai.get_batch_status(batch.warm_batch_id)
+                situacao = st.get("processing_status")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Lote %s: falha ao consultar o aquecimento %s (%s).",
+                    batch.id, batch.warm_batch_id, exc,
+                )
+
+            idade_min = 0.0
+            if batch.warm_started_at:
+                inicio = batch.warm_started_at
+                if inicio.tzinfo is None:
+                    inicio = inicio.replace(tzinfo=timezone.utc)
+                idade_min = (datetime.now(timezone.utc) - inicio).total_seconds() / 60
+
+            estourou = idade_min > settings.classifier_prompt_cache_warm_timeout_min
+            if situacao != "ended" and not estourou:
+                aguardando += 1
+                continue
+
+            com_cache = situacao == "ended"
+            if not com_cache:
+                logger.error(
+                    "Lote %s: aquecimento em %s após %.1f min — enviando SEM "
+                    "cache pra não segurar a fila.",
+                    batch.id, situacao or "erro de consulta", idade_min,
+                )
+
+            registros = (
+                self.db.query(PublicationRecord)
+                .filter(PublicationRecord.id.in_(batch.record_ids or []))
+                .all()
+            )
+            if not registros:
+                batch.status = PUB_BATCH_STATUS_FAILED
+                batch.error_message = "registros do lote sumiram durante o aquecimento"
+                self.db.commit()
+                continue
+
+            try:
+                pendentes, record_ids = self.montar_requisicoes(registros)
+                await self._enviar_lote(
+                    pendentes, record_ids, batch.requested_by_email,
+                    usar_cache=com_cache, batch=batch,
+                )
+                batch.warm_ended_at = datetime.now(timezone.utc)
+                self.db.commit()
+                if com_cache:
+                    promovidos += 1
+                else:
+                    sem_cache += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Lote %s: falha ao promover (%s).", batch.id, exc)
+                batch.status = PUB_BATCH_STATUS_FAILED
+                batch.error_message = str(exc)[:2000]
+                self.db.commit()
+                _alertar_falha_batch(batch, str(exc), batch.requested_by_email)
+
+        if promovidos or sem_cache:
+            logger.info(
+                "Promoção de aquecidos: %d com cache, %d sem cache, %d ainda "
+                "aquecendo.", promovidos, sem_cache, aguardando,
+            )
+        return {"promovidos": promovidos, "sem_cache": sem_cache,
+                "aguardando": aguardando}
+
+    async def _enviar_lote(
+        self,
+        pendentes: list[tuple[str, str, str]],
+        record_ids: list[int],
+        requested_by_email: Optional[str],
+        usar_cache: bool,
+        batch: Optional[PublicationBatchClassification] = None,
+    ) -> PublicationBatchClassification:
+        """Envia o lote real. `batch` preenchido = promoção de um AQUECENDO."""
         # ── Prompt caching ────────────────────────────────────────────────
         # 92% da entrada deste lote é system prompt (medido no lote 146), e
         # dentro do lote cada variante é byte-idêntica porque `office_prompts`
@@ -468,35 +641,13 @@ class PublicationBatchClassifier:
         #
         # O aquecimento precisa vir ANTES do envio: na Batches API o acerto é
         # "melhor esforço" — as 600+ requisições rodam concorrentes e nada
-        # garante que a primeira grave antes das outras lerem.
-        usar_cache = bool(settings.classifier_prompt_cache_enabled)
-        if usar_cache:
-            distintos = list(dict.fromkeys(p for _, p, _ in pendentes))
-            ok = 0
-            for prompt_unico in distintos:
-                r = await self.ai.aquecer_cache(prompt_unico)
-                if r.get("ok"):
-                    ok += 1
-                else:
-                    logger.warning(
-                        "Aquecimento de cache falhou: %s", r.get("erro"),
-                    )
-            if ok == 0:
-                # CANÁRIO: nenhuma gravação passou (TTL recusado, chave sem
-                # permissão, etc.). Manda o lote SEM cache em vez de arriscar
-                # 600+ requisições com um payload que a API está rejeitando.
-                usar_cache = False
-                logger.error(
-                    "Nenhum dos %d prefixos aqueceu — enviando o lote SEM "
-                    "prompt caching (comportamento anterior, sem risco).",
-                    len(distintos),
-                )
-            else:
-                logger.info(
-                    "Prompt caching: %d/%d prefixo(s) aquecido(s) (TTL %s).",
-                    ok, len(distintos), settings.classifier_prompt_cache_ttl,
-                )
-
+        # O aquecimento NAO acontece mais aqui. Ele e' a fase 1
+        # (`_iniciar_aquecimento`), roda como batch proprio e precisa CONCLUIR
+        # antes deste envio - e' isso que torna a entrada de cache visivel para
+        # os workers do batch. Aquecer com chamadas sincronas logo antes de
+        # submeter, como faziamos, nao produzia acerto: medido nos lotes
+        # 147-149, o lote gravava milhoes de tokens mesmo com 8/8 prefixos
+        # aquecidos, e o cache saiu mais caro que nao cachear.
         batch_requests = [
             self.ai.build_batch_request(
                 custom_id=cid, system_prompt=p, user_message=u, cache=usar_cache,
@@ -505,26 +656,30 @@ class PublicationBatchClassifier:
         ]
 
         logger.info(
-            "Enviando batch de classificação: %d publicações (solicitante=%s, cache=%s)",
+            "Enviando batch de classificação: %d publicações "
+            "(solicitante=%s, cache=%s, aquecido=%s)",
             len(batch_requests),
             requested_by_email or "-",
             "ligado" if usar_cache else "desligado",
+            getattr(batch, "warm_batch_id", None) or "não",
         )
 
         # Envia para a Anthropic
         try:
             response = await self.ai.submit_batch(batch_requests)
         except Exception as exc:
-            # Persiste um registro de falha para auditoria
-            batch = PublicationBatchClassification(
-                status=PUB_BATCH_STATUS_FAILED,
-                total_records=len(batch_requests),
-                record_ids=record_ids,
-                model_used=self.ai.model,
-                requested_by_email=requested_by_email,
-                error_message=str(exc)[:2000],
-            )
-            self.db.add(batch)
+            # Persiste um registro de falha para auditoria (reusando o
+            # registro do aquecimento quando é promoção).
+            if batch is None:
+                batch = PublicationBatchClassification(
+                    total_records=len(batch_requests),
+                    record_ids=record_ids,
+                    model_used=self.ai.model,
+                    requested_by_email=requested_by_email,
+                )
+                self.db.add(batch)
+            batch.status = PUB_BATCH_STATUS_FAILED
+            batch.error_message = str(exc)[:2000]
             self.db.commit()
             self.db.refresh(batch)
             # Alerta por e-mail — o batch (manual OU job noturno) falhou ao ser
@@ -532,18 +687,23 @@ class PublicationBatchClassifier:
             _alertar_falha_batch(batch, str(exc), requested_by_email)
             raise
 
-        # Persiste o registro local do batch
-        batch = PublicationBatchClassification(
-            anthropic_batch_id=response.get("id"),
-            anthropic_status=response.get("processing_status"),
-            status=PUB_BATCH_STATUS_SUBMITTED,
-            total_records=len(batch_requests),
-            record_ids=record_ids,
-            model_used=self.ai.model,
-            requested_by_email=requested_by_email,
-            submitted_at=datetime.now(timezone.utc),
-        )
-        self.db.add(batch)
+        # Persiste o registro local do batch. Na promoção o registro JÁ
+        # existe (nasceu AQUECENDO) — atualizar em vez de criar mantém uma
+        # linha por lote no histórico, com o id do aquecimento junto.
+        if batch is None:
+            batch = PublicationBatchClassification(
+                total_records=len(batch_requests),
+                record_ids=record_ids,
+                model_used=self.ai.model,
+                requested_by_email=requested_by_email,
+            )
+            self.db.add(batch)
+        batch.anthropic_batch_id = response.get("id")
+        batch.anthropic_status = response.get("processing_status")
+        batch.status = PUB_BATCH_STATUS_SUBMITTED
+        batch.total_records = len(batch_requests)
+        batch.record_ids = record_ids
+        batch.submitted_at = datetime.now(timezone.utc)
         self.db.commit()
         self.db.refresh(batch)
 
@@ -583,6 +743,12 @@ class PublicationBatchClassifier:
             self.db.query(PublicationBatchClassification)
             .filter(
                 PublicationBatchClassification.status.in_([
+                    # AQUECENDO entra aqui: o lote ainda nao partiu, mas os
+                    # registros JA estao comprometidos com ele. Sem isto, uma
+                    # segunda coleta durante o aquecimento pegaria os mesmos
+                    # registros e criaria lote duplicado — o bug dos lotes
+                    # #29/#30, agora com uma janela nova pra acontecer.
+                    PUB_BATCH_STATUS_WARMING,
                     PUB_BATCH_STATUS_SUBMITTED,
                     PUB_BATCH_STATUS_IN_PROGRESS,
                     PUB_BATCH_STATUS_READY,

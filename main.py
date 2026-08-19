@@ -301,6 +301,20 @@ async def lifespan(_: FastAPI):
             "Falha ao registrar dispatch_worker de prazos iniciais no startup."
         )
 
+    # Publicações — promove lotes cujo cache já aqueceu (pub011). O envio é
+    # em duas fases e o lote nasce em AQUECENDO; sem este tick, só o job
+    # noturno promoveria, e quem dispara pela tela esperaria a madrugada.
+    try:
+        from app.services.publication_warm_promote_worker import (
+            register_warm_promote_job,
+        )
+
+        register_warm_promote_job(scheduler)
+    except Exception:
+        logger.exception(
+            "Falha ao registrar worker de promoção de lotes aquecidos."
+        )
+
     # Worker periodico do Classificador — polling de batches Anthropic.
     try:
         from app.services.classificador.poll_worker import (

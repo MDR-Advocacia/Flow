@@ -349,7 +349,7 @@ interface PublicationRecord {
 interface PublicationBatch {
   id: number;
   anthropic_batch_id: string | null;
-  status: "ENVIADO" | "EM_PROCESSAMENTO" | "PRONTO" | "APLICADO" | "FALHA" | "CANCELADO";
+  status: "AQUECENDO" | "ENVIADO" | "EM_PROCESSAMENTO" | "PRONTO" | "APLICADO" | "FALHA" | "CANCELADO";
   anthropic_status: string | null;
   total_records: number;
   succeeded_count: number;
@@ -628,6 +628,7 @@ const ufFromCnj = (cnj: string | null | undefined): string | null => {
 
 const batchStatusColor = (status: string): "default" | "secondary" | "destructive" | "outline" => {
   const map: Record<string, any> = {
+    AQUECENDO: "outline",
     ENVIADO: "secondary",
     EM_PROCESSAMENTO: "secondary",
     PRONTO: "default",
@@ -640,6 +641,9 @@ const batchStatusColor = (status: string): "default" | "secondary" | "destructiv
 
 const batchStatusLabel = (status: string): string => {
   const map: Record<string, string> = {
+    // pub011 — fase 1 do envio: o cache está sendo aquecido e o lote real
+    // ainda não partiu. Some sozinho em poucos minutos.
+    AQUECENDO: "Aquecendo cache",
     ENVIADO: "Enviado",
     EM_PROCESSAMENTO: "Em processamento",
     PRONTO: "Pronto",
@@ -3474,7 +3478,7 @@ const PublicationsPage = () => {
                         <TableCell className="text-xs">{formatDate(b.created_at)}</TableCell>
                         <TableCell>
                           <div className="flex gap-1">
-                            {b.status !== "APLICADO" && b.status !== "FALHA" && (
+                            {b.status !== "APLICADO" && b.status !== "FALHA" && b.status !== "AQUECENDO" && (
                               <Button size="sm" variant="outline"
                                 className="h-7 px-2 text-xs"
                                 disabled={refreshingBatchId === b.id}
