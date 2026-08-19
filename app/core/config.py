@@ -178,11 +178,31 @@ class Settings(BaseSettings):
     # corta ~74% do custo do lote. Fica como flag porque mexe no payload de
     # produção — desligar volta ao comportamento anterior sem redeploy.
     classifier_prompt_cache_enabled: bool = True
-    # TTL do cache. "1h" é o certo aqui: o lote leva 3–5 min e o relógio do TTL
-    # começa no INÍCIO da requisição, não no fim, então 5m corre risco de
-    # expirar no meio. A gravação de 1h custa 2x a entrada base contra 1,25x da
-    # de 5m — irrelevante em 9 gravações por lote.
-    classifier_prompt_cache_ttl: str = "1h"
+    # TTL do cache. Era "1h" na premissa de que o lote faria ~9 gravações e o
+    # resto leria — nessa conta o custo dobrado da gravação de 1h (2x a entrada
+    # base, contra 1,25x da de 5m) seria irrelevante. A telemetria da pub009
+    # mostrou que a premissa estava errada: mesmo com TODOS os prefixos
+    # aquecidos (8/8 no log de 19/08), o lote grava milhões de tokens, porque
+    # as centenas de requisições do batch partem concorrentes e várias erram o
+    # cache antes de a entrada ficar visível — a própria doc da Anthropic diz
+    # que na Batches API o acerto é "melhor esforço".
+    #
+    # Com padrão de ESCRITA pesada, o multiplicador do TTL deixa de ser
+    # detalhe e vira o custo principal. Medido nos lotes 147-149:
+    #
+    #   lote  hit    custo 1h   custo 5m   SEM cache
+    #   147   26%    US$ 7,84   US$ 5,23   US$ 5,48
+    #   148   40%    US$ 7,16   US$ 4,86   US$ 5,93
+    #   149   74%    US$ 3,30   US$ 2,45   US$ 5,15
+    #
+    # Ou seja: com 1h o cache saiu MAIS CARO que não cachear (US$ 152/mês
+    # contra US$ 138). Com 5m fica US$ 105/mês. O medo de expirar no meio do
+    # lote não se concretiza porque cada leitura RENOVA a entrada sem custo, e
+    # são centenas de leituras por lote.
+    #
+    # Validado ao vivo contra a API (19/08): ttl "5m" grava em
+    # ephemeral_5m_input_tokens e a chamada seguinte lê a mesma entrada.
+    classifier_prompt_cache_ttl: str = "5m"
 
     # ── Prazos Iniciais ───────────────────────────────────────────────
     # Chave(s) que autenticam a automação externa no endpoint de intake.
