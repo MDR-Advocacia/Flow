@@ -298,6 +298,8 @@ def listar(
                 "status_l1": r.status_l1,
                 "concluida_em": _iso(r.concluida_em),
                 "verif_status": r.verif_status,
+                "verif_tentativas": r.verif_tentativas or 0,
+                "verif_ultimo_erro": r.verif_ultimo_erro,
                 "portal_analise_feita": r.portal_analise_feita,
                 "portal_estado": r.portal_estado,
                 "portal_exito": r.portal_exito,

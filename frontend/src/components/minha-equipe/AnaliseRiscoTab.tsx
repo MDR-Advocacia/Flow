@@ -74,7 +74,15 @@ function VerificacaoBadge({ item }: { item: AnaliseRiscoItem }) {
     case "NA_FILA":
       return <Badge variant="secondary">Na fila de verificação</Badge>;
     case "ERRO":
-      return <Badge variant="outline">Erro — vai re-tentar</Badge>;
+      return (
+        <Badge
+          variant="outline"
+          className="cursor-help"
+          title={`${item.verif_ultimo_erro || "erro não registrado"} (tentativa ${item.verif_tentativas ?? 0})`}
+        >
+          Erro — vai re-tentar
+        </Badge>
+      );
     case "VERIFICADA":
       return <Badge variant="secondary">Verificada</Badge>;
     default:

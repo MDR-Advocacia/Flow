@@ -31,6 +31,8 @@ export interface AnaliseRiscoItem {
   status_l1: string | null; // Pendente | Cumprido
   concluida_em: string | null;
   verif_status: string; // PENDENTE | NA_FILA | VERIFICADA | ERRO
+  verif_tentativas?: number;
+  verif_ultimo_erro?: string | null;
   portal_analise_feita: boolean | null;
   portal_estado: string | null;
   portal_exito: string | null;
