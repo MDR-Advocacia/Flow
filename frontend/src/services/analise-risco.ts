@@ -54,6 +54,8 @@ export interface AnaliseRiscoResponse {
   kpis: AnaliseRiscoKpis;
   last_sync_at: string | null;
   subtipos: string[];
+  // Nomes exatos do espelho do L1 que casaram com a configuração (diagnóstico).
+  subtipos_encontrados?: string[];
   responsaveis: string[];
   items: AnaliseRiscoItem[];
 }

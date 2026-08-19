@@ -252,8 +252,19 @@ export default function AnaliseRiscoTab({ team }: { team: string }) {
               ) : (data?.items ?? []).length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={7} className="py-8 text-center text-muted-foreground">
-                    Nenhuma tarefa de Análise de Risco encontrada
-                    {data?.subtipos?.length ? ` (subtipos: ${data.subtipos.join(", ")})` : ""}.
+                    <div>Nenhuma tarefa de Análise de Risco encontrada.</div>
+                    <div className="mt-1 text-xs">
+                      {(data?.subtipos_encontrados ?? []).length > 0 ? (
+                        <>Subtipos do L1 que casaram: {data!.subtipos_encontrados!.join(", ")} — clique em Sincronizar.</>
+                      ) : (
+                        <>
+                          Nenhum subtipo do espelho do L1 casa com a configuração (
+                          {(data?.subtipos ?? []).join(", ")}). Confira o nome exato do
+                          subtipo usado no agendamento e ajuste a chave{" "}
+                          <code>analise_risco_subtipos</code>.
+                        </>
+                      )}
+                    </div>
                   </TableCell>
                 </TableRow>
               ) : (

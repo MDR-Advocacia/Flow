@@ -15,6 +15,7 @@ da esteira do portal (verif_status = NA_FILA) — o worker do card 3 consome.
 from __future__ import annotations
 
 import logging
+import unicodedata
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -50,6 +51,32 @@ def subtipos_configurados() -> list[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
+def _sem_acento_lower(s: str) -> str:
+    return (
+        unicodedata.normalize("NFKD", s or "")
+        .encode("ascii", "ignore")
+        .decode()
+        .lower()
+        .strip()
+    )
+
+
+def resolver_subtipos_do_espelho(db: Session) -> list[str]:
+    """Nomes EXATOS de subtipo no perf_l1_tarefa que casam com a configuração.
+
+    Match por CONTEÚDO, ignorando caixa e acento: o configurado
+    "Análise de Risco" pega "Analise de Risco BB Reu", "ANÁLISE DE RISCO", etc.
+    O nome real do subtipo no L1 raramente bate 100% com o que a gente supõe —
+    o painel mostra o que casou, então o diagnóstico é visual."""
+    alvos = [_sem_acento_lower(n) for n in subtipos_configurados()]
+    distintos = [
+        r[0] for r in db.query(PerfTarefa.subtipo).distinct().all() if r[0]
+    ]
+    return sorted(
+        s for s in distintos if any(a and a in _sem_acento_lower(s) for a in alvos)
+    )
+
+
 def _agora() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -61,12 +88,14 @@ def sync_do_espelho(db: Session) -> dict:
     último estado conhecido aqui. Transição Pendente -> Cumprido põe a linha na
     fila da esteira (NA_FILA) e carimba concluida_em/cumprida_por.
     """
-    nomes = [n.lower() for n in subtipos_configurados()]
+    nomes = resolver_subtipos_do_espelho(db)
     rows = (
         db.query(PerfTarefa)
-        .filter(func.lower(PerfTarefa.subtipo).in_(nomes))
+        .filter(PerfTarefa.subtipo.in_(nomes))
         .filter(PerfTarefa.l1_task_id.isnot(None))
         .all()
+        if nomes
+        else []
     )
 
     existentes = {
@@ -122,6 +151,7 @@ def sync_do_espelho(db: Session) -> dict:
         "atualizadas": atualizadas,
         "enfileiradas_verificacao": para_fila,
         "subtipos": subtipos_configurados(),
+        "subtipos_encontrados": nomes,
     }
     logger.info("Análise de Risco sync: %s", resultado)
     return resultado
@@ -250,6 +280,9 @@ def listar(
         },
         "last_sync_at": get_setting(LAST_SYNC_KEY),
         "subtipos": subtipos_configurados(),
+        # Nomes do espelho que casaram com a config — diagnóstico visual quando
+        # a tabela vem vazia (o nome real do subtipo no L1 costuma variar).
+        "subtipos_encontrados": resolver_subtipos_do_espelho(db),
         "responsaveis": responsaveis,
         "items": [
             {
