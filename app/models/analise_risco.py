@@ -27,6 +27,11 @@ VERIF_PENDENTE = "PENDENTE"      # tarefa ainda aberta no L1 — nada a verifica
 VERIF_NA_FILA = "NA_FILA"        # cumprida no L1 — aguardando verificação no portal
 VERIF_VERIFICADA = "VERIFICADA"  # portal consultado, resultado gravado
 VERIF_ERRO = "ERRO"              # falha na última tentativa — a esteira re-tenta
+# Existe análise MAIS RECENTE do mesmo processo: esta saiu da auditoria. A
+# pendência no portal é o estado ATUAL do processo — comparar com tarefa antiga
+# gera falso divergente (caso real: análise cumprida em 02/2026 acusada como
+# divergente porque a pendência aberta era da análise nova de 08/2026).
+VERIF_SUPERADA = "SUPERADA"
 
 
 class AnaliseRiscoTarefa(Base):

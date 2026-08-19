@@ -56,6 +56,17 @@ function prazoVencido(item: AnaliseRiscoItem): boolean {
 }
 
 function VerificacaoBadge({ item }: { item: AnaliseRiscoItem }) {
+  if (item.verif_status === "SUPERADA") {
+    return (
+      <Badge
+        variant="outline"
+        className="cursor-help text-muted-foreground"
+        title="Existe análise de risco mais recente deste processo — a auditoria acontece na mais nova. O que o portal respondeu pra esta ficou guardado como histórico."
+      >
+        Superada
+      </Badge>
+    );
+  }
   if (item.divergente === true) {
     return (
       <Badge variant="destructive" className="gap-1">
@@ -269,6 +280,7 @@ export default function AnaliseRiscoTab({ team }: { team: string }) {
             <SelectItem value="VERIFICADA">Verificada</SelectItem>
             <SelectItem value="ERRO">Com erro (vai re-tentar)</SelectItem>
             <SelectItem value="PENDENTE">Sem verificação (tarefa aberta)</SelectItem>
+            <SelectItem value="SUPERADA">Superadas (há análise mais recente)</SelectItem>
           </SelectContent>
         </Select>
         <Select value={responsavel} onValueChange={(v) => { setResponsavel(v); setPage(1); }}>
@@ -374,7 +386,7 @@ export default function AnaliseRiscoTab({ team }: { team: string }) {
                     <TableCell>
                       <div className="flex items-center gap-1.5">
                         <VerificacaoBadge item={item} />
-                        {item.status_l1 === "Cumprido" && item.verif_status !== "NA_FILA" && (
+                        {item.status_l1 === "Cumprido" && item.verif_status !== "NA_FILA" && item.verif_status !== "SUPERADA" && (
                           <Button
                             variant="ghost"
                             size="icon"

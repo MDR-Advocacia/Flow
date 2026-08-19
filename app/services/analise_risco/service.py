@@ -27,6 +27,7 @@ from app.models.analise_risco import (
     VERIF_ERRO,
     VERIF_NA_FILA,
     VERIF_PENDENTE,
+    VERIF_SUPERADA,
     VERIF_VERIFICADA,
 )
 from app.models.performance import PerfTarefa
@@ -141,6 +142,37 @@ def sync_do_espelho(db: Session) -> dict:
                 para_fila += 1
         row.status_l1 = status_novo
 
+    # ── Supersessão: um processo pode ter VÁRIAS análises de risco ao longo do
+    # tempo, mas a pendência no portal é o estado ATUAL do processo — só a
+    # análise MAIS RECENTE é auditável. As anteriores viram SUPERADA (saem da
+    # fila e do farol de divergência; o histórico do portal fica gravado).
+    # A mais recente: Cumprida -> fila do portal; Pendente -> acompanhar prazo
+    # (KPI/filtro "Vencidas" do painel).
+    _dt_min = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    por_processo: dict[str, list[AnaliseRiscoTarefa]] = {}
+    for r in existentes.values():
+        chave = (r.npj or "").strip() or (r.cnj or "").strip()
+        if chave:
+            por_processo.setdefault(chave, []).append(r)
+
+    superadas = reativadas = 0
+    for grupo in por_processo.values():
+        grupo.sort(key=lambda r: (r.agendada_em or _dt_min, r.l1_task_id), reverse=True)
+        vigente, antigas = grupo[0], grupo[1:]
+        for r in antigas:
+            if r.verif_status != VERIF_SUPERADA:
+                r.verif_status = VERIF_SUPERADA
+                r.divergente = None
+                superadas += 1
+        # Se a vigente já foi marcada SUPERADA no passado (ex.: dado do espelho
+        # mudou a ordem), reativa com o estado coerente ao status do L1.
+        if vigente.verif_status == VERIF_SUPERADA:
+            vigente.verif_status = (
+                VERIF_NA_FILA if vigente.status_l1 == STATUS_CUMPRIDO else VERIF_PENDENTE
+            )
+            vigente.divergente = None
+            reativadas += 1
+
     db.commit()
     set_setting(LAST_SYNC_KEY, _agora().isoformat())
 
@@ -150,6 +182,8 @@ def sync_do_espelho(db: Session) -> dict:
         "inseridas": inseridas,
         "atualizadas": atualizadas,
         "enfileiradas_verificacao": para_fila,
+        "superadas": superadas,
+        "reativadas": reativadas,
         "subtipos": subtipos_configurados(),
         "subtipos_encontrados": nomes,
     }
