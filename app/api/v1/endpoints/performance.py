@@ -594,7 +594,13 @@ def analise_risco_listar(
     status_l1: Optional[str] = Query(None, description="Pendente | Cumprido"),
     responsavel: Optional[str] = Query(None),
     divergente: Optional[bool] = Query(None),
+    verif_status: Optional[str] = Query(
+        None, description="PENDENTE | NA_FILA | VERIFICADA | ERRO"
+    ),
+    vencidas: Optional[bool] = Query(None, description="Pendentes com prazo estourado"),
     busca: Optional[str] = Query(None, description="NPJ, CNJ ou responsável"),
+    ordenar: str = Query("prazo", description="prazo | agendada_em | concluida_em | responsavel | status_l1 | npj | verificada_em"),
+    direcao: str = Query("asc", description="asc | desc"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -609,7 +615,11 @@ def analise_risco_listar(
         status_l1=status_l1,
         responsavel=responsavel,
         divergente=divergente,
+        verif_status=verif_status,
+        vencidas=vencidas,
         busca=busca,
+        ordenar=ordenar,
+        direcao=direcao,
         limit=limit,
         offset=offset,
     )

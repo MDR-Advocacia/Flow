@@ -67,7 +67,11 @@ export interface AnaliseRiscoParams {
   status_l1?: string;
   responsavel?: string;
   divergente?: boolean;
+  verif_status?: string; // PENDENTE | NA_FILA | VERIFICADA | ERRO
+  vencidas?: boolean;
   busca?: string;
+  ordenar?: string; // prazo | agendada_em | concluida_em | responsavel | status_l1 | npj | verificada_em
+  direcao?: "asc" | "desc";
   limit?: number;
   offset?: number;
 }
@@ -79,7 +83,11 @@ export async function listarAnaliseRisco(
   if (params.status_l1) qs.set("status_l1", params.status_l1);
   if (params.responsavel) qs.set("responsavel", params.responsavel);
   if (params.divergente !== undefined) qs.set("divergente", String(params.divergente));
+  if (params.verif_status) qs.set("verif_status", params.verif_status);
+  if (params.vencidas) qs.set("vencidas", "true");
   if (params.busca) qs.set("busca", params.busca);
+  if (params.ordenar) qs.set("ordenar", params.ordenar);
+  if (params.direcao) qs.set("direcao", params.direcao);
   qs.set("limit", String(params.limit ?? 50));
   qs.set("offset", String(params.offset ?? 0));
   return json(await apiFetch(`${BASE}?${qs.toString()}`));

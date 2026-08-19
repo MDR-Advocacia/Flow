@@ -4,7 +4,7 @@
 // no portal) é o farol que o supervisor cobra.
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Loader2, RefreshCw, Search } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Loader2, RefreshCw, Search } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -99,10 +99,17 @@ export default function AnaliseRiscoTab({ team }: { team: string }) {
   const [statusL1, setStatusL1] = useState<string>(TODOS);
   const [responsavel, setResponsavel] = useState<string>(TODOS);
   const [soDivergentes, setSoDivergentes] = useState(false);
+  const [soVencidas, setSoVencidas] = useState(false);
+  const [verifFiltro, setVerifFiltro] = useState<string>(TODOS);
   const [busca, setBusca] = useState("");
   const [buscaAplicada, setBuscaAplicada] = useState("");
+  const [ordenar, setOrdenar] = useState("prazo");
+  const [direcao, setDirecao] = useState<"asc" | "desc">("asc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+  // KPI clicado (vira filtro); clique de novo limpa. Mexer nos filtros manuais
+  // desativa o destaque do card pra não mentir sobre o que está aplicado.
+  const [kpiAtivo, setKpiAtivo] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -112,7 +119,11 @@ export default function AnaliseRiscoTab({ team }: { team: string }) {
         status_l1: statusL1 === TODOS ? undefined : statusL1,
         responsavel: responsavel === TODOS ? undefined : responsavel,
         divergente: soDivergentes ? true : undefined,
+        verif_status: verifFiltro === TODOS ? undefined : verifFiltro,
+        vencidas: soVencidas || undefined,
         busca: buscaAplicada || undefined,
+        ordenar,
+        direcao,
         limit: pageSize,
         offset: (page - 1) * pageSize,
       });
@@ -126,7 +137,7 @@ export default function AnaliseRiscoTab({ team }: { team: string }) {
     } finally {
       setLoading(false);
     }
-  }, [team, statusL1, responsavel, soDivergentes, buscaAplicada, page, pageSize, toast]);
+  }, [team, statusL1, responsavel, soDivergentes, soVencidas, verifFiltro, buscaAplicada, ordenar, direcao, page, pageSize, toast]);
 
   useEffect(() => {
     load();
@@ -170,12 +181,68 @@ export default function AnaliseRiscoTab({ team }: { team: string }) {
     { key: "divergentes", label: "Divergentes", destaque: true },
   ];
 
+  const limparFiltrosKpi = () => {
+    setStatusL1(TODOS);
+    setSoVencidas(false);
+    setVerifFiltro(TODOS);
+    setSoDivergentes(false);
+    setPage(1);
+  };
+
+  // Clique no card = filtro correspondente na tabela; clique de novo = limpa.
+  const aplicarKpi = (key: string) => {
+    if (kpiAtivo === key) {
+      setKpiAtivo(null);
+      limparFiltrosKpi();
+      return;
+    }
+    limparFiltrosKpi();
+    setKpiAtivo(key);
+    if (key === "abertas") setStatusL1("Pendente");
+    else if (key === "vencidas") setSoVencidas(true);
+    else if (key === "cumpridas") setStatusL1("Cumprido");
+    else if (key === "aguardando_verificacao") setVerifFiltro("NA_FILA");
+    else if (key === "divergentes") setSoDivergentes(true);
+  };
+
+  // Cabeçalho ordenável: 1º clique asc, 2º inverte.
+  const Ordenavel = ({ campo, children }: { campo: string; children: React.ReactNode }) => (
+    <TableHead
+      className="cursor-pointer select-none"
+      onClick={() => {
+        if (ordenar === campo) setDirecao((d) => (d === "asc" ? "desc" : "asc"));
+        else {
+          setOrdenar(campo);
+          setDirecao("asc");
+        }
+        setPage(1);
+      }}
+      title="Clique pra ordenar"
+    >
+      <span className="inline-flex items-center gap-1">
+        {children}
+        {ordenar === campo &&
+          (direcao === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
+      </span>
+    </TableHead>
+  );
+
   return (
     <div className="space-y-4">
-      {/* KPIs */}
+      {/* KPIs — clicáveis: filtram a tabela (clique de novo limpa) */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         {KPI_CARDS.map((c) => (
-          <Card key={c.key} className={c.destaque && (kpis?.[c.key] ?? 0) > 0 ? "border-red-500" : undefined}>
+          <Card
+            key={c.key}
+            role="button"
+            onClick={() => aplicarKpi(c.key)}
+            title="Clique pra filtrar a tabela"
+            className={[
+              "cursor-pointer transition-colors hover:bg-muted/50",
+              c.destaque && (kpis?.[c.key] ?? 0) > 0 ? "border-red-500" : "",
+              kpiAtivo === c.key ? "ring-2 ring-primary" : "",
+            ].join(" ")}
+          >
             <CardContent className="p-4">
               <div className="text-xs text-muted-foreground">{c.label}</div>
               <div className="text-2xl font-bold tabular-nums">{kpis?.[c.key] ?? 0}</div>
@@ -186,12 +253,22 @@ export default function AnaliseRiscoTab({ team }: { team: string }) {
 
       {/* Filtros */}
       <div className="flex flex-wrap items-center gap-2">
-        <Select value={statusL1} onValueChange={(v) => { setStatusL1(v); setPage(1); }}>
+        <Select value={statusL1} onValueChange={(v) => { setStatusL1(v); setKpiAtivo(null); setPage(1); }}>
           <SelectTrigger className="w-40"><SelectValue placeholder="Status L1" /></SelectTrigger>
           <SelectContent>
             <SelectItem value={TODOS}>Todos os status</SelectItem>
             <SelectItem value="Pendente">Pendente</SelectItem>
             <SelectItem value="Cumprido">Cumprido</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={verifFiltro} onValueChange={(v) => { setVerifFiltro(v); setKpiAtivo(null); setPage(1); }}>
+          <SelectTrigger className="w-52"><SelectValue placeholder="Verificação no portal" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value={TODOS}>Verificação: todas</SelectItem>
+            <SelectItem value="NA_FILA">Na fila de verificação</SelectItem>
+            <SelectItem value="VERIFICADA">Verificada</SelectItem>
+            <SelectItem value="ERRO">Com erro (vai re-tentar)</SelectItem>
+            <SelectItem value="PENDENTE">Sem verificação (tarefa aberta)</SelectItem>
           </SelectContent>
         </Select>
         <Select value={responsavel} onValueChange={(v) => { setResponsavel(v); setPage(1); }}>
@@ -206,7 +283,7 @@ export default function AnaliseRiscoTab({ team }: { team: string }) {
         <Button
           variant={soDivergentes ? "destructive" : "outline"}
           size="sm"
-          onClick={() => { setSoDivergentes((v) => !v); setPage(1); }}
+          onClick={() => { setSoDivergentes((v) => !v); setKpiAtivo(null); setPage(1); }}
         >
           <AlertTriangle className="mr-1 h-4 w-4" /> Só divergentes
         </Button>
@@ -241,13 +318,13 @@ export default function AnaliseRiscoTab({ team }: { team: string }) {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>NPJ</TableHead>
+                <Ordenavel campo="npj">NPJ</Ordenavel>
                 <TableHead>CNJ</TableHead>
-                <TableHead>Responsável</TableHead>
-                <TableHead>Agendada</TableHead>
-                <TableHead>Prazo</TableHead>
-                <TableHead>Status L1</TableHead>
-                <TableHead>Análise no portal</TableHead>
+                <Ordenavel campo="responsavel">Responsável</Ordenavel>
+                <Ordenavel campo="agendada_em">Agendada</Ordenavel>
+                <Ordenavel campo="prazo">Prazo</Ordenavel>
+                <Ordenavel campo="status_l1">Status L1</Ordenavel>
+                <Ordenavel campo="verificada_em">Análise no portal</Ordenavel>
               </TableRow>
             </TableHeader>
             <TableBody>

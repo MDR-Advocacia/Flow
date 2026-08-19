@@ -204,13 +204,29 @@ def sync_se_stale(db: Session) -> Optional[dict]:
         return None
 
 
+# Colunas que a tabela pode ordenar (whitelist — nome da query -> coluna).
+_ORDENAVEIS = {
+    "prazo": AnaliseRiscoTarefa.prazo,
+    "agendada_em": AnaliseRiscoTarefa.agendada_em,
+    "concluida_em": AnaliseRiscoTarefa.concluida_em,
+    "responsavel": AnaliseRiscoTarefa.responsavel_nome,
+    "status_l1": AnaliseRiscoTarefa.status_l1,
+    "npj": AnaliseRiscoTarefa.npj,
+    "verificada_em": AnaliseRiscoTarefa.portal_verificado_em,
+}
+
+
 def listar(
     db: Session,
     *,
     status_l1: Optional[str] = None,
     responsavel: Optional[str] = None,
     divergente: Optional[bool] = None,
+    verif_status: Optional[str] = None,
+    vencidas: Optional[bool] = None,
     busca: Optional[str] = None,
+    ordenar: str = "prazo",
+    direcao: str = "asc",
     limit: int = 50,
     offset: int = 0,
 ) -> dict:
@@ -221,6 +237,14 @@ def listar(
         q = q.filter(AnaliseRiscoTarefa.responsavel_nome == responsavel)
     if divergente is not None:
         q = q.filter(AnaliseRiscoTarefa.divergente.is_(divergente))
+    if verif_status:
+        q = q.filter(AnaliseRiscoTarefa.verif_status == verif_status)
+    if vencidas:
+        q = q.filter(
+            AnaliseRiscoTarefa.status_l1 == STATUS_PENDENTE,
+            AnaliseRiscoTarefa.prazo.isnot(None),
+            AnaliseRiscoTarefa.prazo < _agora(),
+        )
     if busca:
         like = f"%{busca.strip()}%"
         q = q.filter(
@@ -232,11 +256,10 @@ def listar(
         )
 
     total = q.count()
+    col = _ORDENAVEIS.get(ordenar, AnaliseRiscoTarefa.prazo)
+    ordem = col.desc().nullslast() if direcao == "desc" else col.asc().nullslast()
     itens = (
-        q.order_by(
-            AnaliseRiscoTarefa.prazo.asc().nullslast(),
-            AnaliseRiscoTarefa.id.asc(),
-        )
+        q.order_by(ordem, AnaliseRiscoTarefa.id.asc())
         .offset(offset)
         .limit(limit)
         .all()
