@@ -22,6 +22,12 @@ from app.db.session import Base
 
 
 # Status do lote no nosso sistema
+# Fase 1 do envio: o batch de AQUECIMENTO do cache está rodando na Anthropic.
+# O lote real ainda não foi submetido — ele só parte quando o aquecimento
+# CONCLUI, que é o que torna a entrada de cache visível para os workers do
+# batch (ver pub011). Estado transitório: nada fica aqui por mais que a janela
+# de `classifier_prompt_cache_warm_timeout_min`.
+PUB_BATCH_STATUS_WARMING = "AQUECENDO"
 PUB_BATCH_STATUS_SUBMITTED = "ENVIADO"          # criado na Anthropic, aguardando processamento
 PUB_BATCH_STATUS_IN_PROGRESS = "EM_PROCESSAMENTO"  # Anthropic está processando
 PUB_BATCH_STATUS_READY = "PRONTO"               # resultados disponíveis para download
@@ -116,6 +122,15 @@ class PublicationBatchClassification(Base):
         server_default=func.now(),
         nullable=False,
     )
+    # ── Aquecimento de cache em duas fases (pub011) ──────────────────
+    # `warm_batch_id` é o batch de aquecimento (1 requisição por prefixo
+    # distinto), NÃO o lote de classificação. Enquanto ele roda, este registro
+    # fica em AQUECENDO e `anthropic_batch_id` ainda é nulo.
+    warm_batch_id = Column(String, nullable=True)
+    warm_started_at = Column(DateTime(timezone=True), nullable=True)
+    warm_ended_at = Column(DateTime(timezone=True), nullable=True)
+    warm_prefixos = Column(Integer, nullable=True)
+
     submitted_at = Column(DateTime(timezone=True), nullable=True)
     ended_at = Column(DateTime(timezone=True), nullable=True)
     applied_at = Column(DateTime(timezone=True), nullable=True)

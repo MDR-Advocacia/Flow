@@ -259,6 +259,58 @@ class AnthropicClassifierClient:
             },
         }
 
+    def build_warm_requests(self, prompts: list[str]) -> list[dict[str, Any]]:
+        """Monta o batch de AQUECIMENTO: uma requisição por prefixo distinto.
+
+        É a receita que a doc da Anthropic prescreve para a Batches API —
+        mandar um batch com o prefixo compartilhado, esperar CONCLUIR, e só
+        então submeter o resto. O aquecimento síncrono que usávamos antes não
+        servia: entrada de cache só fica visível depois que a primeira
+        RESPOSTA começa, e os workers do batch partem concorrentes.
+
+        `max_tokens=1` e não 0: a API rejeita `max_tokens: 0` dentro de um
+        batch (o zero existe só para pré-aquecimento síncrono). A saída de 1
+        token é descartada — o que interessa é a gravação do prefixo.
+        """
+        reqs: list[dict[str, Any]] = []
+        for i, prompt in enumerate(prompts):
+            req = self.build_batch_request(
+                custom_id=f"warm-{i}",
+                system_prompt=prompt,
+                user_message="warmup",
+                cache=True,
+            )
+            req["params"]["max_tokens"] = 1
+            reqs.append(req)
+        return reqs
+
+    async def aguardar_batch(
+        self, batch_id: str, timeout_seconds: int, poll_seconds: int = 15,
+    ) -> dict[str, Any]:
+        """Espera um batch chegar a `ended`. Devolve {"ok", "status", "erro"}.
+
+        Nunca levanta: quem chama precisa poder seguir sem cache se o
+        aquecimento não fechar a tempo. Fila parada é pior que lote caro.
+        """
+        inicio = asyncio.get_event_loop().time()
+        ultimo = "?"
+        while True:
+            try:
+                st = await self.get_batch_status(batch_id)
+                ultimo = st.get("processing_status") or "?"
+                if ultimo == "ended":
+                    return {"ok": True, "status": ultimo}
+                if ultimo in ("canceled", "expired"):
+                    return {"ok": False, "status": ultimo,
+                            "erro": f"batch de aquecimento terminou como {ultimo}"}
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "status": ultimo, "erro": str(exc)[:300]}
+
+            if asyncio.get_event_loop().time() - inicio > timeout_seconds:
+                return {"ok": False, "status": ultimo,
+                        "erro": f"tempo limite de {timeout_seconds}s aguardando o aquecimento"}
+            await asyncio.sleep(poll_seconds)
+
     async def submit_batch(self, requests: list[dict[str, Any]]) -> dict[str, Any]:
         """
         Envia um lote de classificações para a Message Batches API.
