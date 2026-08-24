@@ -289,13 +289,48 @@ def retentar_planilhas_orfas(db) -> None:
             registrar_descartes(db, rel, planilha_id=pl.id)
             pl.subido_legalone = True
             pl.subido_em = datetime.now(timezone.utc)
+
+            # Credita o resultado de volta ao RUN que gerou a planilha.
+            #
+            # Sem isto, o run fica dizendo "0 cadastrados" enquanto as pastas
+            # existem no L1 — o retry roda fora do contexto do run e ninguém
+            # somava. Foi o que aconteceu com o run 178 em 21/08/2026: o
+            # auto-cadastro dele estourou, este retry importou as 29 doze
+            # minutos depois, e o painel seguiu mostrando cadast=0. Operador
+            # olha isso e conclui que perdeu 29 processos.
+            #
+            # O vínculo vem do próprio evento de abertura do auto-cadastro, que
+            # já carrega run_id e planilha_id juntos — não precisa de coluna nova.
+            novos = int(rel.get("novos", 0) or 0)
+            # Preferência: a coluna. Fallback: o evento de abertura do
+            # auto-cadastro, que carrega run_id e planilha_id juntos — é o que
+            # resgata as planilhas antigas, geradas quando `run_id` ainda não
+            # era preenchido.
+            run_origem = pl.run_id or db.execute(
+                _text(
+                    "SELECT run_id FROM bbd_eventos "
+                    "WHERE dados->>'planilha_id' = :pid AND run_id IS NOT NULL "
+                    "ORDER BY id LIMIT 1"
+                ),
+                {"pid": str(pl.id)},
+            ).scalar()
+            if run_origem and novos:
+                from app.models.distribuidos_bb import BbRun
+
+                run = db.get(BbRun, int(run_origem))
+                if run is not None:
+                    run.total_cadastrados = (run.total_cadastrados or 0) + novos
+
             registrar_evento(
                 db, secao=SECAO_CADASTRO, nivel=NIVEL_SUCESSO, acao="Retry do auto-cadastro OK",
                 mensagem=(
                     f"Import da planilha '{pl.nome_arquivo}' enviado na retentativa: "
-                    f"{rel.get('novos', 0)} pasta(s) nova(s). O monitor confirma nos próximos ciclos."
+                    f"{novos} pasta(s) nova(s). O monitor confirma nos próximos ciclos."
                 ),
-                dados={"planilha_id": str(pl.id), "novos": rel.get("novos", 0)},
+                dados={"planilha_id": str(pl.id), "novos": novos},
+                # Amarra o evento ao run de origem pra ele aparecer na linha do
+                # tempo da rodada, e não solto com run_id nulo como antes.
+                run_id=int(run_origem) if run_origem else None,
             )
             db.commit()
             logger.info("Retry do auto-cadastro OK (planilha %s).", pl.id)

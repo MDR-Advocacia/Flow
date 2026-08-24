@@ -348,6 +348,11 @@ def _auto_cadastrar(db: Session, run: BbRun) -> None:
     planilha = gerar_e_persistir(db, cliente=CLIENTE_BB)
     if planilha is None:
         return
+    # Amarra a planilha ao run. A coluna `run_id` de bbd_planilhas existia desde
+    # sempre e nunca foi preenchida (120 de 120 nulas em 24/08/2026), e é
+    # justamente ela que o retry precisa pra creditar o cadastro de volta à
+    # rodada quando o auto-cadastro falha e a retentativa salva depois.
+    planilha.run_id = run.id
     db.commit()
     registrar_evento(
         db, secao=SECAO_CADASTRO, nivel=NIVEL_INFO, acao="Auto-cadastro iniciado",
@@ -593,14 +598,51 @@ def executar_coleta(
 
             novos_pool = contar_pool_novos(db, cliente=CLIENTE_BB)
             if run.total_distribuidos > 0:
+                # Quantas notificações eram RELEITURA de processo que já
+                # tínhamos? `_upsert_processo` marca 'Capturado' quando o
+                # processo nasce e 'Reatualizado' quando já existia, então a
+                # resposta já está gravada — não precisa de contador novo.
+                #
+                # Isso importa porque a frase antiga chamava TODAS as
+                # distribuídas de "novas" e depois mostrava um pool menor, o
+                # que faz o operador achar que o resto se perdeu. Caso real:
+                # o run 180 leu 57, das quais 29 eram pendências que o run 178
+                # tinha deixado abertas de propósito (modo seguro, ciência
+                # desligada) e que já estavam cadastradas; só 28 eram novas.
+                from sqlalchemy import text as _text
+
+                relidos = db.execute(
+                    _text(
+                        "SELECT count(*) FROM bbd_eventos "
+                        "WHERE run_id = :r AND acao = 'Reatualizado'"
+                    ),
+                    {"r": run.id},
+                ).scalar() or 0
+                if relidos:
+                    resumo = (
+                        f"{run.total_distribuidos} notificação(ões) tratada(s): "
+                        f"{run.total_distribuidos - relidos} processo(s) novo(s) e "
+                        f"{relidos} que já tínhamos (releitura de pendência ainda "
+                        f"aberta no portal — não geram cadastro de novo). "
+                    )
+                else:
+                    resumo = (
+                        f"{run.total_distribuidos} processo(s) novo(s) desta execução "
+                        f"entraram no pool. "
+                    )
                 registrar_evento(
                     db, secao=SECAO_PLANILHA, nivel=NIVEL_INFO, acao="Pool atualizado",
                     mensagem=(
-                        f"{run.total_distribuidos} processo(s) novo(s) desta execução "
-                        f"entraram no pool. Pool total aguardando planilha: {novos_pool}. "
+                        resumo
+                        + f"Pool total aguardando planilha: {novos_pool}. "
                         f"O operador gera a planilha quando quiser."
                     ),
-                    dados={"novos_execucao": run.total_distribuidos, "pool_total": novos_pool},
+                    dados={
+                        "tratados_execucao": run.total_distribuidos,
+                        "novos_execucao": run.total_distribuidos - relidos,
+                        "relidos_execucao": relidos,
+                        "pool_total": novos_pool,
+                    },
                     run_id=run.id,
                 )
             else:
