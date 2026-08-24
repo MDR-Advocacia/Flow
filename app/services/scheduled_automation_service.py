@@ -1204,12 +1204,62 @@ class ScheduledAutomationService:
                 batch.anthropic_batch_id, len(all_records),
             )
 
-            # 4) Polling até terminar (timeout ~30 min)
+            # 4) Polling até terminar
+            #
+            # O teto cobre as DUAS fases desde o pub011: aquecimento do cache
+            # (guarda própria de 20 min) + o lote real (2–7 min medidos). Com
+            # os 30 min antigos, um aquecimento lento comeria a janela e a
+            # rodada terminaria sem aplicar — exatamente o modo de falha que
+            # este bloco existe pra impedir. 45 min deixa folga sobre o pior
+            # caso (20 + 7) sem prender a rodada noturna por tempo demais.
             poll_interval = 30   # s
-            max_wait = 30 * 60   # s
+            max_wait = 45 * 60   # s
             deadline = time.monotonic() + max_wait
 
             while time.monotonic() < deadline:
+                # FASE DE AQUECIMENTO (pub011): com o cache em duas fases o lote
+                # NASCE em AQUECENDO e só ganha `anthropic_batch_id` quando o
+                # aquecimento fecha e ele é promovido. Chamar
+                # refresh_batch_status aqui levanta
+                # "Batch N sem anthropic_batch_id" e MATA a etapa inteira — foi
+                # o que quebrou o apply automático nos lotes 150/151/152, que
+                # classificavam normalmente e ficavam esperando alguém aplicar
+                # na mão (os lotes que não aqueceram aplicavam em segundos).
+                #
+                # Aqui a gente termina o serviço em vez de estourar: promove o
+                # que dá pra promover e recarrega o lote do banco, porque quem
+                # normalmente promove é OUTRO worker (o de 60s), em outra
+                # sessão — o objeto que esta rotina segura em memória não
+                # enxergaria a promoção sozinho.
+                if not batch.anthropic_batch_id:
+                    try:
+                        await classifier.promover_aquecidos()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Classify: promoção do lote aquecido falhou (%s); "
+                            "o worker de 60s ainda pode promover.", exc,
+                        )
+                    self.db.refresh(batch)
+                    if not batch.anthropic_batch_id:
+                        if run_id is not None:
+                            self._update_progress(
+                                run_id,
+                                phase="classify:aquecendo",
+                                current=0,
+                                total=total_records,
+                                message="Aquecendo o cache do prompt antes de enviar o lote…",
+                            )
+                        logger.info(
+                            "Classify: lote %s ainda AQUECENDO; aguardando %ss.",
+                            batch.id, poll_interval,
+                        )
+                        await asyncio.sleep(poll_interval)
+                        continue
+                    logger.info(
+                        "Classify: lote %s promovido (batch %s); seguindo pro polling.",
+                        batch.id, batch.anthropic_batch_id,
+                    )
+
                 batch = await classifier.refresh_batch_status(batch)
                 if run_id is not None:
                     done = (batch.succeeded_count or 0) + (batch.errored_count or 0)
