@@ -178,7 +178,9 @@ export async function getDiagnostico(
   const qs = new URLSearchParams({ team });
   faixaTabelaQs(qs, faixa);
   const r = await json<{ colaboradores: Colaborador[]; publicacoes_desde?: string | null }>(
-    await apiFetch(`${BASE}/diagnostico?${qs.toString()}`),
+    // O diagnóstico é um espelho mutável. Impede o cache HTTP do navegador ou
+    // de um proxy de devolver a resposta anterior logo após a ingestão.
+    await apiFetch(`${BASE}/diagnostico?${qs.toString()}`, { cache: "no-store" }),
   );
   // `publicacoes_desde` viaja junto no array (propriedade não-enumerável seria
   // perdida no map do React) — quem quiser lê via getDiagnosticoCompleto.
@@ -194,7 +196,7 @@ export async function getDiagnosticoCompleto(
   const qs = new URLSearchParams({ team });
   faixaTabelaQs(qs, faixa);
   const r = await json<{ colaboradores: Colaborador[]; publicacoes_desde?: string | null }>(
-    await apiFetch(`${BASE}/diagnostico?${qs.toString()}`),
+    await apiFetch(`${BASE}/diagnostico?${qs.toString()}`, { cache: "no-store" }),
   );
   return { colaboradores: r.colaboradores, publicacoes_desde: r.publicacoes_desde ?? null };
 }
@@ -209,7 +211,9 @@ export interface EntradaDia {
 }
 export async function getEntradas(team: string, dias = 7): Promise<EntradaDia[]> {
   const qs = new URLSearchParams({ team, dias: String(dias) });
-  const r = await json<{ entradas: EntradaDia[] }>(await apiFetch(`${BASE}/entradas?${qs.toString()}`));
+  const r = await json<{ entradas: EntradaDia[] }>(
+    await apiFetch(`${BASE}/entradas?${qs.toString()}`, { cache: "no-store" }),
+  );
   return r.entradas;
 }
 

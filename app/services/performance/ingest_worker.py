@@ -56,14 +56,26 @@ def _tick_gerar(cancelar_massa: bool = False) -> None:
     cancelamento em massa de duplicadas dos subtipos da whitelist."""
     from app.db.session import SessionLocal
     from app.services.onerequest._concurrency import single_worker_lock
-    from app.services.performance.report_ingest import gerar_e_ingerir
+    from app.services.performance.report_ingest import (
+        gerar_e_ingerir,
+        limpar_sync_rodando,
+        marcar_sync_rodando,
+    )
 
     with single_worker_lock(_LOCK_KEY) as got:
         if not got:
             logger.info("Minha Equipe geração: outro worker já rodando — pulando.")
             return
-        db = SessionLocal()
+        db = None
         try:
+            # Publica o MESMO estado usado pela atualização manual. Assim uma
+            # aba aberta percebe o job das 4h/13h, bloqueia cliques concorrentes
+            # e, ao mudar a versão do snapshot, recarrega o Balanceamento.
+            marcar_sync_rodando(
+                "agendamento automático",
+                "gerando relatório no L1",
+            )
+            db = SessionLocal()
             res = gerar_e_ingerir(db)
             if res.get("ok"):
                 logger.info(
@@ -86,7 +98,9 @@ def _tick_gerar(cancelar_massa: bool = False) -> None:
         except Exception:
             logger.exception("Minha Equipe geração sob demanda: erro inesperado.")
         finally:
-            db.close()
+            limpar_sync_rodando()
+            if db is not None:
+                db.close()
 
 
 def register_perf_ingest_job(scheduler) -> None:

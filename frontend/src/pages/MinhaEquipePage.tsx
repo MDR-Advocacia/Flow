@@ -211,10 +211,18 @@ export default function MinhaEquipePage() {
   // mostra a barra em todas as telas — sem isso, todo mundo apertava junto.
   const running = syncStatus?.running?.running ?? false;
   const prevRunningRef = useRef(false);
+  // O job automático não depende de uma aba aberta. A versão do snapshot é o
+  // sinal persistente de que ele terminou; comparar só running true→false
+  // perdia atualizações automáticas e não recarregava o Balanceamento.
+  const prevSnapshotEmRef = useRef<string | null>(null);
 
   useEffect(() => {
     getCargos(team).then(setCargos).catch(() => undefined);
-    getSyncStatus().then(setSyncStatus).catch(() => undefined);
+    getSyncStatus().then((st) => {
+      setSyncStatus(st);
+      prevRunningRef.current = st.running?.running ?? false;
+      prevSnapshotEmRef.current = st.last_sync?.em ?? null;
+    }).catch(() => undefined);
   }, [team]);
 
   const handleSyncNow = async () => {
@@ -232,7 +240,11 @@ export default function MinhaEquipePage() {
         });
       }
       // força um refresh imediato do estado pra a barra aparecer na hora
-      getSyncStatus().then((st) => { setSyncStatus(st); prevRunningRef.current = st.running?.running ?? false; }).catch(() => undefined);
+      getSyncStatus().then((st) => {
+        setSyncStatus(st);
+        prevRunningRef.current = st.running?.running ?? false;
+        prevSnapshotEmRef.current = st.last_sync?.em ?? null;
+      }).catch(() => undefined);
     } catch (e) {
       toast({ title: "Erro ao disparar atualização", description: String((e as Error).message), variant: "destructive" });
       setSyncing(false);
@@ -265,7 +277,9 @@ export default function MinhaEquipePage() {
 
   // Poll do estado de sync: rápido enquanto está rodando (pra a barra andar e
   // pegar o fim), lento quando ocioso (só pra detectar um run iniciado por
-  // outra pessoa/equipe). Ao terminar (running true→false), recarrega os dados.
+  // outra pessoa/equipe). A recarga é guiada pela VERSÃO do snapshot, não só
+  // por running true→false: assim também pega o job automático e não anuncia
+  // sucesso quando uma tentativa terminou sem ingerir dados novos.
   // Fica DEPOIS de `load` de propósito — referenciá-lo antes da definição dá
   // TDZ (ReferenceError no render = tela branca).
   useEffect(() => {
@@ -276,14 +290,27 @@ export default function MinhaEquipePage() {
         if (!vivo) return;
         setSyncStatus(st);
         const agora = st.running?.running ?? false;
+        const snapshotEm = st.last_sync?.em ?? null;
+        const snapshotMudou = !!snapshotEm && snapshotEm !== prevSnapshotEmRef.current;
+        if (snapshotMudou) {
+          // KPIs/tabela de desempenho da página. O Balanceador recebe a mesma
+          // versão por prop e recarrega o próprio estado separadamente.
+          load();
+        }
         if (prevRunningRef.current && !agora) {
           setSyncing(false);
-          load();
-          if (st.last_sync?.tarefas) {
+          if (snapshotMudou && st.last_sync?.tarefas) {
             toast({ title: "Dados atualizados!", description: `${st.last_sync.tarefas.toLocaleString("pt-BR")} tarefas · relatório de ${st.last_sync.data}.` });
+          } else if (!snapshotMudou) {
+            toast({
+              title: "A atualização não gerou dados novos",
+              description: "O snapshot anterior foi mantido. Tente novamente; se persistir, verifique a geração do relatório no Legal One.",
+              variant: "destructive",
+            });
           }
         }
         prevRunningRef.current = agora;
+        prevSnapshotEmRef.current = snapshotEm;
       } catch {
         /* ignore */
       }
@@ -592,7 +619,11 @@ export default function MinhaEquipePage() {
       </CollapsibleSection>
 
       <CollapsibleSection title="Balanceamento de agenda" subtitle="Diagnóstico de carga + redistribuição" defaultOpen={false}>
-        <BalanceadorSection team={team} onAplicado={() => setRelReloadKey((k) => k + 1)} />
+        <BalanceadorSection
+          team={team}
+          snapshotVersion={syncStatus?.last_sync?.em}
+          onAplicado={() => setRelReloadKey((k) => k + 1)}
+        />
       </CollapsibleSection>
 
       <CollapsibleSection title="Reagendamentos" subtitle="Adiamentos de prazo no dia (bracket 07h/19h)" defaultOpen={false}>

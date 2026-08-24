@@ -49,7 +49,18 @@ function Bar({ a, f, fut }: { a: number; f: number; fut: number }) {
   );
 }
 
-export default function BalanceadorSection({ team, onAplicado }: { team: string; onAplicado?: () => void }) {
+export default function BalanceadorSection({
+  team,
+  onAplicado,
+  snapshotVersion,
+}: {
+  team: string;
+  onAplicado?: () => void;
+  /** Instante do último snapshot ingerido. Quando muda, o diagnóstico que
+   *  estava aberto precisa ser relido — ele mantém estado próprio e não é
+   *  atualizado pelo `load` da página pai. */
+  snapshotVersion?: string | null;
+}) {
   const { toast } = useToast();
   const [data, setData] = useState<Colaborador[]>([]);
   const [loading, setLoading] = useState(false);
@@ -126,8 +137,10 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
     getEntradas(team, 7).then(setEntradas).catch(() => setEntradas([]));
   }, [tableCadOpen, entradas, team]);
 
-  // Troca de time invalida a prévia (recarrega na próxima abertura).
-  useEffect(() => { setEntradas(null); }, [team]);
+  // Troca de time OU de snapshot invalida a prévia (recarrega na próxima
+  // abertura). Sem isto, a tabela principal ficava nova mas o popover "o que
+  // chegou" continuava exibindo os números do snapshot anterior.
+  useEffect(() => { setEntradas(null); }, [team, snapshotVersion]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -145,7 +158,7 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
 
   useEffect(() => {
     load();
-  }, [load]);
+  }, [load, snapshotVersion]);
 
   const cargos = useMemo(
     () => Array.from(new Set(data.map((d) => d.cargo).filter(Boolean))) as string[],
@@ -175,7 +188,8 @@ export default function BalanceadorSection({ team, onAplicado }: { team: string;
   const toggle = (id: number) =>
     setSel((s) => {
       const n = new Set(s);
-      n.has(id) ? n.delete(id) : n.add(id);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
       return n;
     });
 

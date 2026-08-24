@@ -77,6 +77,20 @@ def _parse_data(s: str):
         return None
 
 
+def _mesmo_relatorio(rel: dict, anterior: dict | None) -> bool:
+    """Compara a identidade do arquivo novo com o último snapshot.
+
+    Snapshots antigos não tinham `report_id`: no download eles guardavam o
+    título completo; na geração sob demanda, o próprio id ia em `relatorio`.
+    Aceitar os três formatos mantém a proteção válida durante a transição.
+    """
+    anterior = anterior or {}
+    anterior_id = anterior.get("report_id") or anterior.get("relatorio")
+    mesmo_id = anterior_id is not None and str(anterior_id) == str(rel.get("id"))
+    mesmo_titulo = anterior.get("relatorio") == rel.get("title")
+    return bool(mesmo_id or mesmo_titulo)
+
+
 def _find_latest(session: requests.Session, base: str):
     """Acha o 'Agenda Analytics' de MAIOR data de geração na lista já filtrada
     por título. Não confia na ordem/paginação: percorre todas as linhas e fica
@@ -146,9 +160,11 @@ def _reaplicar_reatribuicoes(db) -> None:
         logger.exception("Ingest: falha ao reaplicar reatribuições (segue com o snapshot cru).")
 
 
-def baixar_e_ingerir(db, *, force: bool = False) -> dict:
+def baixar_e_ingerir(db, *, force: bool = False, only_if_new: bool = False) -> dict:
     """Baixa o relatório do dia e ingere. force=True ingere o mais recente mesmo
-    que não seja de hoje (ex.: botão "Atualizar agora")."""
+    que não seja de hoje. `only_if_new=True` impede o fallback da atualização
+    manual de reingerir exatamente o snapshot anterior e anunciar falso
+    sucesso quando a geração fresca falhou."""
     from app.services.prazos_iniciais.legacy_task_helpers import web_base_url
 
     base = web_base_url()
@@ -166,12 +182,23 @@ def baixar_e_ingerir(db, *, force: bool = False) -> dict:
             "hoje": hoje,
         }
 
+    if only_if_new:
+        if _mesmo_relatorio(rel, get_last_sync()):
+            return {
+                "ok": False,
+                "motivo": "nenhum_relatorio_novo",
+                "relatorio": rel["title"],
+                "report_id": rel["id"],
+                "data": rel["data"],
+            }
+
     resp = session.get(f"{base}/shared/ReportShared/GetFile/{rel['id']}", timeout=300)
     resp.raise_for_status()
     with open(_REPORT_PATH, "wb") as f:
         f.write(resp.content)
 
     # Parser do seed (replace total) + classify, mantendo o roster intacto.
+    atualizar_fase_sync("ingerindo relatório no banco")
     from app.models.performance import PerfPessoa
     from app.services.performance.seed import classify_subtipos, seed_tarefas
 
@@ -184,6 +211,7 @@ def baixar_e_ingerir(db, *, force: bool = False) -> dict:
         "ok": True,
         "tarefas": n,
         "relatorio": rel["title"],
+        "report_id": int(rel["id"]),
         "data": rel["data"],
         "bytes": len(resp.content),
         "em": _now().isoformat(),
@@ -200,8 +228,12 @@ def _set_last_sync(info: dict) -> None:
 
 
 def get_last_sync():
-    from app.services.app_settings import get_setting
+    from app.services.app_settings import get_setting, invalidate_app_settings_cache
 
+    # O cache de app_settings é por PROCESSO. O ingest pode terminar em um
+    # worker e o polling HTTP cair em outro; sem invalidar aqui, esse segundo
+    # processo podia continuar anunciando o snapshot anterior por até 60s.
+    invalidate_app_settings_cache(SETTING_LAST_SYNC)
     raw = get_setting(SETTING_LAST_SYNC, default=None)
     if not raw:
         return None
@@ -252,8 +284,11 @@ def limpar_sync_rodando() -> None:
 def get_sync_running():
     """Retorna o estado de execução, ou None se ocioso. Zera automaticamente um
     run preso (> _SYNC_STALE_SEG) pra não travar o botão pra sempre."""
-    from app.services.app_settings import get_setting
+    from app.services.app_settings import get_setting, invalidate_app_settings_cache
 
+    # Estado operacional compartilhado entre workers precisa ser lido do DB,
+    # não de um cache local potencialmente defasado.
+    invalidate_app_settings_cache(SETTING_SYNC_RUNNING)
     raw = get_setting(SETTING_SYNC_RUNNING, default=None)
     if not raw:
         return None
@@ -375,6 +410,7 @@ def gerar_e_ingerir(
     with open(_REPORT_PATH, "wb") as f:
         f.write(resp.content)
 
+    atualizar_fase_sync("ingerindo relatório no banco")
     from app.models.performance import PerfPessoa
     from app.services.performance.seed import classify_subtipos, seed_tarefas
 
@@ -386,6 +422,7 @@ def gerar_e_ingerir(
         "ok": True,
         "tarefas": n,
         "relatorio": str(novo),
+        "report_id": int(novo),
         "data": _hoje_str(),
         "bytes": len(resp.content),
         "em": _now().isoformat(),

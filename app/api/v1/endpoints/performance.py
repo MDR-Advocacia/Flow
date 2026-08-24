@@ -451,7 +451,12 @@ def _run_sync_bg() -> None:
                     res.get("motivo"),
                 )
                 atualizar_fase_sync("baixando relatório existente")
-                baixar_e_ingerir(db, force=True)
+                fallback = baixar_e_ingerir(db, force=True, only_if_new=True)
+                if not fallback.get("ok"):
+                    logger.error(
+                        "Minha Equipe: atualização manual terminou sem snapshot novo — %s.",
+                        fallback.get("motivo"),
+                    )
         except Exception:  # noqa: BLE001
             logger.exception("Minha Equipe: falha na ingestão manual.")
         finally:

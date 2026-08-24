@@ -119,7 +119,7 @@ export interface TipoItem {
 export async function getEquipe(team: string, days = 30, cargo?: string): Promise<EquipeResponse> {
   const qs = new URLSearchParams({ team, days: String(days) });
   if (cargo) qs.set("cargo", cargo);
-  return json(await apiFetch(`${BASE}/equipe?${qs.toString()}`));
+  return json(await apiFetch(`${BASE}/equipe?${qs.toString()}`, { cache: "no-store" }));
 }
 
 export async function getCargos(team: string): Promise<string[]> {
@@ -426,7 +426,7 @@ export interface SyncStatus {
 }
 
 export async function getSyncStatus(): Promise<SyncStatus> {
-  return json(await apiFetch(`${BASE}/sync`));
+  return json(await apiFetch(`${BASE}/sync`, { cache: "no-store" }));
 }
 
 export async function triggerSync(): Promise<{ ok: boolean; mensagem: string; running?: boolean }> {
