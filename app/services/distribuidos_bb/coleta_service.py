@@ -391,6 +391,10 @@ def _auto_cadastrar(db: Session, run: BbRun) -> None:
     )
     db.commit()
 
+    from app.services.distribuidos_bb.cadastro_conferencia import conferir_duplicacao
+
+    conferir_duplicacao(db, planilha)
+
 
 # --- Recuperação do pool órfão -------------------------------------------
 #

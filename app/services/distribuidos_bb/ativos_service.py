@@ -320,6 +320,10 @@ def _cadastrar_lote(db: Session, lote_id: int, processo_ids: list[int]) -> None:
     planilha.subido_legalone = True
     planilha.subido_em = datetime.now(timezone.utc)
     db.commit()
+    # O import diz o que foi ENVIADO, não o que o L1 criou. Confere.
+    from app.services.distribuidos_bb.cadastro_conferencia import conferir_duplicacao
+
+    conferir_duplicacao(db, planilha)
     logger.info(
         "Ativos: lote %s → planilha '%s' importada no L1 (%s pasta[s] nova[s]).",
         lote_id, planilha.nome_arquivo, rel.get("novos", 0),

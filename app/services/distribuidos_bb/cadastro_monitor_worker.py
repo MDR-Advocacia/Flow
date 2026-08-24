@@ -333,6 +333,11 @@ def retentar_planilhas_orfas(db) -> None:
                 run_id=int(run_origem) if run_origem else None,
             )
             db.commit()
+            from app.services.distribuidos_bb.cadastro_conferencia import (
+                conferir_duplicacao,
+            )
+
+            conferir_duplicacao(db, pl)
             logger.info("Retry do auto-cadastro OK (planilha %s).", pl.id)
         except Exception as exc:  # noqa: BLE001
             db.rollback()

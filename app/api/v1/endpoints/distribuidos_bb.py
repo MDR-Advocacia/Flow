@@ -1091,6 +1091,14 @@ def cadastrar_planilha_l1(
 
         pl.subido_legalone = True
         pl.subido_em = datetime.now(timezone.utc)
+        db.commit()
+        # Confere no L1 se cada processo virou UMA pasta. Foi por este caminho
+        # que a planilha 119 criou 102 pastas pra 51 processos em 24/08/2026.
+        from app.services.distribuidos_bb.cadastro_conferencia import (
+            conferir_duplicacao,
+        )
+
+        conferir_duplicacao(db, pl)
         pl.subido_por_user_id = current_user.id
         db.commit()
     return rel
