@@ -211,12 +211,20 @@ async function gerarRelatorio(page, { baseUrl, modelId, timeoutMs }) {
   }
 
   // Clica "Gerar" (botão submit do form). value="0" = gerar.
-  const clicked = await clickFirstAvailable(page, [
+  //
+  // O L1 injeta overlays (Pendo/cookies e, ocasionalmente, outros banners)
+  // depois do carregamento. Em 24/08/2026 um deles ficou por cima do botão:
+  // o Playwright encontrou o elemento, mas repetiu o clique 56 vezes até
+  // desistir com "intercepts pointer events". O submit não depende de um
+  // ponteiro real, então dispara o click pelo próprio DOM. Isso preserva os
+  // handlers e o submit nativos do botão, sem ficar refém de camadas visuais.
+  const generateSelector = await firstExistingSelector(page, [
     'button[name="ButtonSave"][value="0"]',
     'button[name="ButtonSave"]',
     'button:has-text("Gerar")',
   ]);
-  if (!clicked) throw new Error('Botão "Gerar" não encontrado.');
+  if (!generateSelector) throw new Error('Botão "Gerar" não encontrado.');
+  await page.locator(generateSelector).evaluate((button) => button.click());
   console.error('[gen] cliquei Gerar; aguardando o submit registrar o job…');
 
   // VALIDADO: o clique dispara um job SERVER-SIDE (o submit navega pra

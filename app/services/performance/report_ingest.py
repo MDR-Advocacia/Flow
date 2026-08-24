@@ -354,9 +354,17 @@ def disparar_geracao(model_id: int = AGENDA_ANALYTICS_MODEL_ID, timeout_s: int =
         logger.warning("Minha Equipe: runner de geração estourou o timeout (%ss).", timeout_s)
         return False
     ok = completed.returncode == 0
+    runner_output = "\n".join(
+        part.strip()
+        for part in (completed.stderr or "", completed.stdout or "")
+        if part.strip()
+    )
     logger.info(
         "Minha Equipe: disparo de geração (runner) modelo %s -> %s (exit %s) | %s",
-        model_id, "OK" if ok else "FALHOU", completed.returncode, (completed.stdout or "").strip()[-300:],
+        model_id,
+        "OK" if ok else "FALHOU",
+        completed.returncode,
+        runner_output[-1200:],
     )
     return ok
 
