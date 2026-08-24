@@ -404,6 +404,11 @@ interface GroupedRecord {
   proposed_task: ProposedTask | null;
   proposed_tasks: ProposedTask[];
   classifications: Classification[];
+  // false = a montagem de proposta ainda não passou por este grupo. Sem isso
+  // a tela dizia "Sem template" pra publicação que TEM template e só não foi
+  // processada ainda — a janela chega a centenas de registros logo depois do
+  // lote noturno.
+  proposals_built?: boolean;
   // null/undefined = ainda não enriquecido; [] = consultado e sem etiqueta.
   l1_etiquetas?: L1Etiqueta[] | null;
 }
@@ -4501,6 +4506,20 @@ const PublicationsPage = () => {
                                   </div>
                                 )}
                               </div>
+                            ) : status !== "AGENDADO" &&
+                              group.proposals_built === false &&
+                              group.records.some((r) => r.category) ? (
+                              // Classificada, mas a proposta ainda não foi
+                              // montada. NÃO é falta de template: dizer o
+                              // contrário faz o operador sair criando template
+                              // que já existe.
+                              <span
+                                className="inline-flex items-center gap-1.5 italic text-amber-600"
+                                title="A classificação terminou e a proposta de tarefa está sendo montada. Atualize em instantes."
+                              >
+                                <RefreshCw className="h-3 w-3 animate-spin" />
+                                Montando proposta…
+                              </span>
                             ) : status !== "AGENDADO" &&
                               group.records.some((r) => r.category) ? (
                               // Classificada mas sem template: o "Sem template"
