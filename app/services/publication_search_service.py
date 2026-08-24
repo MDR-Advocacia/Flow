@@ -2547,6 +2547,17 @@ class PublicationSearchService:
             "proposed_task": proposed_task,
             "proposed_tasks": proposed_tasks,
             "classifications": all_classifications,
+            # A montagem de proposta roda DEPOIS da classificação, e a janela
+            # entre as duas chega a centenas de registros logo após o lote
+            # noturno. Sem este sinal a tela dizia "Sem template" para
+            # publicação que TEM template e só não foi processada ainda — foi
+            # o que confundiu o operador em 24/08.
+            #
+            # Como saber: `_build_task_proposals` SEMPRE reescreve
+            # `raw_relationships` como objeto (embrulha o array cru em
+            # `_relationships`). Enquanto o campo for o array que veio do L1,
+            # a montagem ainda não passou por aqui.
+            "proposals_built": isinstance(first.raw_relationships, dict),
         }
 
     # ── Endpoint principal ────────────────────────────────────────
