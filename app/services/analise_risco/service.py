@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.models.analise_risco import (
     AnaliseRiscoTarefa,
+    VERIF_ARQUIVADA,
     VERIF_ERRO,
     VERIF_NA_FILA,
     VERIF_PENDENTE,
@@ -43,6 +44,11 @@ SUBTIPOS_DEFAULT = "Análise de Risco"
 LAST_SYNC_KEY = "analise_risco_last_sync_at"
 SYNC_STALE_SECONDS = 15 * 60
 
+# Data de corte (ISO): só monitora análises cadastradas no L1 a partir daqui.
+# A partir do novo fluxo (Bruno sobe a planilha do portal -> Flow cadastra no
+# L1), o histórico anterior não deve entrar. Vazio = sem corte (pega tudo).
+DATA_CORTE_KEY = "analise_risco_data_corte"
+
 STATUS_CUMPRIDO = "Cumprido"
 STATUS_PENDENTE = "Pendente"
 
@@ -50,6 +56,27 @@ STATUS_PENDENTE = "Pendente"
 def subtipos_configurados() -> list[str]:
     raw = get_setting(SUBTIPOS_KEY, SUBTIPOS_DEFAULT) or SUBTIPOS_DEFAULT
     return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+def data_corte() -> Optional[datetime]:
+    """Datetime aware do corte, ou None se não configurado."""
+    raw = get_setting(DATA_CORTE_KEY)
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        logger.warning("Análise de Risco: data_corte inválida em app_settings: %r", raw)
+        return None
+
+
+def definir_corte_agora() -> str:
+    """Fixa o corte no instante atual (só o que for cadastrado depois é
+    monitorado) e retorna o ISO gravado."""
+    iso = _agora().isoformat()
+    set_setting(DATA_CORTE_KEY, iso)
+    return iso
 
 
 def _sem_acento_lower(s: str) -> str:
@@ -103,6 +130,8 @@ def sync_do_espelho(db: Session) -> dict:
         r.l1_task_id: r for r in db.query(AnaliseRiscoTarefa).all()
     }
 
+    corte = data_corte()
+
     inseridas = atualizadas = para_fila = 0
     vistos: set[int] = set()
     for p in rows:
@@ -115,6 +144,10 @@ def sync_do_espelho(db: Session) -> dict:
 
         row = existentes.get(tid)
         if row is None:
+            # Antes do corte e ainda não existe no banco: nem cria (fora do
+            # escopo do módulo). As já existentes < corte são arquivadas abaixo.
+            if corte and (p.cadastrado_em is None or p.cadastrado_em < corte):
+                continue
             row = AnaliseRiscoTarefa(
                 l1_task_id=tid,
                 verif_status=VERIF_PENDENTE,
@@ -142,15 +175,32 @@ def sync_do_espelho(db: Session) -> dict:
                 para_fila += 1
         row.status_l1 = status_novo
 
+    # ── Corte: análises cadastradas ANTES do corte saem do escopo (ARQUIVADA).
+    # Some do painel/fila/KPIs, mas o registro fica (reversível). Aplicado antes
+    # da supersessão pra as arquivadas não entrarem no agrupamento por processo.
+    arquivadas = 0
+    if corte:
+        for r in existentes.values():
+            if (
+                r.agendada_em is not None
+                and r.agendada_em < corte
+                and r.verif_status != VERIF_ARQUIVADA
+            ):
+                r.verif_status = VERIF_ARQUIVADA
+                r.divergente = None
+                arquivadas += 1
+
     # ── Supersessão: um processo pode ter VÁRIAS análises de risco ao longo do
     # tempo, mas a pendência no portal é o estado ATUAL do processo — só a
     # análise MAIS RECENTE é auditável. As anteriores viram SUPERADA (saem da
     # fila e do farol de divergência; o histórico do portal fica gravado).
     # A mais recente: Cumprida -> fila do portal; Pendente -> acompanhar prazo
-    # (KPI/filtro "Vencidas" do painel).
+    # (KPI/filtro "Vencidas" do painel). Arquivadas (fora do corte) não entram.
     _dt_min = datetime(1970, 1, 1, tzinfo=timezone.utc)
     por_processo: dict[str, list[AnaliseRiscoTarefa]] = {}
     for r in existentes.values():
+        if r.verif_status == VERIF_ARQUIVADA:
+            continue
         chave = (r.npj or "").strip() or (r.cnj or "").strip()
         if chave:
             por_processo.setdefault(chave, []).append(r)
@@ -184,6 +234,8 @@ def sync_do_espelho(db: Session) -> dict:
         "enfileiradas_verificacao": para_fila,
         "superadas": superadas,
         "reativadas": reativadas,
+        "arquivadas": arquivadas,
+        "corte": corte.isoformat() if corte else None,
         "subtipos": subtipos_configurados(),
         "subtipos_encontrados": nomes,
     }
@@ -273,6 +325,10 @@ def listar(
         q = q.filter(AnaliseRiscoTarefa.divergente.is_(divergente))
     if verif_status:
         q = q.filter(AnaliseRiscoTarefa.verif_status == verif_status)
+    else:
+        # Arquivadas (fora do corte) somem do dash por padrão — só aparecem
+        # quando explicitamente pedidas no filtro de verificação.
+        q = q.filter(AnaliseRiscoTarefa.verif_status != VERIF_ARQUIVADA)
     if vencidas:
         q = q.filter(
             AnaliseRiscoTarefa.status_l1 == STATUS_PENDENTE,
@@ -300,8 +356,12 @@ def listar(
     )
 
     # KPIs globais (independem do filtro/página) — mesma filosofia do OneRequest.
+    # Sempre excluem arquivadas (fora do corte): o número tem que refletir o
+    # escopo monitorado, não o histórico.
     agora = _agora()
-    base = db.query(AnaliseRiscoTarefa)
+    base = db.query(AnaliseRiscoTarefa).filter(
+        AnaliseRiscoTarefa.verif_status != VERIF_ARQUIVADA
+    )
     abertas = base.filter(AnaliseRiscoTarefa.status_l1 == STATUS_PENDENTE).count()
     vencidas = (
         base.filter(
@@ -317,7 +377,10 @@ def listar(
     responsaveis = [
         r[0]
         for r in db.query(AnaliseRiscoTarefa.responsavel_nome)
-        .filter(AnaliseRiscoTarefa.responsavel_nome.isnot(None))
+        .filter(
+            AnaliseRiscoTarefa.responsavel_nome.isnot(None),
+            AnaliseRiscoTarefa.verif_status != VERIF_ARQUIVADA,
+        )
         .distinct()
         .order_by(AnaliseRiscoTarefa.responsavel_nome.asc())
         .all()
@@ -336,6 +399,7 @@ def listar(
             "divergentes": divergentes,
         },
         "last_sync_at": get_setting(LAST_SYNC_KEY),
+        "corte": (lambda c: c.isoformat() if c else None)(data_corte()),
         "subtipos": subtipos_configurados(),
         # Nomes do espelho que casaram com a config — diagnóstico visual quando
         # a tabela vem vazia (o nome real do subtipo no L1 costuma variar).

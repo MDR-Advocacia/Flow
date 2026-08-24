@@ -32,6 +32,12 @@ VERIF_ERRO = "ERRO"              # falha na última tentativa — a esteira re-t
 # gera falso divergente (caso real: análise cumprida em 02/2026 acusada como
 # divergente porque a pendência aberta era da análise nova de 08/2026).
 VERIF_SUPERADA = "SUPERADA"
+# Cadastrada ANTES da data de corte do módulo: fora do escopo de monitoramento.
+# A partir do corte, só as análises que o Bruno sobe pela planilha do portal e
+# o Flow cadastra no L1 devem ser monitoradas — o histórico anterior inflava o
+# dash sem sentido. Some do painel/fila/KPIs, mas fica no banco (reversível:
+# baixar o corte re-inclui, sem perder o que a esteira já verificou).
+VERIF_ARQUIVADA = "ARQUIVADA"
 
 
 class AnaliseRiscoTarefa(Base):

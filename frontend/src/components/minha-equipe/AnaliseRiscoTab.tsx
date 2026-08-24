@@ -56,6 +56,17 @@ function prazoVencido(item: AnaliseRiscoItem): boolean {
 }
 
 function VerificacaoBadge({ item }: { item: AnaliseRiscoItem }) {
+  if (item.verif_status === "ARQUIVADA") {
+    return (
+      <Badge
+        variant="outline"
+        className="cursor-help text-muted-foreground"
+        title="Cadastrada antes da data de corte do módulo — fora do escopo de monitoramento (histórico anterior ao novo fluxo da planilha do portal)."
+      >
+        Arquivada
+      </Badge>
+    );
+  }
   if (item.verif_status === "SUPERADA") {
     return (
       <Badge
@@ -281,6 +292,7 @@ export default function AnaliseRiscoTab({ team }: { team: string }) {
             <SelectItem value="ERRO">Com erro (vai re-tentar)</SelectItem>
             <SelectItem value="PENDENTE">Sem verificação (tarefa aberta)</SelectItem>
             <SelectItem value="SUPERADA">Superadas (há análise mais recente)</SelectItem>
+            <SelectItem value="ARQUIVADA">Arquivadas (fora do corte)</SelectItem>
           </SelectContent>
         </Select>
         <Select value={responsavel} onValueChange={(v) => { setResponsavel(v); setPage(1); }}>
@@ -312,6 +324,11 @@ export default function AnaliseRiscoTab({ team }: { team: string }) {
           <Button type="submit" variant="outline" size="icon"><Search className="h-4 w-4" /></Button>
         </form>
         <div className="ml-auto flex items-center gap-2">
+          {data?.corte && (
+            <span className="text-xs text-muted-foreground" title="Só análises cadastradas no L1 a partir desta data são monitoradas. As anteriores ficam arquivadas.">
+              Monitorando desde {fmtData(data.corte)}
+            </span>
+          )}
           {data?.last_sync_at && (
             <span className="text-xs text-muted-foreground">
               Sync: {fmtDataHora(data.last_sync_at)}

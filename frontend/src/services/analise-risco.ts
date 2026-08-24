@@ -55,6 +55,8 @@ export interface AnaliseRiscoResponse {
   total: number;
   kpis: AnaliseRiscoKpis;
   last_sync_at: string | null;
+  // Data de corte (ISO): só monitora análises cadastradas a partir daqui.
+  corte?: string | null;
   subtipos: string[];
   // Nomes exatos do espelho do L1 que casaram com a configuração (diagnóstico).
   subtipos_encontrados?: string[];
