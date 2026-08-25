@@ -40,10 +40,23 @@ funcionam. Curinga só é seguro em escritório que não tem nenhum específico
 
 FORA DE ESCOPO (decisão do operador em 24/08)
 ---------------------------------------------
-77 combinações ficaram de fora: classificações sem subcategoria (o balde
-residual "Para Análise") e escritórios sem template nenhum (Banese 42/44,
-BB Interessado 40). Continuam aparecendo como "Sem template" na tela, de
-propósito.
+Escritórios sem template nenhum (Banese 42/44, BB Interessado 40) ficam de
+fora. Continuam aparecendo como "Sem template" na tela, de propósito.
+
+E "PARA ANÁLISE" NÃO GANHA TEMPLATE — nunca
+-------------------------------------------
+Regra do operador, e ela conserta um erro que a primeira versão deste script
+cometeu em produção. Quando a publicação não é classificada numa categoria
+definida, o padrão é impossibilidade de leitura por insuficiência textual:
+isso tem que ir para o operador, não virar tarefa automática.
+
+Havia também um motivo mecânico para o estrago: `repair_classification` faz
+TODA subcategoria que não existe na árvore convergir para "Para Análise". Sem
+deduplicar o plano pela chave FINAL (depois do reparo), 13 subcategorias cruas
+diferentes viraram 13 templates IDÊNTICOS na mesma classificação — e o match
+devolve todos, então a tela mostrava 13 tarefas repetidas. Foram criados 335
+templates, 126 eram "Para Análise" e 13 eram duplicatas por convergência;
+todos removidos, sobraram 196.
 
 USO
 ---
@@ -102,6 +115,10 @@ def montar_plano(db) -> tuple[list[dict], list[tuple]]:
 
     plano: list[dict] = []
     fora: list[tuple] = []
+    # Chave FINAL (depois do reparo). Sem isto, subcategorias cruas distintas
+    # que o reparo colapsa na mesma viram templates idênticos — e cada um
+    # gera uma tarefa na mesma publicação.
+    ja_planejado: set[tuple] = set()
     for row in combos:
         oid, raw_cat, raw_sub, n = row["esc"], row["cat"], row["sub"], row["n"]
         polo = svc._resolve_office_polo(oid)
@@ -128,6 +145,16 @@ def montar_plano(db) -> tuple[list[dict], list[tuple]]:
         if not sub_alvo:
             fora.append((oid, rc, raw_sub, n, "classificação sem subcategoria"))
             continue
+        # "Para Análise" é o balde do que a IA não conseguiu ler. Vai pro
+        # operador de propósito — e é onde o reparo faz tudo convergir.
+        if sub_alvo.lower().startswith("para an"):
+            fora.append((oid, rc, sub_alvo, n, "Para Análise vai pro operador"))
+            continue
+
+        chave = (oid, rc, sub_alvo)
+        if chave in ja_planejado:
+            continue
+        ja_planejado.add(chave)
 
         irmaos = padrao_cat.get((oid, rc))
         if irmaos:
