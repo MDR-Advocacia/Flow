@@ -159,9 +159,17 @@ def gerar_planilha(
         if p.cliente == "BB":
             linha[17] = p.npj
         elif p.cliente == "MASTER":
-            # Data/hora de entrada como Título: é assim que o operador do
-            # Master localiza o lote no L1 (comportamento do módulo antigo).
-            linha[17] = p.created_at.strftime("%d/%m/%Y %H:%M:%S") if p.created_at else ""
+            # Título explícito quando o fluxo pediu um (ex.: o tombamento de
+            # 08/2026 marca os processos da aba "Possíveis encerrados" pra
+            # operação distinguir na pasta do L1). Sem marca, mantém o padrão:
+            # data/hora de entrada, que é como o operador do Master localiza o
+            # lote no L1 (comportamento do módulo antigo).
+            marca = None
+            if isinstance(p.raw, dict):
+                marca = (p.raw.get("titulo_l1") or "").strip() or None
+            linha[17] = marca or (
+                p.created_at.strftime("%d/%m/%Y %H:%M:%S") if p.created_at else ""
+            )
         else:
             linha[17] = ""
         linha[19] = tram["uf"]
