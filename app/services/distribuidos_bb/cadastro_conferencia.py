@@ -109,56 +109,62 @@ def conferir_duplicacao(
             corte = corte.replace(tzinfo=timezone.utc)
         corte = corte - timedelta(minutes=_FOLGA_MIN)
 
-        for i in range(0, len(cnjs), _CHUNK):
-            bloco = cnjs[i:i + _CHUNK]
-            filtro = " or ".join(
-                f"identifierNumber eq '{client._escape_odata_literal(x)}'"
-                for x in bloco
-            )
-            achados = client._paginated_catalog_loader("/Lawsuits", {
-                "$filter": filtro,
-                "$select": "id,identifierNumber,folder,creationDate,responsibleOfficeId",
-                "$top": 30,
-            })
-            # (CNJ, escritório) -> pastas criadas NESTA janela
-            por_chave: dict[tuple, list] = {}
-            for it in achados:
-                dt = _parse_data(it.get("creationDate"))
-                if dt is None:
-                    # NÃO pular em silêncio: data ilegível vira suspeita, não
-                    # descarte. Um `continue` mudo aqui foi o que fez esta
-                    # própria conferência não enxergar as gêmeas da planilha
-                    # 119 na primeira versão — pular é o modo de falha que este
-                    # módulo existe pra combater.
-                    logger.warning(
-                        "Conferência: data ilegível na pasta %s (%r) — tratando "
-                        "como recente pra não perder duplicação.",
-                        it.get("folder"), it.get("creationDate"),
-                    )
-                elif dt < corte:
-                    continue  # pasta pré-existente, não foi este import
-                chave = (
-                    _digitos(it.get("identifierNumber")),
-                    it.get("responsibleOfficeId"),
-                )
-                por_chave.setdefault(chave, []).append(it)
+        # UMA consulta por entidade, por faixa de data — e nao uma busca por
+        # CNJ. Com 500 processos o caminho antigo fazia 62 chamadas, batia no
+        # 429 do L1 e ABORTAVA no meio (parou em 328 de 500 no tombamento de
+        # 26/08/2026), devolvendo um "sem duplicacao" que nao valia nada.
+        corte_iso = corte.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        alvo = {_digitos(x) for x in cnjs}
+        resumo["conferidos"] = len(alvo)
 
-            resumo["conferidos"] += len(bloco)
-            for (cnj, office), pastas in por_chave.items():
-                if len(pastas) < 2:
-                    continue
-                pastas.sort(key=lambda x: (x.get("folder") or ""))
-                resumo["duplicados"] += 1
-                resumo["pastas_extras"] += len(pastas) - 1
-                resumo["detalhe"].append({
-                    "cnj": cnj,
-                    "escritorio": office,
-                    "manter": pastas[0].get("folder"),
-                    "extras": [
-                        {"folder": p.get("folder"), "lawsuit_id": p.get("id")}
-                        for p in pastas[1:]
-                    ],
-                })
+        # As DUAS entidades: pasta do L1 nasce em /Lawsuits OU /Litigations.
+        # MAS elas devolvem o MESMO registro — sem deduplicar por `id`, toda
+        # pasta aparece duas vezes e a conferencia acusa duplicata falsa em
+        # 100% dos casos. Foi o alarme falso que eu dei no lote de teste.
+        pastas: dict = {}
+        for endpoint in ("/Lawsuits", "/Litigations"):
+            try:
+                for it in client._paginated_catalog_loader(endpoint, {
+                    "$filter": f"creationDate ge {corte_iso}",
+                    "$select": "id,identifierNumber,folder,creationDate,"
+                               "responsibleOfficeId",
+                    "$top": 30,
+                }):
+                    if it.get("id") is not None:
+                        pastas.setdefault(it["id"], it)
+            except Exception as exc:  # noqa: BLE001
+                resumo["parcial"] = True
+                logger.warning(
+                    "Conferencia: %s falhou (%s) — resultado PARCIAL.",
+                    endpoint, str(exc)[:120],
+                )
+
+        por_chave: dict = {}
+        for it in pastas.values():
+            dt = _parse_data(it.get("creationDate"))
+            if dt is not None and dt < corte:
+                continue
+            d = _digitos(it.get("identifierNumber"))
+            if d not in alvo:
+                continue  # pasta de outro fluxo criada na mesma janela
+            por_chave.setdefault((d, it.get("responsibleOfficeId")), []).append(it)
+
+        for (cnj, office), lista in por_chave.items():
+            if len(lista) < 2:
+                continue
+            lista.sort(key=lambda x: (x.get("folder") or ""))
+            resumo["duplicados"] += 1
+            resumo["pastas_extras"] += len(lista) - 1
+            resumo["detalhe"].append({
+                "cnj": cnj,
+                "escritorio": office,
+                "manter": lista[0].get("folder"),
+                "extras": [
+                    {"folder": p.get("folder"), "lawsuit_id": p.get("id")}
+                    for p in lista[1:]
+                ],
+            })
+        resumo["com_pasta"] = len(por_chave)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Conferência pós-import da planilha %s falhou (%s) — cadastro segue válido.",

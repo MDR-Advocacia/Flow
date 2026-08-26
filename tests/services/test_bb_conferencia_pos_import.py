@@ -38,7 +38,10 @@ class _L1Fake:
         return str(v).replace("'", "''")
 
     def _paginated_catalog_loader(self, endpoint, params):
-        return [p for p in self._pastas if p["identifierNumber"] in params["$filter"]]
+        # O L1 devolve o MESMO registro em /Lawsuits e /Litigations. Sem
+        # deduplicar por `id`, a conferência acusa duplicata falsa em 100% dos
+        # casos — foi o alarme falso do tombamento de 26/08/2026.
+        return list(self._pastas)
 
 
 def _planilha_com(db, cnjs):
@@ -136,7 +139,10 @@ def test_falha_do_l1_nao_derruba_o_cadastro(db_session):
 
     pl = _planilha_com(db_session, [CNJ_A])
     r = conferir_duplicacao(db_session, pl, client=_Quebrado())
-    assert r["duplicados"] == 0 and r["conferidos"] == 0
+    # Não acusa duplicação (não tem como saber) e se declara PARCIAL —
+    # silêncio aqui seria pior que o erro.
+    assert r["duplicados"] == 0
+    assert r.get("parcial") is True
 
 
 def test_data_do_l1_com_7_casas_decimais(db_session):
@@ -178,3 +184,47 @@ def test_data_ilegivel_nao_e_descartada(db_session):
     ])
     r = conferir_duplicacao(db_session, pl, client=l1)
     assert r["duplicados"] == 1, "pasta com data ilegível sumiu da conferência"
+
+
+def test_nao_confunde_os_dois_endpoints_com_duplicata(db_session):
+    """A MESMA pasta vista em /Lawsuits e /Litigations não é duplicata.
+
+    Os dois endpoints do L1 devolvem o mesmo registro. Somar as duas listas sem
+    deduplicar por `id` faz toda pasta contar duas vezes — e a conferência
+    acusaria duplicação em todo lote, sempre.
+    """
+    pl = _planilha_com(db_session, [CNJ_A, CNJ_B])
+    l1 = _L1Fake([
+        _pasta(CNJ_A, "Proc - 0077686", 83533),
+        _pasta(CNJ_B, "Proc - 0077680", 83527),
+    ])
+    r = conferir_duplicacao(db_session, pl, client=l1)
+    assert r["duplicados"] == 0, (
+        "contou a mesma pasta duas vezes (uma por endpoint)"
+    )
+    assert r.get("com_pasta") == 2
+
+
+def test_falha_de_um_endpoint_marca_resultado_parcial(db_session):
+    """Resultado incompleto tem que se declarar, não passar por 'sem duplicação'.
+
+    A versão anterior abortava no meio (328 de 500 CNJs) e devolvia zero
+    duplicados — um 'está tudo bem' que não valia nada.
+    """
+    pl = _planilha_com(db_session, [CNJ_A])
+
+    class _MeioQuebrado:
+        chamadas = 0
+
+        @staticmethod
+        def _escape_odata_literal(v):
+            return v
+
+        def _paginated_catalog_loader(self, endpoint, params):
+            self.chamadas += 1
+            if endpoint == "/Litigations":
+                raise RuntimeError("429 sem folego")
+            return [_pasta(CNJ_A, "Proc - 0077686", 83533)]
+
+    r = conferir_duplicacao(db_session, pl, client=_MeioQuebrado())
+    assert r.get("parcial") is True, "falha de endpoint passou como resultado completo"

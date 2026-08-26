@@ -257,6 +257,13 @@ def _import_status(sess, h) -> dict:
     return (r.json() or {}).get("data") or {} if r.status_code == 200 else {}
 
 
+# Quantos ids por chamada de `save`. O L1 processa o commit em background e
+# job grande demais morre no meio sem avisar (500 de uma vez criou 4 pastas em
+# 26/08/2026). 50 é o tamanho que dá pra conferir e refazer sem estrago.
+_SAVE_CHUNK = 50
+_SAVE_PAUSA_S = 20
+
+
 def _save(sess, h, selected_ids=None) -> dict:
     model = {
         "ignoredIds": [],
@@ -520,11 +527,46 @@ def _cadastrar_once(conteudo, file_name, *, firm_id, dry_run, poll_max_s, tok,
         rel["resultado"] = "Nada novo a cadastrar (todas as linhas já existem no L1)."
         return rel
 
-    saved = _save(sess, h, selected_ids=novos_ids)
+    # COMMIT EM BLOCOS. Mandar todos os ids num `save` só faz o L1 enfileirar
+    # um job gigante que morre no meio: no tombamento do Master (26/08/2026),
+    # 500 ids num único save resultaram em 4 pastas criadas e um e-mail de
+    # "importação não concluída" — e o nosso lado reportou sucesso, porque o
+    # POST devolve 200 assim que enfileira. Blocos menores dão ao L1 um job
+    # que ele termina, e um bloco que falha não leva os outros junto.
+    saved = None
+    blocos_ok = blocos_falha = 0
+    enviados = 0
+    for i in range(0, len(novos_ids), _SAVE_CHUNK):
+        bloco = novos_ids[i:i + _SAVE_CHUNK]
+        try:
+            saved = _save(sess, h, selected_ids=bloco)
+            blocos_ok += 1
+            enviados += len(bloco)
+        except Exception as exc:  # noqa: BLE001
+            blocos_falha += 1
+            logger.error(
+                "Import L1: bloco %s-%s do save falhou (%s).",
+                i, i + len(bloco), exc,
+            )
+            rel["passos"].append({
+                "passo": "save_bloco", "ok": False,
+                "de": i, "ate": i + len(bloco), "erro": str(exc)[:200],
+            })
+            continue
+        if i + _SAVE_CHUNK < len(novos_ids):
+            time.sleep(_SAVE_PAUSA_S)
     rel["passos"].append({
-        "passo": "save", "ok": bool(saved.get("success")),
-        "selecionados": len(novos_ids), "message": saved.get("message"),
+        "passo": "save", "ok": blocos_falha == 0,
+        "selecionados": len(novos_ids), "enviados": enviados,
+        "blocos_ok": blocos_ok, "blocos_falha": blocos_falha,
+        "chunk": _SAVE_CHUNK,
+        "message": (saved or {}).get("message"),
     })
-    rel["resultado"] = saved.get("message") or "save concluído"
+    rel["enviados_ao_l1"] = enviados
+    rel["blocos_falha"] = blocos_falha
+    rel["resultado"] = (
+        f"{enviados} linha(s) enviada(s) em {blocos_ok} bloco(s) de {_SAVE_CHUNK}"
+        + (f"; {blocos_falha} bloco(s) FALHARAM" if blocos_falha else "")
+    )
     rel["salvo_em"] = datetime.now(timezone.utc).isoformat()
     return rel
