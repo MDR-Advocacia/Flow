@@ -817,6 +817,88 @@ class OnerequestService:
     # ──────────────────────────────────────────────────────────────────
     # Legal One: resolução do processo + tarefas na pasta (sob demanda)
     # ──────────────────────────────────────────────────────────────────
+    def _offices_do_bb(self) -> set:
+        """Escritórios do Banco do Brasil, lidos do catálogo (não hardcode).
+
+        DMI é produto EXCLUSIVO do Banco do Brasil. Isso nunca esteve escrito
+        no código, e o resultado foi DMI caindo em pasta de outro cliente: em
+        25/08/2026 havia 134 tarefas de DMI em pasta do Ativos, incluindo a
+        449811 (`DMI - BB Defesa` na Proc - 0006903, Ativos/Réu) que a operação
+        reportou. Ler do `path` em vez de fixar ids faz escritório novo do BB
+        entrar sozinho.
+        """
+        from sqlalchemy import text as _text
+
+        try:
+            linhas = self.db.execute(_text(
+                # `lower(...) LIKE` e não `ILIKE`: ILIKE só existe no
+                # Postgres e a suíte roda em SQLite — mesma armadilha que o
+                # `btrim` na conferência de cadastro.
+                "SELECT external_id FROM legal_one_offices "
+                "WHERE external_id IS NOT NULL AND lower(path) LIKE :p"
+            ), {"p": "%banco do brasil%"}).fetchall()
+        except Exception:  # noqa: BLE001
+            logger.exception("OneRequest: falha ao ler escritórios do BB.")
+            return set()
+        return {int(r[0]) for r in linhas if r[0] is not None}
+
+    def _so_do_bb(self, candidatos: list) -> Optional[dict]:
+        """Dos candidatos, devolve o do BB. Nenhum do BB -> None.
+
+        Devolver None é DE PROPÓSITO: sem pasta do BB a DMI vai pra
+        AGUARDANDO_PROCESSO, que é o estado certo. Agendar no vizinho de CNJ
+        de outro cliente é pior que não agendar — cria tarefa na agenda de
+        quem não é dono do processo.
+        """
+        if not candidatos:
+            return None
+        bb = self._offices_do_bb()
+        if not bb:
+            # Catálogo indisponível: não dá pra afirmar que é do BB, então não
+            # inventa. Melhor não vincular do que vincular errado.
+            logger.warning(
+                "OneRequest: catálogo de escritórios do BB vazio — "
+                "não vinculando pasta nesta passagem."
+            )
+            return None
+        for c in candidatos:
+            oid = c.get("responsibleOfficeId", c.get("office"))
+            if oid is not None and int(oid) in bb:
+                return c
+        logger.info(
+            "OneRequest: %s pasta(s) achada(s), nenhuma do BB (escritórios %s) — "
+            "DMI não será vinculada.",
+            len(candidatos),
+            [c.get("responsibleOfficeId", c.get("office")) for c in candidatos],
+        )
+        return None
+
+    def _lawsuits_por_cnj(self, client: LegalOneApiClient, cnj: str) -> list:
+        """TODAS as pastas de um CNJ (o lookup padrão devolve só a primeira).
+
+        É essa devolução única que fazia a DMI cair na pasta errada: o mesmo
+        CNJ existe legitimamente em pastas de clientes diferentes, e o
+        `search_lawsuits_by_cnj_numbers` guarda o primeiro match que o L1
+        mandar — que costuma ser a pasta mais antiga, de outro cliente.
+        """
+        try:
+            variantes = client._cnj_variants(client._normalize_cnj_number(cnj))
+            filtro = " or ".join(
+                f"identifierNumber eq '{client._escape_odata_literal(v)}'"
+                for v in variantes
+            )
+            achados = []
+            for endpoint in ("/Lawsuits", "/Litigations"):
+                achados.extend(client._paginated_catalog_loader(endpoint, {
+                    "$filter": filtro,
+                    "$select": "id,identifierNumber,responsibleOfficeId,folder",
+                    "$top": 30,
+                }))
+            return achados
+        except Exception:  # noqa: BLE001
+            logger.exception("OneRequest: busca de pastas por CNJ %s falhou.", cnj)
+            return []
+
     def _resolver_por_npj(self, client: LegalOneApiClient, npj: Optional[str]) -> Optional[dict]:
         """Resolve a pasta pelo NPJ do BB, gravado nas NOTAS (ou título) do
         cadastro da pasta no L1. Filtra por contains(notes|title, <dígitos>).
@@ -839,7 +921,12 @@ class OnerequestService:
                 logger.warning("OneRequest: busca por NPJ em %s falhou: %s", field, e)
                 continue
             if res:
-                return res[0]
+                # Mesmo pelo NPJ (que é do BB por definição) a busca por
+                # `contains` pode casar pasta de outro cliente que cite o
+                # número — o filtro de escritório fecha essa porta também.
+                escolhida = self._so_do_bb(res)
+                if escolhida:
+                    return escolhida
         return None
 
     def _reresolver(
@@ -852,10 +939,15 @@ class OnerequestService:
         Se o id resolvido divergir do que estava em cache, o cache e' corrigido.
         """
         law = None
-        if _proc_utilizavel(solicitacao.numero_processo):
-            law = client.search_lawsuit_by_cnj(solicitacao.numero_processo)
-        if not (law and law.get("id")):
-            law = self._resolver_por_npj(client, solicitacao.npj_direcionador)
+        # NPJ PRIMEIRO, CNJ depois. O NPJ é do Banco do Brasil por definição
+        # e não colide entre clientes; o CNJ colide por natureza (o mesmo
+        # processo é cadastrado pra clientes diferentes de propósito).
+        # Inverter a ordem tira a chance de casar na pasta do cliente errado.
+        law = self._resolver_por_npj(client, solicitacao.npj_direcionador)
+        if not (law and law.get("id")) and _proc_utilizavel(solicitacao.numero_processo):
+            law = self._so_do_bb(
+                self._lawsuits_por_cnj(client, solicitacao.numero_processo)
+            )
         if law and law.get("id"):
             if law["id"] != solicitacao.linked_lawsuit_id:
                 solicitacao.linked_lawsuit_id = law["id"]
@@ -895,14 +987,19 @@ class OnerequestService:
                 return refeito or {"id": solicitacao.linked_lawsuit_id}
 
         law = None
-        if _proc_utilizavel(solicitacao.numero_processo):
-            try:
-                law = client.search_lawsuit_by_cnj(solicitacao.numero_processo)
-            except Exception as e:
-                logger.warning("Falha ao resolver por CNJ %s: %s", solicitacao.numero_processo, e)
-                law = None
-        if not (law and law.get("id")):
+        try:
+            # NPJ PRIMEIRO, CNJ depois. O NPJ é do Banco do Brasil por definição
+            # e não colide entre clientes; o CNJ colide por natureza (o mesmo
+            # processo é cadastrado pra clientes diferentes de propósito).
+            # Inverter a ordem tira a chance de casar na pasta do cliente errado.
             law = self._resolver_por_npj(client, solicitacao.npj_direcionador)
+            if not (law and law.get("id")) and _proc_utilizavel(solicitacao.numero_processo):
+                law = self._so_do_bb(
+                    self._lawsuits_por_cnj(client, solicitacao.numero_processo)
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("OneRequest: resolução da pasta falhou (%s).", e)
+            law = None
 
         if law and law.get("id"):
             solicitacao.linked_lawsuit_id = law["id"]
@@ -923,21 +1020,23 @@ class OnerequestService:
             encontrado, via = True, "cache"
         else:
             law = None
-            if _proc_utilizavel(solicitacao.numero_processo):
-                try:
-                    law = client.search_lawsuit_by_cnj(solicitacao.numero_processo)
-                except Exception as e:
-                    logger.warning(
-                        "verificar_processo_l1: busca por CNJ %s falhou: %s",
-                        solicitacao.numero_processo, e,
-                    )
-                    law = None
-                if law and law.get("id"):
-                    via = "cnj"
-            if not (law and law.get("id")):
+            # Mesma ordem do agendamento: NPJ primeiro, e só pasta do BB.
+            # O botão "Verificar L1" é quem grava o linked_lawsuit_id que o
+            # agendamento reusa — se ele apontar pra pasta de outro cliente,
+            # a tarefa nasce no lugar errado.
+            try:
                 law = self._resolver_por_npj(client, solicitacao.npj_direcionador)
                 if law and law.get("id"):
                     via = "npj"
+                elif _proc_utilizavel(solicitacao.numero_processo):
+                    law = self._so_do_bb(
+                        self._lawsuits_por_cnj(client, solicitacao.numero_processo)
+                    )
+                    if law and law.get("id"):
+                        via = "cnj"
+            except Exception as e:  # noqa: BLE001
+                logger.warning("verificar_processo_l1: resolução falhou: %s", e)
+                law = None
             if law and law.get("id"):
                 encontrado = True
                 lawsuit_id = law["id"]
