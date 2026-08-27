@@ -40,6 +40,40 @@ logger = logging.getLogger(__name__)
 # Indica que o numero_processo capturado pela RPA não dá pra usar no L1.
 _DIRTY_PROC_HINTS = ("não", "nao", "erro", "ausente", "encontrado", "informado", "api", "n/a")
 
+# Escritórios (no L1) habilitados a receber DMI, casados pelo `path` do
+# catálogo — nunca por id fixo, pra escritório novo da carteira entrar
+# sozinho. Não é só "Banco do Brasil": o processo com NPJ baixado migra pra
+# **Recuperação de Honorários** (escritório 63, fora da subárvore do BB) e
+# continua sendo processo do BB — a DMI `ANALISAR PUBLICAÇÃO EM NPJ BAIXADO`
+# cai justamente lá. Faltar esse escritório aqui não dá erro: em 27/08/2026
+# mandou a tarefa pro L1 como AVULSA, sem vínculo com a pasta.
+#
+# Os `%` no lugar dos acentos são de propósito: o `lower()` do SQLite não
+# mexe em caractere não-ASCII e a suíte roda em SQLite (mesma armadilha do
+# `ILIKE`/`btrim`). "recupera…honor…" não colide com "Recuperação de
+# Crédito" (Santander), que não tem "honor" no path.
+_PATHS_ESCRITORIOS_DMI = (
+    "%banco do brasil%",
+    "%recupera%honor%",
+)
+
+# Polo padrão dos setores que NÃO dizem o polo no nome. Sem isso, DMI cujo
+# `polo` não é utilizável (`Pendente`, `Neutro`, `Não definido`) não deriva
+# escritório nenhum pra TAREFA AVULSA e trava em AGUARDANDO_PROCESSO mesmo com
+# responsável, setor e data preenchidos — foi o que segurou a 2026/0000413185
+# em 27/08/2026.
+#
+# `BB Execução e Encerramento` -> Réu é decisão do operador (27/08/2026); os
+# outros dois seguem a mesma regra e batem com o histórico (`BB Encerramento`
+# 3.070 de 3.132 e `BB Recurso` 80 de 82 são polo Passivo). Setor VAZIO fica
+# de fora de propósito: aí não há o que presumir.
+_SETOR_POLO_PADRAO = {
+    "bb execução e encerramento": "Réu",
+    "bb execucao e encerramento": "Réu",
+    "bb encerramento": "Réu",
+    "bb recurso": "Réu",
+}
+
 
 def _proc_utilizavel(numero_processo: Optional[str]) -> bool:
     if not numero_processo:
@@ -817,59 +851,71 @@ class OnerequestService:
     # ──────────────────────────────────────────────────────────────────
     # Legal One: resolução do processo + tarefas na pasta (sob demanda)
     # ──────────────────────────────────────────────────────────────────
-    def _offices_do_bb(self) -> set:
-        """Escritórios do Banco do Brasil, lidos do catálogo (não hardcode).
+    def _offices_dmi(self) -> set:
+        """Escritórios habilitados a receber DMI, lidos do catálogo (não hardcode).
 
-        DMI é produto EXCLUSIVO do Banco do Brasil. Isso nunca esteve escrito
-        no código, e o resultado foi DMI caindo em pasta de outro cliente: em
+        DMI é produto do Banco do Brasil, e isso nunca esteve escrito no
+        código: o resultado foi DMI caindo em pasta de outro cliente — em
         25/08/2026 havia 134 tarefas de DMI em pasta do Ativos, incluindo a
-        449811 (`DMI - BB Defesa` na Proc - 0006903, Ativos/Réu) que a operação
-        reportou. Ler do `path` em vez de fixar ids faz escritório novo do BB
-        entrar sozinho.
+        449811 (`DMI - BB Defesa` na Proc - 0006903, Ativos/Réu) que a
+        operação reportou.
+
+        Mas "do BB" não é a mesma coisa que "na subárvore Banco do Brasil":
+        o processo com NPJ baixado migra pra **Recuperação de Honorários** e
+        segue sendo do BB. Ler do `path` (ver `_PATHS_ESCRITORIOS_DMI`) em
+        vez de fixar ids faz escritório novo da carteira entrar sozinho.
         """
         from sqlalchemy import text as _text
 
         try:
-            linhas = self.db.execute(_text(
-                # `lower(...) LIKE` e não `ILIKE`: ILIKE só existe no
-                # Postgres e a suíte roda em SQLite — mesma armadilha que o
-                # `btrim` na conferência de cadastro.
-                "SELECT external_id FROM legal_one_offices "
-                "WHERE external_id IS NOT NULL AND lower(path) LIKE :p"
-            ), {"p": "%banco do brasil%"}).fetchall()
+            # `lower(...) LIKE` e não `ILIKE`: ILIKE só existe no Postgres e a
+            # suíte roda em SQLite — mesma armadilha que o `btrim` na
+            # conferência de cadastro.
+            onde = " OR ".join(
+                "lower(path) LIKE :p%d" % i
+                for i in range(len(_PATHS_ESCRITORIOS_DMI))
+            )
+            linhas = self.db.execute(
+                _text(
+                    "SELECT external_id FROM legal_one_offices "
+                    "WHERE external_id IS NOT NULL AND (%s)" % onde
+                ),
+                {"p%d" % i: p for i, p in enumerate(_PATHS_ESCRITORIOS_DMI)},
+            ).fetchall()
         except Exception:  # noqa: BLE001
-            logger.exception("OneRequest: falha ao ler escritórios do BB.")
+            logger.exception("OneRequest: falha ao ler escritórios habilitados a DMI.")
             return set()
         return {int(r[0]) for r in linhas if r[0] is not None}
 
-    def _so_do_bb(self, candidatos: list) -> Optional[dict]:
-        """Dos candidatos, devolve o do BB. Nenhum do BB -> None.
+    def _so_de_escritorio_dmi(self, candidatos: list) -> Optional[dict]:
+        """Dos candidatos, devolve o de escritório habilitado. Nenhum -> None.
 
-        Devolver None é DE PROPÓSITO: sem pasta do BB a DMI vai pra
+        Devolver None é DE PROPÓSITO: sem pasta habilitada a DMI vai pra
         AGUARDANDO_PROCESSO, que é o estado certo. Agendar no vizinho de CNJ
         de outro cliente é pior que não agendar — cria tarefa na agenda de
         quem não é dono do processo.
         """
         if not candidatos:
             return None
-        bb = self._offices_do_bb()
-        if not bb:
-            # Catálogo indisponível: não dá pra afirmar que é do BB, então não
-            # inventa. Melhor não vincular do que vincular errado.
+        habilitados = self._offices_dmi()
+        if not habilitados:
+            # Catálogo indisponível: não dá pra afirmar que a pasta é da
+            # carteira, então não inventa. Melhor não vincular do que errado.
             logger.warning(
-                "OneRequest: catálogo de escritórios do BB vazio — "
+                "OneRequest: catálogo de escritórios habilitados a DMI vazio — "
                 "não vinculando pasta nesta passagem."
             )
             return None
         for c in candidatos:
             oid = c.get("responsibleOfficeId", c.get("office"))
-            if oid is not None and int(oid) in bb:
+            if oid is not None and int(oid) in habilitados:
                 return c
         logger.info(
-            "OneRequest: %s pasta(s) achada(s), nenhuma do BB (escritórios %s) — "
-            "DMI não será vinculada.",
+            "OneRequest: %s pasta(s) achada(s), nenhuma em escritório habilitado a "
+            "DMI (escritórios %s; habilitados %s) — DMI não será vinculada.",
             len(candidatos),
             [c.get("responsibleOfficeId", c.get("office")) for c in candidatos],
+            sorted(habilitados),
         )
         return None
 
@@ -887,13 +933,21 @@ class OnerequestService:
                 f"identifierNumber eq '{client._escape_odata_literal(v)}'"
                 for v in variantes
             )
-            achados = []
+            # Dedupe por id: os dois endpoints devolvem O MESMO registro, então
+            # sem isso toda pasta conta em dobro e o log diz "2 pasta(s)" pra
+            # uma pasta só (foi o que confundiu o diagnóstico de 27/08/2026).
+            # Mesma lição do bug da conferência pós-import do cadastro.
+            achados, vistos = [], set()
             for endpoint in ("/Lawsuits", "/Litigations"):
-                achados.extend(client._paginated_catalog_loader(endpoint, {
+                for a in client._paginated_catalog_loader(endpoint, {
                     "$filter": filtro,
                     "$select": "id,identifierNumber,responsibleOfficeId,folder",
                     "$top": 30,
-                }))
+                }):
+                    if a.get("id") in vistos:
+                        continue
+                    vistos.add(a.get("id"))
+                    achados.append(a)
             return achados
         except Exception:  # noqa: BLE001
             logger.exception("OneRequest: busca de pastas por CNJ %s falhou.", cnj)
@@ -924,7 +978,7 @@ class OnerequestService:
                 # Mesmo pelo NPJ (que é do BB por definição) a busca por
                 # `contains` pode casar pasta de outro cliente que cite o
                 # número — o filtro de escritório fecha essa porta também.
-                escolhida = self._so_do_bb(res)
+                escolhida = self._so_de_escritorio_dmi(res)
                 if escolhida:
                     return escolhida
         return None
@@ -945,7 +999,7 @@ class OnerequestService:
         # Inverter a ordem tira a chance de casar na pasta do cliente errado.
         law = self._resolver_por_npj(client, solicitacao.npj_direcionador)
         if not (law and law.get("id")) and _proc_utilizavel(solicitacao.numero_processo):
-            law = self._so_do_bb(
+            law = self._so_de_escritorio_dmi(
                 self._lawsuits_por_cnj(client, solicitacao.numero_processo)
             )
         if law and law.get("id"):
@@ -994,7 +1048,7 @@ class OnerequestService:
             # Inverter a ordem tira a chance de casar na pasta do cliente errado.
             law = self._resolver_por_npj(client, solicitacao.npj_direcionador)
             if not (law and law.get("id")) and _proc_utilizavel(solicitacao.numero_processo):
-                law = self._so_do_bb(
+                law = self._so_de_escritorio_dmi(
                     self._lawsuits_por_cnj(client, solicitacao.numero_processo)
                 )
         except Exception as e:  # noqa: BLE001
@@ -1029,7 +1083,7 @@ class OnerequestService:
                 if law and law.get("id"):
                     via = "npj"
                 elif _proc_utilizavel(solicitacao.numero_processo):
-                    law = self._so_do_bb(
+                    law = self._so_de_escritorio_dmi(
                         self._lawsuits_por_cnj(client, solicitacao.numero_processo)
                     )
                     if law and law.get("id"):
@@ -1050,8 +1104,10 @@ class OnerequestService:
 
     def _office_avulso_id(self, solicitacao: OnerequestSolicitacao) -> Optional[int]:
         """Escritório (L1) pra TAREFA AVULSA (sem pasta), derivado do polo/setor:
-        BB é Autor no polo ATIVO, Réu no PASSIVO. Busca o external_id (= id do
-        escritório no L1) em legal_one_offices, sem hardcode. None = não derivável."""
+        BB é Autor no polo ATIVO, Réu no PASSIVO. Quando o polo não resolve
+        (`Pendente`/`Neutro`/`Não definido`) e o setor não diz o polo no nome,
+        cai no `_SETOR_POLO_PADRAO`. Busca o external_id (= id do escritório no
+        L1) em legal_one_offices, sem hardcode. None = não derivável."""
         from app.models.legal_one import LegalOneOffice
 
         polo = (solicitacao.polo or "").strip().lower()
@@ -1061,6 +1117,8 @@ class OnerequestService:
         elif polo == "passivo" or "réu" in setor or "reu" in setor:
             alvo = "Réu"
         else:
+            alvo = _SETOR_POLO_PADRAO.get(setor)
+        if not alvo:
             return None
         row = (
             self.db.query(LegalOneOffice.external_id)
