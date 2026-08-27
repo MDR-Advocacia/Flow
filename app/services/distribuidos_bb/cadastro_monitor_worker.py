@@ -11,6 +11,7 @@ Roda em thread do BackgroundScheduler → abre a própria SessionLocal.
 """
 
 import logging
+import os
 from datetime import datetime, timezone
 
 logger = logging.getLogger("distribuidos_bb.monitor_cadastro")
@@ -20,10 +21,28 @@ JOB_ID = "distribuidos_bb_monitor_cadastro"
 _LOCK_KEY = 826100007
 
 
+# Quantos processos de TOMBAMENTO (migração em massa) o monitor pode gastar
+# por tick. O resto do lote fica reservado ao fluxo diário.
+#
+# Sem essa cota, uma migração grande sequestra o orçamento de API do tenant:
+# em 27/08/2026 o tombamento do Master deixou ~5.600 pendentes, o monitor
+# passou a queimar 300 chamadas ao L1 a cada 2 minutos (~150/min, num teto de
+# ~90/min do tenant) e o job de PUBLICAÇÕES parou de rodar — 15 buscas
+# seguidas morreram em "Máximo de tentativas excedido" (429) durante a noite,
+# e o operador acordou sem publicação nenhuma. Cadastro em massa é trabalho de
+# fundo; publicação tem prazo.
+_COTA_TOMBAMENTO = int(os.environ.get("BBD_MONITOR_COTA_TOMBAMENTO", "40"))
+
+
 def verificar_pendentes(db, *, client=None, limite: int = 300) -> dict:
     """Varre os PENDENTE_CADASTRO com CNJ e confirma no L1 os que já existem.
 
-    Devolve {verificados, confirmados, sem_cnj_ignorados}.
+    O fluxo diário tem PRIORIDADE: o lote é preenchido primeiro com quem não é
+    tombamento, e a migração em massa entra só com as sobras, até
+    `_COTA_TOMBAMENTO`. Cada processo verificado custa pelo menos uma chamada
+    ao L1 — este worker é o maior consumidor de API do sistema.
+
+    Devolve {verificados, confirmados, sem_cnj_ignorados, tombamento}.
     """
     from app.models.distribuidos_bb import (
         NIVEL_SUCESSO,
@@ -35,15 +54,25 @@ def verificar_pendentes(db, *, client=None, limite: int = 300) -> dict:
     from app.services.distribuidos_bb import cadastro_l1
     from app.services.distribuidos_bb.log_service import registrar_evento
 
-    pendentes = (
+    # `->` cru em vez do açúcar `raw["tombamento"]`: no SQLite da suite o
+    # açúcar vira JSON_QUOTE(JSON_EXTRACT(...)) e JSON_QUOTE(NULL) devolve o
+    # TEXTO 'null', o que inverteria o filtro. Igual em Postgres e SQLite.
+    _marca = BbProcesso.raw.op("->")("tombamento")
+    base = (
         db.query(BbProcesso)
         .filter(BbProcesso.planilha_status == POOL_PENDENTE_CADASTRO)
         .order_by(BbProcesso.l1_verificado_em.asc().nullsfirst())
-        .limit(limite)
-        .all()
     )
+    pendentes = base.filter(_marca.is_(None)).limit(limite).all()
+    do_tombamento = 0
+    if len(pendentes) < limite and _COTA_TOMBAMENTO > 0:
+        sobra = min(limite - len(pendentes), _COTA_TOMBAMENTO)
+        extras = base.filter(_marca.isnot(None)).limit(sobra).all()
+        do_tombamento = len(extras)
+        pendentes += extras
     if not pendentes:
-        return {"verificados": 0, "confirmados": 0, "sem_cnj_ignorados": 0}
+        return {"verificados": 0, "confirmados": 0, "sem_cnj_ignorados": 0,
+                "tombamento": 0}
 
     if client is None:
         from app.services.legal_one_client import LegalOneApiClient
@@ -135,10 +164,12 @@ def verificar_pendentes(db, *, client=None, limite: int = 300) -> dict:
         db.commit()
 
     logger.info(
-        "Monitor cadastro L1: %s verificado(s), %s confirmado(s), %s sem identificador.",
-        verificados, confirmados, sem_id,
+        "Monitor cadastro L1: %s verificado(s), %s confirmado(s), %s sem "
+        "identificador (%s do tombamento, cota %s).",
+        verificados, confirmados, sem_id, do_tombamento, _COTA_TOMBAMENTO,
     )
-    return {"verificados": verificados, "confirmados": confirmados, "sem_cnj_ignorados": sem_id}
+    return {"verificados": verificados, "confirmados": confirmados,
+            "sem_cnj_ignorados": sem_id, "tombamento": do_tombamento}
 
 
 # Retry automático do auto-cadastro que falhou (planilha gerada mas nunca
