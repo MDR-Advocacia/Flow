@@ -257,6 +257,11 @@ def _import_status(sess, h) -> dict:
     return (r.json() or {}).get("data") or {} if r.status_code == 200 else {}
 
 
+# Freio contra `total` absurdo do servidor — 2.000 páginas de 30 = 60 mil
+# linhas. Antes disso o limite era 40 páginas (1.200), o que não era freio:
+# era um truncamento silencioso que escondia a fila real. Ver _listar_staging.
+_PAGINAS_MAX = 2000
+
 # Quantos ids por chamada de `save`. O L1 processa o commit em background e
 # job grande demais morre no meio sem avisar (500 de uma vez criou 4 pastas em
 # 26/08/2026). 50 é o tamanho que dá pra conferir e refazer sem estrago.
@@ -291,16 +296,38 @@ def _save(sess, h, selected_ids=None) -> dict:
 
 
 def _listar_staging(sess, h) -> list[dict]:
-    """Todas as linhas na revisão do import (paginado)."""
+    """Todas as linhas na revisão do import (paginado).
+
+    Pagina até o `total` que o próprio L1 declara. O teto fixo de 40 páginas
+    que existia aqui (1.200 linhas) cegava o import inteiro: no tombamento do
+    Master (26/08/2026) o staging tinha 1.216 linhas encalhadas de um job que
+    o L1 expirou, então as 471 linhas recém-subidas caíam FORA da janela, o
+    diff contra o baseline dava vazio e a função devolvia "Nada novo a
+    cadastrar (todas as linhas já existem no L1)" — sucesso mentiroso, com
+    zero pasta criada e nenhum erro em lugar nenhum.
+
+    O `_PAGINAS_MAX` continua existindo como freio contra `total` absurdo do
+    servidor, mas em 60 mil linhas, não em 1.200.
+
+    Status != 200 agora ESTOURA em vez de virar lista vazia. O `or {}` de
+    antes transformava um 401 de token vencido em "o staging está vazio", que
+    é a leitura mais perigosa possível: some a fila inteira sem avisar.
+    """
     rows: list[dict] = []
-    for page in range(0, 40):
+    for page in range(0, _PAGINAS_MAX):
         r = sess.get(
             f"{_GATEWAY}/litigationImport/LitigationData/GetImportDataPaginated",
             params={"page": page, "count": 30, "filterUserId": "null"}, headers=h, timeout=60,
         )
-        d = (r.json() or {}).get("data") or {} if r.status_code == 200 else {}
-        rows += d.get("data") or []
-        if (page + 1) * 30 >= (d.get("total") or 0):
+        if r.status_code != 200:
+            raise ImportL1Error(
+                f"GetImportDataPaginated {r.status_code} na página {page}: "
+                f"{r.text[:200]}"
+            )
+        d = (r.json() or {}).get("data") or {}
+        lote = d.get("data") or []
+        rows += lote
+        if not lote or (page + 1) * 30 >= (d.get("total") or 0):
             break
     return rows
 

@@ -271,3 +271,72 @@ def test_processo_sem_cnj_nao_consulta_o_l1(db):
                    status="DISTRIBUIDO")
     db.add(p); db.commit()
     assert _liberar_dup_de_outro_cliente(db, p) == set()
+
+
+# ── Paginação do staging ───────────────────────────────────────────────
+#
+# Caso real do tombamento do Master (26/08/2026): o staging tinha 1.216 linhas
+# encalhadas de um job que o L1 expirou, e o listador parava em 40 páginas
+# (1.200). As 471 linhas recém-subidas caíam FORA da janela, o diff contra o
+# baseline dava vazio e o import devolvia "Nada novo a cadastrar" — sucesso
+# mentiroso com zero pasta criada. Junto: status != 200 virava lista vazia,
+# então um 401 de token vencido também "esvaziava" a fila em silêncio.
+
+class _RespostaPaginada:
+    def __init__(self, total, status=200):
+        self.total = total
+        self.status_code = status
+        self.text = '{"error": "Unauthorized"}'   # o caminho de erro lê r.text
+        self._page = None
+
+    def json(self):
+        ini = self._page * 30
+        fim = min(ini + 30, self.total)
+        return {"data": {
+            "total": self.total,
+            "data": [{"id": i} for i in range(ini, fim)],
+        }}
+
+
+class _SessaoPaginada:
+    """Serve `total` linhas em páginas de 30, como o gateway do L1."""
+
+    def __init__(self, total, status=200):
+        self.resp = _RespostaPaginada(total, status)
+        self.chamadas = 0
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        self.chamadas += 1
+        self.resp._page = params["page"]
+        return self.resp
+
+
+def test_staging_acima_de_1200_linhas_vem_inteiro():
+    """O teto antigo de 40 páginas truncava a fila — e escondia as linhas novas."""
+    from app.services.distribuidos_bb.import_l1_service import _listar_staging
+
+    sess = _SessaoPaginada(total=1216)
+    rows = _listar_staging(sess, {})
+    assert len(rows) == 1216          # antes do fix: 1200, e o resto sumia
+    assert sess.chamadas == 41
+
+
+def test_staging_com_401_estoura_em_vez_de_fingir_fila_vazia():
+    """Token vencido tem que ser ERRO, não "staging vazio"."""
+    from app.services.distribuidos_bb.import_l1_service import (
+        ImportL1Error, _listar_staging,
+    )
+
+    sess = _SessaoPaginada(total=100, status=401)
+    with pytest.raises(ImportL1Error):
+        _listar_staging(sess, {})
+
+
+def test_staging_para_no_total_declarado():
+    """Fila pequena continua custando poucas chamadas."""
+    from app.services.distribuidos_bb.import_l1_service import _listar_staging
+
+    sess = _SessaoPaginada(total=45)
+    rows = _listar_staging(sess, {})
+    assert len(rows) == 45
+    assert sess.chamadas == 2
