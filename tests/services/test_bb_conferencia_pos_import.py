@@ -90,15 +90,25 @@ def test_acusa_as_pastas_gemeas(db_session):
     assert ev == "ERRO", "duplicação tem que gritar, não sussurrar"
 
 
-def test_nao_acusa_pasta_preexistente(db_session):
-    """Pasta de meses atrás não foi este import — não pode virar alarme falso."""
+def test_pasta_preexistente_no_mesmo_escritorio_E_duplicata(db_session):
+    """Duas pastas do mesmo CNJ no mesmo escritório = duplicata, SEJA LÁ QUANDO
+    a primeira nasceu.
+
+    A regra antiga filtrava por janela de data ("pasta de meses atrás não foi
+    este import") e foi exatamente o que escondeu as 298 pastas em dobro de
+    27/08/2026: a primeira pasta tinha minutos, a segunda nascia fora da janela
+    visível, e a conferência aprovava. Se existia pasta no mesmo escritório, a
+    trava pré-planilha teria VINCULADO e o CNJ nem entraria no lote — se ainda
+    assim há duas, alguém duplicou, e a mais ANTIGA é a que fica.
+    """
     pl = _planilha_com(db_session, [CNJ_A])
     l1 = _L1Fake([
-        _pasta(CNJ_A, "Proc - 0047656", 47656, quando=AGORA - timedelta(days=200)),
         _pasta(CNJ_A, "Proc - 0077686", 83533),
+        _pasta(CNJ_A, "Proc - 0047656", 47656, quando=AGORA - timedelta(days=200)),
     ])
     r = conferir_duplicacao(db_session, pl, client=l1)
-    assert r["duplicados"] == 0, "confundiu pasta antiga com duplicação nossa"
+    assert r["duplicados"] == 1
+    assert r["detalhe"][0]["manter"] == "Proc - 0047656", "a mais antiga fica"
 
 
 def test_nao_acusa_mesmo_cnj_em_escritorios_diferentes(db_session):

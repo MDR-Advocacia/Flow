@@ -12,8 +12,6 @@ módulo faz.
 
 Como distinguir duplicata NOSSA de pasta legítima que já existia:
 
-  - só conta pasta criada DEPOIS que a planilha nasceu (`desde`). Pasta de
-    meses atrás é pré-existente, não foi este import;
   - agrupa por (CNJ, escritório responsável). O fluxo cadastra de propósito o
     MESMO CNJ em escritórios diferentes quando o processo é de outro cliente
     (`cnjs_liberados`) — isso é correto e não pode virar alarme falso.
@@ -48,6 +46,13 @@ _FOLGA_MIN = 10
 
 def _digitos(v) -> str:
     return "".join(c for c in str(v or "") if c.isdigit())
+
+
+def _mascara(d: str) -> str:
+    """Digitos → forma canônica NNNNNNN-DD.AAAA.J.TR.OOOO (o L1 guarda com máscara)."""
+    if len(d) != 20:
+        return d
+    return f"{d[:7]}-{d[7:9]}.{d[9:13]}.{d[13]}.{d[14:16]}.{d[16:20]}"
 
 
 # O L1 devolve 7 casas de fração de segundo ("...09:37:11.6718563-03:00"), e o
@@ -104,55 +109,66 @@ def conferir_duplicacao(
 
             client = LegalOneApiClient()
 
-        corte = (desde or planilha.created_at or datetime.now(timezone.utc))
-        if corte.tzinfo is None:
-            corte = corte.replace(tzinfo=timezone.utc)
-        corte = corte - timedelta(minutes=_FOLGA_MIN)
-
-        # UMA consulta por entidade, por faixa de data — e nao uma busca por
-        # CNJ. Com 500 processos o caminho antigo fazia 62 chamadas, batia no
-        # 429 do L1 e ABORTAVA no meio (parou em 328 de 500 no tombamento de
-        # 26/08/2026), devolvendo um "sem duplicacao" que nao valia nada.
-        corte_iso = corte.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        alvo = {_digitos(x) for x in cnjs}
+        alvo = sorted({_digitos(x) for x in cnjs})
         resumo["conferidos"] = len(alvo)
 
-        # As DUAS entidades: pasta do L1 nasce em /Lawsuits OU /Litigations.
-        # MAS elas devolvem o MESMO registro — sem deduplicar por `id`, toda
-        # pasta aparece duas vezes e a conferencia acusa duplicata falsa em
-        # 100% dos casos. Foi o alarme falso que eu dei no lote de teste.
+        # Busca POR CNJ (identifierNumber), em chunks — e nao por faixa de
+        # creationDate. A consulta por data parecia mais barata, mas o
+        # /Lawsuits nao devolve @odata.nextLink nesse tipo de filtro e o
+        # loader para nos primeiros 30 registros: na madrugada de 27/08 a
+        # conferencia "aprovou" 8 lotes seguidos enquanto 298 pastas em dobro
+        # nasciam fora da janela visivel. Cega, nao barata.
+        #
+        # O caminho por CNJ ja' tinha sido tentado e abortava no 429 — o erro
+        # de la' era ABORTAR: aqui, chunk que falha marca `parcial` e os
+        # OUTROS chunks continuam, entao o resultado nunca finge cobertura.
+        #
+        # As DUAS entidades (pasta nasce em /Lawsuits OU /Litigations), com
+        # dedupe por `id` porque elas devolvem o MESMO registro.
         pastas: dict = {}
-        for endpoint in ("/Lawsuits", "/Litigations"):
-            try:
-                for it in client._paginated_catalog_loader(endpoint, {
-                    "$filter": f"creationDate ge {corte_iso}",
-                    "$select": "id,identifierNumber,folder,creationDate,"
-                               "responsibleOfficeId",
-                    "$top": 30,
-                }):
-                    if it.get("id") is not None:
-                        pastas.setdefault(it["id"], it)
-            except Exception as exc:  # noqa: BLE001
-                resumo["parcial"] = True
-                logger.warning(
-                    "Conferencia: %s falhou (%s) — resultado PARCIAL.",
-                    endpoint, str(exc)[:120],
-                )
+        for i in range(0, len(alvo), _CHUNK):
+            chunk = alvo[i:i + _CHUNK]
+            partes = []
+            for d in chunk:
+                partes.append(f"identifierNumber eq '{d}'")
+                partes.append(f"identifierNumber eq '{_mascara(d)}'")
+            filtro = " or ".join(partes)
+            for endpoint in ("/Lawsuits", "/Litigations"):
+                try:
+                    for it in client._paginated_catalog_loader(endpoint, {
+                        "$filter": filtro,
+                        "$select": "id,identifierNumber,folder,creationDate,"
+                                   "responsibleOfficeId",
+                        "$top": 30,
+                    }):
+                        if it.get("id") is not None:
+                            pastas.setdefault(it["id"], it)
+                except Exception as exc:  # noqa: BLE001
+                    resumo["parcial"] = True
+                    logger.warning(
+                        "Conferencia: chunk %s de %s falhou (%s) — resultado "
+                        "PARCIAL.", i, endpoint, str(exc)[:120],
+                    )
 
+        # Agrupa por (CNJ, escritorio) SEM filtrar por data: duas pastas do
+        # mesmo CNJ no mesmo escritorio sao duplicata seja la' quando a
+        # primeira nasceu — filtrar por janela escondia exatamente o caso em
+        # que a segunda pasta e' nossa e a primeira e' de minutos antes.
         por_chave: dict = {}
         for it in pastas.values():
-            dt = _parse_data(it.get("creationDate"))
-            if dt is not None and dt < corte:
-                continue
             d = _digitos(it.get("identifierNumber"))
-            if d not in alvo:
-                continue  # pasta de outro fluxo criada na mesma janela
+            if d not in set(alvo):
+                continue  # variante casou com CNJ fora do lote
             por_chave.setdefault((d, it.get("responsibleOfficeId")), []).append(it)
 
         for (cnj, office), lista in por_chave.items():
             if len(lista) < 2:
                 continue
-            lista.sort(key=lambda x: (x.get("folder") or ""))
+            # A mais ANTIGA fica (e' a que os vinculos apontam); extras saem.
+            lista.sort(key=lambda x: (
+                _parse_data(x.get("creationDate")) or datetime.max.replace(tzinfo=timezone.utc),
+                x.get("folder") or "",
+            ))
             resumo["duplicados"] += 1
             resumo["pastas_extras"] += len(lista) - 1
             resumo["detalhe"].append({
