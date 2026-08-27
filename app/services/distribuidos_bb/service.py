@@ -52,9 +52,26 @@ class DistribuidosBBService:
         return {rid: nome for rid, nome in rows}
 
     # ── Dashboard ────────────────────────────────────────────────────────
+    @staticmethod
+    def _sem_tombamento(q):
+        """Exclui os processos de TOMBAMENTO (migração em massa de base, ex.:
+        Banco Master 08/2026, marcada em raw['tombamento']) das visões
+        OPERACIONAIS. Decisão do operador (27/08/2026): 11.281 linhas de
+        migração afogavam o painel do dia a dia — tombamento não se mistura
+        com o fluxo diário. O operador cru `->` existe igual no Postgres
+        (jsonb) e no SQLite 3.38+ (o da suite), e `raw -> 'tombamento' IS
+        NULL` é verdadeiro também quando raw é NULL. NÃO trocar pelo açúcar
+        `raw["tombamento"].is_(None)`: no SQLite ele compila pra
+        JSON_QUOTE(JSON_EXTRACT(...)), e JSON_QUOTE(NULL) devolve o TEXTO
+        'null' — o filtro passa a excluir TUDO (pegado pelo teste).
+        """
+        return q.filter(BbProcesso.raw.op("->")("tombamento").is_(None))
+
     def dashboard(self) -> dict[str, Any]:
         por_status = dict(
-            self.db.query(BbProcesso.status, func.count(BbProcesso.id))
+            self._sem_tombamento(
+                self.db.query(BbProcesso.status, func.count(BbProcesso.id))
+            )
             .group_by(BbProcesso.status)
             .all()
         )
@@ -63,19 +80,21 @@ class DistribuidosBBService:
         por_escritorio = [
             {"escritorio": path or nome or "—", "total": qtd}
             for path, nome, qtd in (
-                self.db.query(
-                    BbEscritorio.escritorio_path,
-                    BbEscritorio.nome,
-                    func.count(BbProcesso.id),
+                self._sem_tombamento(
+                    self.db.query(
+                        BbEscritorio.escritorio_path,
+                        BbEscritorio.nome,
+                        func.count(BbProcesso.id),
+                    )
+                    .join(BbProcesso, BbProcesso.escritorio_id == BbEscritorio.id)
                 )
-                .join(BbProcesso, BbProcesso.escritorio_id == BbEscritorio.id)
                 .group_by(BbEscritorio.escritorio_path, BbEscritorio.nome)
                 .all()
             )
         ]
 
         sem_responsavel = (
-            self.db.query(func.count(BbProcesso.id))
+            self._sem_tombamento(self.db.query(func.count(BbProcesso.id)))
             .filter(BbProcesso.responsavel_user_id.is_(None))
             .scalar()
         )
@@ -115,7 +134,9 @@ class DistribuidosBBService:
             or 0
         )
         pool = dict(
-            self.db.query(BbProcesso.planilha_status, func.count(BbProcesso.id))
+            self._sem_tombamento(
+                self.db.query(BbProcesso.planilha_status, func.count(BbProcesso.id))
+            )
             .filter(BbProcesso.status == PROC_DISTRIBUIDO)
             .group_by(BbProcesso.planilha_status)
             .all()
@@ -268,6 +289,7 @@ class DistribuidosBBService:
         cliente: Optional[str] = None,
         cadastro_de: Optional[str] = None,
         cadastro_ate: Optional[str] = None,
+        incluir_tombamento: bool = False,
     ):
         """Query filtrada + ordenada (pendente no topo, depois por data). Reusada
         pela listagem paginada e pela exportação."""
@@ -282,6 +304,8 @@ class DistribuidosBBService:
         )
 
         q = self.db.query(BbProcesso)
+        if not incluir_tombamento:
+            q = self._sem_tombamento(q)
         if status:
             q = q.filter(BbProcesso.status == status)
         if cliente:

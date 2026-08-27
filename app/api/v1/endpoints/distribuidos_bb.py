@@ -204,6 +204,7 @@ def listar_processos(
     escritorio_id: Optional[int] = Query(None),
     busca: Optional[str] = Query(None),
     planilha_status: Optional[str] = Query(None, description="NOVO | PENDENTE_CADASTRO | CADASTRADO_L1"),
+    incluir_tombamento: bool = Query(False, description="Mostrar também os processos de tombamento de base (migração em massa, fora do fluxo diário)"),
     posicao: Optional[str] = Query(None, description="Réu | Autor | Interessado"),
     cliente: Optional[str] = Query(None, description="BB | ATIVOS"),
     cadastro_de: Optional[str] = Query(None, description="Data de cadastro no L1 (AAAA-MM-DD)."),
@@ -217,6 +218,7 @@ def listar_processos(
     return DistribuidosBBService(db).listar_processos(
         status=status_filtro, escritorio_id=escritorio_id, busca=busca,
         planilha_status=planilha_status, posicao=posicao, cliente=cliente,
+        incluir_tombamento=incluir_tombamento,
         cadastro_de=cadastro_de, cadastro_ate=cadastro_ate,
         limit=limit, offset=offset,
     )
@@ -228,6 +230,7 @@ def exportar_processos(
     escritorio_id: Optional[int] = Query(None),
     busca: Optional[str] = Query(None),
     planilha_status: Optional[str] = Query(None),
+    incluir_tombamento: bool = Query(False),
     posicao: Optional[str] = Query(None),
     cliente: Optional[str] = Query(None),
     cadastro_de: Optional[str] = Query(None),
@@ -241,6 +244,7 @@ def exportar_processos(
     buf, total = DistribuidosBBService(db).exportar_processos(
         status=status_filtro, escritorio_id=escritorio_id, busca=busca,
         planilha_status=planilha_status, posicao=posicao, cliente=cliente,
+        incluir_tombamento=incluir_tombamento,
         cadastro_de=cadastro_de, cadastro_ate=cadastro_ate,
     )
     nome = f"processos_cadastro_bb_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
