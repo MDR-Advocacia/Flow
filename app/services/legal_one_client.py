@@ -2017,6 +2017,76 @@ class LegalOneApiClient:
             )
             raise
 
+    # Degraus de página quando o gateway do L1 estoura. Ver
+    # `_pagina_publicacoes_adaptativa`.
+    _PUB_DEGRAUS = (30, 15, 8, 4, 2, 1)
+
+    def _pagina_publicacoes_adaptativa(
+        self,
+        *,
+        date_from: str,
+        date_to: Optional[str],
+        origin_type: str,
+        top: int,
+        skip: int,
+        count: bool,
+    ) -> tuple[Dict[str, Any], int]:
+        """Uma página de publicações, encolhendo o `$top` quando o L1 estoura.
+
+        Devolve `(resultado, quantos_registros_a_pagina_cobre)` — o segundo
+        valor é o passo do `$skip`, que deixa de ser fixo.
+
+        Por que existe: o texto da publicação não tem teto de tamanho, e
+        algumas pesam ~350 KB cada. Medido em 27/08/2026 na janela do dia
+        26: `$top=20` devolveu 7 MB e passou; `$top=30` (~10,5 MB) devolveu
+        **502** no gateway, sempre no MESMO offset. Não é instabilidade nem
+        profundidade de paginação — offsets vizinhos e mais fundos respondem
+        200, e cada registro daquela página, pedido sozinho, também responde
+        200. É volume de resposta.
+
+        O efeito era grave e mudo: a busca inteira morria com "Máximo de
+        tentativas excedido" depois de 8 retentativas contra 502, e nenhuma
+        publicação do dia entrava — o operador só via o job "não pegar nada".
+        Encolher a página recupera exatamente os mesmos registros.
+
+        Só 502/503/504 e erro de conexão descem um degrau: 400 (query
+        inválida) e 401 (token) não melhoram com página menor e sobem na hora.
+        """
+        ultimo_erro: Optional[Exception] = None
+        for degrau in [d for d in self._PUB_DEGRAUS if d <= top] or [1]:
+            try:
+                resultado = self.fetch_publications(
+                    date_from=date_from,
+                    date_to=date_to,
+                    origin_type=origin_type,
+                    top=degrau,
+                    skip=skip,
+                    count=count,
+                )
+                if degrau != top:
+                    self.logger.warning(
+                        "Publicacoes: pagina em skip=%s so' coube com $top=%s "
+                        "(o L1 devolve 502 em pagina grande demais).",
+                        skip, degrau,
+                    )
+                return resultado, degrau
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                if status not in (502, 503, 504):
+                    raise
+                ultimo_erro = exc
+            except requests.exceptions.RequestException as exc:
+                # `_request_with_retry` esgota as 8 tentativas contra 502 e
+                # levanta RequestException sem `response` — é o caso real.
+                ultimo_erro = exc
+            self.logger.warning(
+                "Publicacoes: skip=%s falhou com $top=%s; tentando pagina menor.",
+                skip, degrau,
+            )
+        raise ultimo_erro or requests.exceptions.RequestException(
+            f"Nao foi possivel carregar a pagina de publicacoes em skip={skip}."
+        )
+
     def fetch_all_publications(
         self,
         date_from: str,
@@ -2035,7 +2105,7 @@ class LegalOneApiClient:
 
         # max_pages aumentado: com 30/pag, 500 pags = 15.000 publicacoes max
         for page in range(max_pages):
-            result = self.fetch_publications(
+            result, consumidos = self._pagina_publicacoes_adaptativa(
                 date_from=date_from,
                 date_to=date_to,
                 origin_type=origin_type,
@@ -2057,10 +2127,10 @@ class LegalOneApiClient:
             # Paginacao baseada em count + item count (LegalOne nao retorna @odata.nextLink)
             if total_reported is not None and len(all_publications) >= total_reported:
                 break
-            if len(items) < page_size:
+            if len(items) < consumidos:
                 break
 
-            skip += page_size
+            skip += consumidos
 
         self.logger.info(
             "Busca completa: %s publicacoes carregadas (total reportado: %s).",
