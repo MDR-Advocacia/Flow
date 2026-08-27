@@ -348,7 +348,16 @@ class AnthropicClassifierClient:
             self.model,
         )
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        # Timeout POR FASE, não um teto plano. O `timeout=120.0` de antes valia
+        # igual pra conectar, escrever e ler — e quem estoura aqui é a ESCRITA:
+        # o corpo do batch cresce com o número de requisições e leva minutos
+        # subindo do container. Em 27/08/2026 o lote #155 (1.039 publicações)
+        # morreu em `httpx.WriteTimeout` no meio do upload, enquanto o #154
+        # (621) tinha passado — o teto plano transformava tamanho de lote em
+        # falha aleatória. `write` generoso cobre o upload; `connect` e `pool`
+        # continuam curtos pra não mascarar rede caída.
+        limites = httpx.Timeout(connect=15.0, write=900.0, read=300.0, pool=15.0)
+        async with httpx.AsyncClient(timeout=limites) as client:
             response = await client.post(
                 ANTHROPIC_BATCHES_API_URL,
                 headers=self._build_headers(),

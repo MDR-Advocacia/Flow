@@ -109,6 +109,21 @@ def _alertar_falha_batch(batch, error_message: str, requested_by_email: Optional
         logger.exception("Falha ao enviar alerta de e-mail do batch de classificação (ignorado).")
 
 
+
+def _erro_legivel(exc: Exception) -> str:
+    """Mensagem que o operador consegue LER, mesmo quando a exceção é muda.
+
+    Várias exceções de rede do httpx (`WriteTimeout`, `ReadTimeout`,
+    `ConnectError`) têm `str(exc)` VAZIO. O código gravava esse vazio em
+    `error_message` e o painel mostrava a falha sem motivo nenhum: em
+    27/08/2026 o lote #155 apareceu como "Falha" com a coluna de erro em
+    branco, e o log dizia literalmente "falha ao promover ()". Sem o nome da
+    classe não dava pra saber que tinha sido timeout de upload.
+    """
+    texto = str(exc).strip()
+    return f"{exc.__class__.__name__}: {texto}" if texto else exc.__class__.__name__
+
+
 class PublicationBatchClassifier:
     """
     Orquestra a classificação em lote de publicações via Anthropic Batch API.
@@ -610,11 +625,12 @@ class PublicationBatchClassifier:
                 else:
                     sem_cache += 1
             except Exception as exc:  # noqa: BLE001
-                logger.exception("Lote %s: falha ao promover (%s).", batch.id, exc)
+                motivo = _erro_legivel(exc)
+                logger.exception("Lote %s: falha ao promover (%s).", batch.id, motivo)
                 batch.status = PUB_BATCH_STATUS_FAILED
-                batch.error_message = str(exc)[:2000]
+                batch.error_message = motivo[:2000]
                 self.db.commit()
-                _alertar_falha_batch(batch, str(exc), batch.requested_by_email)
+                _alertar_falha_batch(batch, motivo, batch.requested_by_email)
 
         if promovidos or sem_cache:
             logger.info(
@@ -678,13 +694,14 @@ class PublicationBatchClassifier:
                     requested_by_email=requested_by_email,
                 )
                 self.db.add(batch)
+            motivo = _erro_legivel(exc)
             batch.status = PUB_BATCH_STATUS_FAILED
-            batch.error_message = str(exc)[:2000]
+            batch.error_message = motivo[:2000]
             self.db.commit()
             self.db.refresh(batch)
             # Alerta por e-mail — o batch (manual OU job noturno) falhou ao ser
             # criado na Anthropic. Best-effort: nunca derruba o fluxo.
-            _alertar_falha_batch(batch, str(exc), requested_by_email)
+            _alertar_falha_batch(batch, motivo, requested_by_email)
             raise
 
         # Persiste o registro local do batch. Na promoção o registro JÁ
