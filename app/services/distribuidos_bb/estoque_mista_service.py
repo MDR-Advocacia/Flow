@@ -74,7 +74,15 @@ def normalizar_doc(doc: Any) -> Optional[str]:
 
 
 def parse_polo(valor: Any) -> list[dict[str, Any]]:
-    """'NOME | MCI | DOC || NOME2 | MCI2 | DOC2' → [{nome, mci, doc}, ...]"""
+    """'NOME | MCI | DOC || ...' (export antigo) ou 'NOME | DOC || ...' (novo).
+
+    O BB tirou o MCI do export da Base Analítica em ago/2026 — o mesmo processo
+    que vinha 'ALVARO ... | 303854624 | 25712268' passou a vir
+    'ALVARO ... | 25712268'. Lendo o DOC por posição fixa (segs[2]), a base nova
+    saía inteira com doc=None e `identificar_alvo` devolvia ZERO partes: sem
+    documento não há como cruzar os dois polos. Regra tolerante aos dois: o
+    documento é sempre o ÚLTIMO campo; o MCI, quando existe, fica no meio.
+    """
     out: list[dict[str, Any]] = []
     if not valor:
         return out
@@ -84,8 +92,8 @@ def parse_polo(valor: Any) -> list[dict[str, Any]]:
             continue
         out.append({
             "nome": segs[0],
-            "mci": segs[1] if len(segs) > 1 else None,
-            "doc": normalizar_doc(segs[2]) if len(segs) > 2 else None,
+            "mci": segs[1] if len(segs) > 2 else None,
+            "doc": normalizar_doc(segs[-1]) if len(segs) > 1 else None,
         })
     return out
 
