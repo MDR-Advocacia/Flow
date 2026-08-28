@@ -61,3 +61,27 @@ def test_dashboard_nao_conta_tombamento(db):
     kpis = DistribuidosBBService(db).dashboard()["kpis"]
     assert kpis["total"] == 1
     assert kpis["distribuidos"] == 1
+
+
+def test_graficos_escondem_tombamento_igual_aos_kpis(db):
+    """KPI e gráfico têm que contar a MESMA coisa.
+
+    Em 28/08/2026 só os KPIs excluíam tombamento: o card mostrava 2.221
+    capturados enquanto o chip "Banco Master" mostrava 11.281 na mesma tela, e
+    a série por data virava uma agulha no dia da migração — com todos os dias
+    de operação rente ao eixo, o painel do dia a dia ficou ilegível.
+    """
+    _proc(db, "diario:1")
+    _proc(db, "diario:2")
+    for i in range(50):                      # migração em massa, mesmo dia
+        _proc(db, f"tomb:{i}", cliente="MASTER", raw={"tombamento": {"aba": "x"}})
+
+    d = DistribuidosBBService(db).dashboard()
+
+    assert sum(x["total"] for x in d["por_cliente"]) == 2
+    assert all(x["cliente"] != "MASTER" for x in d["por_cliente"])
+    assert sum(x["total"] for x in d["por_data"]) == 2, "o pico afundaria a série"
+    assert sum(x["total"] for x in d["por_natureza"]) == 2
+    assert sum(x["total"] for x in d["por_posicao"]) == 2
+    assert sum(x["total"] for x in d["por_estado"]) == 2
+    assert d["kpis"]["total"] == sum(x["total"] for x in d["por_cliente"]),         "KPI e gráfico discordando é exatamente o bug que este teste trava"

@@ -160,10 +160,17 @@ class DistribuidosBBService:
         }
 
         # ── Gráficos do dashboard ────────────────────────────────────────
+        # Todos os gráficos abaixo escondem TOMBAMENTO, igual aos KPIs. Ficar
+        # só nos KPIs foi o bug de 28/08/2026: o card dizia 2.221 capturados e
+        # o chip "Banco Master" dizia 11.281 na MESMA tela, e o gráfico por
+        # data virava uma agulha no dia do tombamento com todo o resto rente
+        # ao eixo — o painel do dia a dia ilegível por causa da migração.
         por_cliente = [
             {"cliente": cli or "BB", "total": int(q)}
             for cli, q in (
-                self.db.query(BbProcesso.cliente, func.count(BbProcesso.id))
+                self._sem_tombamento(
+                    self.db.query(BbProcesso.cliente, func.count(BbProcesso.id))
+                )
                 .group_by(BbProcesso.cliente)
                 .all()
             )
@@ -171,7 +178,9 @@ class DistribuidosBBService:
         por_natureza = [
             {"natureza": nat or "—", "total": int(q)}
             for nat, q in (
-                self.db.query(BbProcesso.natureza, func.count(BbProcesso.id))
+                self._sem_tombamento(
+                    self.db.query(BbProcesso.natureza, func.count(BbProcesso.id))
+                )
                 .group_by(BbProcesso.natureza)
                 .all()
             )
@@ -179,13 +188,17 @@ class DistribuidosBBService:
         por_posicao = [
             {"posicao": pos or "—", "total": int(q)}
             for pos, q in (
-                self.db.query(BbProcesso.posicao, func.count(BbProcesso.id))
+                self._sem_tombamento(
+                    self.db.query(BbProcesso.posicao, func.count(BbProcesso.id))
+                )
                 .group_by(BbProcesso.posicao)
                 .all()
             )
         ]
         resp_rows = (
-            self.db.query(BbProcesso.responsavel_user_id, func.count(BbProcesso.id))
+            self._sem_tombamento(
+                self.db.query(BbProcesso.responsavel_user_id, func.count(BbProcesso.id))
+            )
             .group_by(BbProcesso.responsavel_user_id)
             .all()
         )
@@ -203,7 +216,9 @@ class DistribuidosBBService:
         from app.services.distribuidos_bb.cadastro_l1 import parse_tramitacao
 
         uf_counter: Counter = Counter()
-        for (tram,) in self.db.query(BbProcesso.tramitacao).all():
+        for (tram,) in self._sem_tombamento(
+            self.db.query(BbProcesso.tramitacao)
+        ).all():
             uf = (parse_tramitacao(tram) or {}).get("uf") or "—"
             uf_counter[uf] += 1
         por_estado = sorted(
@@ -217,10 +232,12 @@ class DistribuidosBBService:
         # existindo pra compatibilidade.
         por_data_map: dict[str, dict] = {}
         for d, cli, q in (
-            self.db.query(
-                func.date(BbProcesso.created_at),
-                BbProcesso.cliente,
-                func.count(BbProcesso.id),
+            self._sem_tombamento(
+                self.db.query(
+                    func.date(BbProcesso.created_at),
+                    BbProcesso.cliente,
+                    func.count(BbProcesso.id),
+                )
             )
             .group_by(func.date(BbProcesso.created_at), BbProcesso.cliente)
             .order_by(func.date(BbProcesso.created_at))
