@@ -238,3 +238,41 @@ def test_falha_de_um_endpoint_marca_resultado_parcial(db_session):
 
     r = conferir_duplicacao(db_session, pl, client=_MeioQuebrado())
     assert r.get("parcial") is True, "falha de endpoint passou como resultado completo"
+
+
+def test_import_que_nao_criou_pasta_nenhuma_grita(db_session):
+    """Import que envia e não cria NADA não pode passar como sucesso.
+
+    Caso real 27/08/2026: a restauração de 25 pastas do Ativos foi dada como
+    concluída ("25 processo(s) checado(s) no Legal One, uma pasta cada") e
+    NENHUMA existia — o número era quantos CNJs foram checados, não quantos
+    tinham pasta. O job do L1 tinha morrido depois de aceitar o envio.
+    """
+    pl = _planilha_com(db_session, [CNJ_A, CNJ_B])
+    l1 = _L1Fake([])                       # o L1 nao criou nada
+
+    r = conferir_duplicacao(db_session, pl, client=l1)
+
+    assert r["conferidos"] == 2
+    assert r["com_pasta"] == 0
+    assert r["sem_pasta"] == 2
+    assert r["duplicados"] == 0
+
+    ev = db_session.execute(text(
+        "SELECT nivel FROM bbd_eventos ORDER BY id DESC LIMIT 1"
+    )).scalar()
+    assert ev == "ERRO", "sem pasta nenhuma tem que gritar, nao virar 'tudo certo'"
+
+
+def test_pasta_faltando_so_em_alguns_tambem_avisa(db_session):
+    """Meio termo é o mais perigoso: parte entra, parte some, e o total engana."""
+    pl = _planilha_com(db_session, [CNJ_A, CNJ_B])
+    l1 = _L1Fake([_pasta(CNJ_A, "Proc - 0077686", 83533)])
+
+    r = conferir_duplicacao(db_session, pl, client=l1)
+
+    assert (r["com_pasta"], r["sem_pasta"]) == (1, 1)
+    ev = db_session.execute(text(
+        "SELECT nivel FROM bbd_eventos ORDER BY id DESC LIMIT 1"
+    )).scalar()
+    assert ev == "ERRO"

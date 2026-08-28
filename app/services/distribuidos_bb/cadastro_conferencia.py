@@ -36,6 +36,7 @@ logger = logging.getLogger("distribuidos_bb.conferencia")
 
 ACAO_OK = "Conferência pós-import"
 ACAO_DUP = "Pasta duplicada no L1"
+ACAO_SEM_PASTA = "Processo sem pasta no L1"
 
 # O L1 rejeita $top acima de 30 em /Lawsuits, e cada CNJ vira 1 cláusula OR.
 _CHUNK = 8
@@ -88,7 +89,8 @@ def conferir_duplicacao(
 
     Devolve {conferidos, duplicados, pastas_extras, detalhe}.
     """
-    resumo = {"conferidos": 0, "duplicados": 0, "pastas_extras": 0, "detalhe": []}
+    resumo = {"conferidos": 0, "duplicados": 0, "pastas_extras": 0,
+              "com_pasta": 0, "sem_pasta": 0, "detalhe": []}
     try:
         cnjs = [
             r[0] for r in db.execute(
@@ -180,7 +182,12 @@ def conferir_duplicacao(
                     for p in lista[1:]
                 ],
             })
-        resumo["com_pasta"] = len(por_chave)
+        # Quantos CNJs do lote de fato TEM pasta — e, principalmente, quantos
+        # NAO tem. Sem isso a conferência só sabia falar de duplicação, e um
+        # import que não criou NADA passava por ela como "tudo certo".
+        com_pasta = {cnj for cnj, _office in por_chave}
+        resumo["com_pasta"] = len(com_pasta)
+        resumo["sem_pasta"] = len(set(alvo) - com_pasta)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Conferência pós-import da planilha %s falhou (%s) — cadastro segue válido.",
@@ -214,12 +221,34 @@ def _registrar(db: Session, planilha, resumo: dict) -> None:
             "Planilha %s: %s processo(s) com pasta duplicada no L1 (%s extras).",
             planilha.id, resumo["duplicados"], resumo["pastas_extras"],
         )
+    elif resumo.get("sem_pasta"):
+        # O import diz o que foi ENVIADO, não o que o L1 criou — e o job dele
+        # morre calado. Este é o aviso que faltava: em 27/08/2026 a restauração
+        # de 25 pastas do Ativos foi reportada como sucesso e NENHUMA existia,
+        # porque a mensagem dizia "uma pasta cada" contando os CNJs checados,
+        # não os que tinham pasta.
+        registrar_evento(
+            db, secao=SECAO_CADASTRO, nivel=NIVEL_ERRO, acao=ACAO_SEM_PASTA,
+            mensagem=(
+                f"O Legal One NÃO criou pasta para {resumo['sem_pasta']} de "
+                f"{resumo['conferidos']} processo(s) desta planilha "
+                f"({resumo['com_pasta']} com pasta). O import só confirma o "
+                f"ENVIO — o job do L1 pode ter morrido depois. Reenviar os que "
+                f"ficaram sem pasta."
+            ),
+            dados={"planilha_id": planilha.id, **resumo},
+        )
+        logger.error(
+            "Planilha %s: %s de %s processo(s) sem pasta no L1 apos o import.",
+            planilha.id, resumo["sem_pasta"], resumo["conferidos"],
+        )
     else:
         registrar_evento(
             db, secao=SECAO_CADASTRO, nivel=NIVEL_INFO, acao=ACAO_OK,
             mensagem=(
-                f"Conferência pós-import: {resumo['conferidos']} processo(s) "
-                f"checado(s) no Legal One, uma pasta cada. Nenhuma duplicação."
+                f"Conferência pós-import: {resumo['com_pasta']} de "
+                f"{resumo['conferidos']} processo(s) com uma pasta cada no "
+                f"Legal One. Nenhuma duplicação, ninguém sem pasta."
             ),
             dados={"planilha_id": planilha.id, **resumo},
         )
