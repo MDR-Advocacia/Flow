@@ -77,6 +77,14 @@ STATUS_TRABALHANDO = (7, 8)
 TIMEOUT_GERACAO_S = 900
 INTERVALO_POLL_S = 10
 
+# Quanto esperar o relatório APARECER na listagem depois do POST. Não confundir
+# com TIMEOUT_GERACAO_S, que é o tempo pra ele ficar PRONTO — aquele só começa
+# a valer depois que temos o id. Antes esta espera era um único `sleep(10)`, e
+# foi o que derrubou a contingência na madrugada de 28/08/2026: o relatório
+# levou mais que isso pra indexar e a captura foi dada como perdida, com as
+# publicações do dia inteiro sem entrar.
+TIMEOUT_APARECER_S = 180
+
 _GETFILE_RE = re.compile(r"GetFile/(\d+)")
 
 try:
@@ -142,8 +150,15 @@ def corpo_do_formulario(data_inicio: str, data_fim: str) -> str:
     )
 
 
-def _ids_existentes(session: requests.Session, base: str) -> set[int]:
-    """IDs de relatório já presentes na listagem — pra isolar o que acabamos de criar."""
+def _ids_existentes(session: requests.Session, base: str) -> Optional[set[int]]:
+    """IDs de relatório já presentes na listagem — pra isolar o que acabamos de criar.
+
+    Devolve `None` quando a listagem NÃO pôde ser lida. Antes devolvia conjunto
+    vazio, e isso é perigoso na chamada de baixo: com `antes` vazio, todo id da
+    listagem vira "novo" e a contingência baixaria um relatório VELHO achando
+    que é o nosso — publicando dados de outra janela como se fossem do dia.
+    Vazio de verdade (listagem sem nenhum relatório) continua sendo `set()`.
+    """
     try:
         html = session.get(
             f"{base}/processos/ReportProcessos/Search", timeout=120
@@ -151,12 +166,20 @@ def _ids_existentes(session: requests.Session, base: str) -> set[int]:
         return {int(x) for x in _GETFILE_RE.findall(html)}
     except (requests.RequestException, ValueError):
         logger.warning("Não foi possível listar relatórios antes do disparo.", exc_info=True)
-        return set()
+        return None
 
 
 def disparar(session: requests.Session, base: str, data_inicio: str, data_fim: str) -> Optional[int]:
     """Dispara a geração e devolve o id do relatório criado."""
     antes = _ids_existentes(session, base)
+    if antes is None:
+        # Sem baseline não dá pra saber qual id é o nosso, e chutar significaria
+        # importar a janela errada. Falha explícita > dado errado.
+        logger.error(
+            "Não foi possível ler a listagem de relatórios ANTES do disparo — "
+            "sem isso não há como identificar o relatório novo. Abortando."
+        )
+        return None
 
     # Abre o modelo antes de postar: além de ser o que o browser faz, valida
     # que o modelo 789 ainda existe e que a sessão está de pé.
@@ -172,21 +195,27 @@ def disparar(session: requests.Session, base: str, data_inicio: str, data_fim: s
     )
     resp.raise_for_status()
 
-    depois = _ids_existentes(session, base)
-    novos = depois - antes
-    if novos:
-        return max(novos)
-
-    # Sem id novo na listagem: pode ser atraso de indexação. Tenta de novo,
-    # dando um respiro, antes de desistir.
-    time.sleep(INTERVALO_POLL_S)
-    novos = _ids_existentes(session, base) - antes
-    if novos:
-        return max(novos)
+    # O L1 indexa o relatório na listagem com atraso — às vezes segundos, às
+    # vezes minutos quando a janela é grande. Espera de verdade em vez de olhar
+    # duas vezes: em 28/08/2026 um único `sleep(10)` deu a captura por perdida.
+    limite = time.monotonic() + TIMEOUT_APARECER_S
+    depois: Optional[set[int]] = None
+    while True:
+        depois = _ids_existentes(session, base)
+        if depois is not None:
+            novos = depois - antes
+            if novos:
+                return max(novos)
+        if time.monotonic() >= limite:
+            break
+        time.sleep(INTERVALO_POLL_S)
 
     logger.error(
-        "Relatório disparado mas nenhum id novo apareceu na listagem "
-        "(antes=%s ids, depois=%s ids).", len(antes), len(depois),
+        "Relatório disparado mas nenhum id novo apareceu na listagem em %ss "
+        "(antes=%s ids, depois=%s ids). Listagem que ENCOLHE indica rotação de "
+        "relatórios antigos — o novo ainda não foi indexado.",
+        TIMEOUT_APARECER_S, len(antes),
+        "?" if depois is None else len(depois),
     )
     return None
 

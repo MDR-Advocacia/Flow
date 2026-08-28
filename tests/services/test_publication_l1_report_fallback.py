@@ -176,10 +176,70 @@ def test_disparo_identifica_o_relatorio_recem_criado(monkeypatch):
 
 def test_disparo_sem_id_novo_devolve_none(monkeypatch):
     monkeypatch.setattr(fb.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(fb, "TIMEOUT_APARECER_S", 0)   # sem espera real no teste
     s = _FakeSession(ids_antes=(13200,))
     s._disparou = True  # ja "existia": nenhum id novo aparece
     s.id_novo = 13200
     assert fb.disparar(s, "http://l1", "29/07/2026", "30/07/2026") is None
+
+
+def test_disparo_espera_o_relatorio_aparecer_na_listagem(monkeypatch):
+    """O L1 indexa o relatório com atraso — desistir na primeira olhada perde a
+    contingência inteira.
+
+    Foi o que aconteceu em 28/08/2026: a versão antiga olhava a listagem, dormia
+    10s, olhava de novo e desistia. A captura do dia foi dada como perdida com o
+    relatório a caminho.
+    """
+    monkeypatch.setattr(fb.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(fb, "TIMEOUT_APARECER_S", 300)
+
+    s = _FakeSession(id_novo=13430, ids_antes=(13200, 13300))
+    olhadas = {"n": 0}
+    de_verdade = s.get
+
+    def get_atrasado(url, **kw):
+        if "ReportProcessos/Search" in url and s._disparou:
+            olhadas["n"] += 1
+            if olhadas["n"] < 3:          # só aparece na 3ª consulta
+                salvo, s._disparou = s._disparou, False
+                try:
+                    return de_verdade(url, **kw)
+                finally:
+                    s._disparou = salvo
+        return de_verdade(url, **kw)
+
+    s.get = get_atrasado
+    assert fb.disparar(s, "http://l1", "29/07/2026", "30/07/2026") == 13430
+    assert olhadas["n"] >= 3, "desistiu antes de o relatório ser indexado"
+
+
+def test_disparo_aborta_quando_nao_consegue_ler_a_listagem_antes(monkeypatch):
+    """Sem baseline, TODO id da listagem parece novo — e a contingência baixaria
+    um relatório VELHO como se fosse o do dia. Falha explícita > dado errado."""
+    monkeypatch.setattr(fb.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(fb, "TIMEOUT_APARECER_S", 0)
+    monkeypatch.setattr(fb, "_ids_existentes", lambda *a, **k: None)
+
+    s = _FakeSession(ids_antes=(13200, 13300))
+    assert fb.disparar(s, "http://l1", "29/07/2026", "30/07/2026") is None
+    assert s.postou_form is None, "não pode nem disparar sem saber o que é novo"
+
+
+def test_listagem_ilegivel_vira_None_e_nao_conjunto_vazio():
+    """Vazio de verdade (`set()`) e ilegível (`None`) são coisas diferentes —
+    confundir os dois é o que fazia a contingência adotar relatório alheio."""
+    class _Quebrada:
+        def get(self, *a, **k):
+            raise fb.requests.RequestException("listagem fora do ar")
+
+    assert fb._ids_existentes(_Quebrada(), "http://l1") is None
+
+    class _Vazia:
+        def get(self, *a, **k):
+            return _Resp(text="<html>nenhum relatorio</html>")
+
+    assert fb._ids_existentes(_Vazia(), "http://l1") == set()
 
 
 # ── Ponta a ponta ──────────────────────────────────────────────────────
