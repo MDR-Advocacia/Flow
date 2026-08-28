@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -262,6 +263,23 @@ def _import_status(sess, h) -> dict:
 # era um truncamento silencioso que escondia a fila real. Ver _listar_staging.
 _PAGINAS_MAX = 2000
 
+# Teto de linhas na FILA DE REVISAO do L1 acima do qual este modulo se recusa a
+# subir planilha nova.
+#
+# Existe por causa do tombamento do Master (26 a 28/08/2026). Cada planilha
+# respeitava o limite de 500 por arquivo, mas o driver emendava um lote no
+# outro SEM esperar a fila drenar — e lote que falhava deixava as linhas la'.
+# A fila foi somando 1.216 -> 4.255 -> 5.826 -> 8.882 -> 12.094, o processador
+# de import do L1 comecou a estourar por tempo (4.176 linhas com "O processo de
+# importacao expirou!") e o cadastro do fluxo diario parou junto: 86 processos
+# do BB e do Ativos ficaram sem pasta, publicacao atrasou, e o tenant inteiro
+# ficou lento por dois dias.
+#
+# O limite util nao e' o tamanho do arquivo, e' o quanto a fila aguenta digerir.
+# Isso aqui e' a trava que faltava — nao adianta depender de alguem lembrar de
+# conferir antes de mandar o proximo lote.
+_FILA_REVISAO_MAX = int(os.environ.get("BBD_IMPORT_FILA_MAX", "1000"))
+
 # Quantos ids por chamada de `save`. O L1 processa o commit em background e
 # job grande demais morre no meio sem avisar (500 de uma vez criou 4 pastas em
 # 26/08/2026). 50 é o tamanho que dá pra conferir e refazer sem estrago.
@@ -293,6 +311,22 @@ def _save(sess, h, selected_ids=None) -> dict:
     if r.status_code != 200:
         raise ImportL1Error(f"save {r.status_code}: {r.text[:200]}")
     return r.json()
+
+
+def _fila_revisao(sess, h) -> Optional[int]:
+    """Quantas linhas estão hoje na fila de revisão do import do L1.
+
+    `None` quando não deu pra ler — nesse caso o chamador NÃO bloqueia: uma
+    leitura falha não pode virar impedimento de cadastrar. A trava serve pra
+    barrar excesso conhecido, não pra travar na dúvida.
+    """
+    try:
+        st = _import_status(sess, h) or {}
+        valor = st.get("revisingLitigationsCount")
+        return int(valor) if valor is not None else None
+    except Exception:  # noqa: BLE001
+        logger.warning("Não foi possível medir a fila de revisão do L1.", exc_info=True)
+        return None
 
 
 def _listar_staging(sess, h) -> list[dict]:
@@ -495,6 +529,18 @@ def _cadastrar_once(conteudo, file_name, *, firm_id, dry_run, poll_max_s, tok,
     rel["importado_por"] = {"user_id": tok.get("user_id"), "nome": tok.get("user_name")}
     sess = requests.Session()
     h = _headers(tok)
+
+    # TRAVA DE FILA: nao empilhar em cima de uma revisao ja' entupida. Ver
+    # `_FILA_REVISAO_MAX`.
+    fila = _fila_revisao(sess, h)
+    if fila is not None and fila > _FILA_REVISAO_MAX:
+        raise ImportL1Error(
+            f"Fila de revisão do Legal One com {fila} linha(s), acima do teto de "
+            f"{_FILA_REVISAO_MAX}. Subir mais agora empilha em cima do que o L1 "
+            f"ainda não digeriu — foi assim que a fila chegou a 12.094 linhas em "
+            f"27/08/2026 e o cadastro parou por dois dias. Esvazie a revisão no "
+            f"L1 (ou espere ela drenar) antes de importar."
+        )
 
     # BASELINE: linhas já no staging ANTES do nosso upload (dupes antigos, lixo de
     # outros imports). Depois pegamos só o que ENTROU com esta planilha (diff) —

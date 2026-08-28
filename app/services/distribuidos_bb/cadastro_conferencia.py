@@ -92,19 +92,22 @@ def conferir_duplicacao(
     resumo = {"conferidos": 0, "duplicados": 0, "pastas_extras": 0,
               "com_pasta": 0, "sem_pasta": 0, "detalhe": []}
     try:
-        cnjs = [
-            r[0] for r in db.execute(
-                text(
-                    "SELECT DISTINCT cnj FROM bbd_processos "
-                    # `trim` e nao `btrim`: btrim so' existe no Postgres e a suite roda em
-                    # SQLite — o teste pegou isso na primeira execucao.
-                    "WHERE planilha_id = :p AND cnj IS NOT NULL AND trim(cnj) <> ''"
-                ),
-                {"p": planilha.id},
-            )
-        ]
+        # CNJ **e** escritório: a conferência é sempre por (CNJ, escritório).
+        # O mesmo CNJ existe de propósito em clientes diferentes (BB × Ativos ×
+        # Master) — achar a pasta do vizinho não prova nada sobre a nossa.
+        linhas = db.execute(
+            text(
+                "SELECT DISTINCT cnj, escritorio_path FROM bbd_processos "
+                # `trim` e nao `btrim`: btrim so' existe no Postgres e a suite roda em
+                # SQLite — o teste pegou isso na primeira execucao.
+                "WHERE planilha_id = :p AND cnj IS NOT NULL AND trim(cnj) <> ''"
+            ),
+            {"p": planilha.id},
+        ).fetchall()
+        cnjs = [r[0] for r in linhas]
         if not cnjs:
             return resumo
+        path_do_cnj = {_digitos(c): pth for c, pth in linhas}
 
         if client is None:
             from app.services.legal_one_client import LegalOneApiClient
@@ -182,12 +185,43 @@ def conferir_duplicacao(
                     for p in lista[1:]
                 ],
             })
-        # Quantos CNJs do lote de fato TEM pasta — e, principalmente, quantos
-        # NAO tem. Sem isso a conferência só sabia falar de duplicação, e um
-        # import que não criou NADA passava por ela como "tudo certo".
-        com_pasta = {cnj for cnj, _office in por_chave}
+        # Quantos CNJs do lote de fato TEM pasta NO ESCRITÓRIO DELE — e,
+        # principalmente, quantos não têm.
+        #
+        # Contar "tem pasta em qualquer escritório" já me traiu duas vezes em
+        # 28/08/2026: os processos do Ativos cujo CNJ também existe no Master
+        # (tombamento) apareciam como cadastrados porque a busca achava a pasta
+        # do Master. Reportei "5 de 5 com pasta" para o operador com ZERO pasta
+        # do Ativos criada. A regra da casa é uma só: (CNJ, escritório).
+        from app.services.distribuidos_bb import cadastro_l1
+
+        office_do_path: dict = {}
+
+        def _office(pth):
+            if pth not in office_do_path:
+                try:
+                    office_do_path[pth] = cadastro_l1.resolver_office_por_path(client, pth)
+                except Exception:  # noqa: BLE001
+                    office_do_path[pth] = None
+            return office_do_path[pth]
+
+        com_pasta = set()
+        sem_office = 0
+        for cnj_d in alvo:
+            esperado = _office(path_do_cnj.get(cnj_d))
+            if esperado is None:
+                # Sem saber o escritório não dá pra afirmar nem que tem nem que
+                # não tem — conta como tendo, pra não gerar alarme falso, mas
+                # marca o resultado como parcial.
+                sem_office += 1
+                resumo["parcial"] = True
+                com_pasta.add(cnj_d)
+                continue
+            if (cnj_d, esperado) in por_chave:
+                com_pasta.add(cnj_d)
         resumo["com_pasta"] = len(com_pasta)
         resumo["sem_pasta"] = len(set(alvo) - com_pasta)
+        resumo["sem_escritorio_resolvido"] = sem_office
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Conferência pós-import da planilha %s falhou (%s) — cadastro segue válido.",

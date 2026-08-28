@@ -11,6 +11,7 @@ escritórios diferentes (processo de outro cliente, via `cnjs_liberados`).
 """
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import text
 
 from app.models.distribuidos_bb import (
@@ -44,6 +45,21 @@ class _L1Fake:
         return list(self._pastas)
 
 
+PATH_DO_CLIENTE = "MDR Advocacia / Área operacional / Banco do Brasil / Réu"
+OFFICE_DO_CLIENTE = 23          # o que `resolver_office_por_path` devolve nos testes
+
+
+@pytest.fixture(autouse=True)
+def _office_resolvido(monkeypatch):
+    """A conferência resolve o escritório do processo no L1 pra comparar por
+    (CNJ, escritório). Nos testes esse lookup é fixo — quem quiser testar o
+    caso "não resolveu" sobrescreve."""
+    from app.services.distribuidos_bb import cadastro_l1
+
+    monkeypatch.setattr(cadastro_l1, "resolver_office_por_path",
+                        lambda client, path: OFFICE_DO_CLIENTE)
+
+
 def _planilha_com(db, cnjs):
     pl = BbPlanilha(
         nome_arquivo="TESTE.xlsx", conteudo=b"x", total_processos=len(cnjs),
@@ -55,7 +71,7 @@ def _planilha_com(db, cnjs):
         db.add(BbProcesso(
             fingerprint=f"cnj:{cnj}", cliente=CLIENTE_BB, cnj=cnj,
             status=PROC_DISTRIBUIDO, planilha_status=POOL_PENDENTE_CADASTRO,
-            planilha_id=pl.id,
+            planilha_id=pl.id, escritorio_path=PATH_DO_CLIENTE,
         ))
     db.flush()
     return pl
@@ -276,3 +292,45 @@ def test_pasta_faltando_so_em_alguns_tambem_avisa(db_session):
         "SELECT nivel FROM bbd_eventos ORDER BY id DESC LIMIT 1"
     )).scalar()
     assert ev == "ERRO"
+
+
+def test_pasta_de_OUTRO_cliente_nao_conta_como_cadastrado(db_session, monkeypatch):
+    """A regra da casa: conferência é SEMPRE por (CNJ, escritório).
+
+    O mesmo CNJ existe de propósito em clientes diferentes (BB × Ativos ×
+    Master). Em 28/08/2026 a conferência contava "tem pasta em qualquer
+    escritório" e eu reportei ao operador "5 de 5 com pasta" para processos do
+    Ativos cujas pastas eram todas do Banco Master (tombamento) — zero pasta do
+    Ativos tinha sido criada. Falso positivo duas vezes no mesmo dia.
+    """
+    from app.services.distribuidos_bb import cadastro_l1
+
+    monkeypatch.setattr(cadastro_l1, "resolver_office_por_path",
+                        lambda client, path: OFFICE_DO_CLIENTE)
+
+    pl = _planilha_com(db_session, [CNJ_A, CNJ_B])
+    l1 = _L1Fake([
+        _pasta(CNJ_A, "Proc - 0077686", 83533, office=OFFICE_DO_CLIENTE),
+        _pasta(CNJ_B, "Proc - 0082182", 88153, office=61),   # Master, não é nossa
+    ])
+
+    r = conferir_duplicacao(db_session, pl, client=l1)
+
+    assert r["com_pasta"] == 1, "pasta do Master não pode contar como cadastro nosso"
+    assert r["sem_pasta"] == 1
+    assert r["duplicados"] == 0
+
+
+def test_escritorio_que_nao_resolve_marca_parcial(db_session, monkeypatch):
+    """Sem saber o escritório não dá pra afirmar nada — não inventa veredito."""
+    from app.services.distribuidos_bb import cadastro_l1
+
+    monkeypatch.setattr(cadastro_l1, "resolver_office_por_path",
+                        lambda client, path: None)
+
+    pl = _planilha_com(db_session, [CNJ_A])
+    r = conferir_duplicacao(db_session, pl, client=_L1Fake([]))
+
+    assert r.get("parcial") is True
+    assert r["sem_escritorio_resolvido"] == 1
+    assert r["sem_pasta"] == 0, "na dúvida não acusa falta de pasta"
