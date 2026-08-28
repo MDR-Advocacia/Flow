@@ -19,7 +19,13 @@ _UF_POR_TR = {
     "07": "df", "08": "es", "09": "go", "10": "ma", "11": "mt", "12": "ms",
     "13": "mg", "14": "pa", "15": "pb", "16": "pr", "17": "pe", "18": "pi",
     "19": "rj", "20": "rn", "21": "rs", "22": "ro", "23": "rr", "24": "sc",
-    "25": "sp", "26": "se", "27": "to",
+    # 25 = Sergipe e 26 = Sao Paulo (estavam TROCADOS aqui). O `.8.26.` do
+    # TJSP e' o codigo mais comum do pais, entao a inversao mandava todo CNJ
+    # paulista pro indice do DataJud de Sergipe e vice-versa — a consulta
+    # respondia vazio e o processo passava como "sem citacao". Conferido
+    # contra a carteira: os 130+ CNJs com TR=25 sao todos de Sergipe
+    # (Aracaju/SE, Estancia/SE, Lagarto/SE...).
+    "25": "se", "26": "sp", "27": "to",
 }
 
 
