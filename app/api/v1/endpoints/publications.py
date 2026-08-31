@@ -714,6 +714,7 @@ async def reclassify_full_batch(
         r.subcategory = None
         r.polo = None
         r.classifications = None
+        r.prazo_estimado = None
         r.status = RECORD_STATUS_NEW
     db.commit()
 
@@ -826,6 +827,10 @@ def list_records_grouped(
     cnj_search: Optional[str] = Query(None, description="Busca tolerante por CNJ (match por dígitos, ignora máscara)."),
     scheduled_by_user_id: Optional[str] = Query(None, description="CSV de user_ids do operador que cadastrou (Cadastrado por)."),
     etiqueta: Optional[str] = Query(None, description="CSV de etiquetas do L1 (ex.: BASE NERC,Adverso Réu/Autor)."),
+    estado_prazo: Optional[str] = Query(None, description="Régua de prazo estimado: CSV de vencida, vence_hoje, no_prazo, sem_prazo."),
+    idade_min_dias: Optional[int] = Query(None, ge=0, description="Só publicações capturadas há PELO MENOS N dias."),
+    idade_max_dias: Optional[int] = Query(None, ge=0, description="Teto do bucket de idade de captura (inclusive)."),
+    order: str = Query("urgencia", description="Ordenação dos grupos: urgencia (prazo estimado + publicação mais antiga) ou grupo (legada, por lawsuit_id)."),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     service: PublicationSearchService = Depends(_get_service),
@@ -845,9 +850,21 @@ def list_records_grouped(
         cnj_search=cnj_search,
         scheduled_by_user_id=scheduled_by_user_id,
         etiqueta=etiqueta,
+        estado_prazo=estado_prazo,
+        idade_min_dias=idade_min_dias,
+        idade_max_dias=idade_max_dias,
+        order=order,
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/records/aging-summary")
+def records_aging_summary(
+    service: PublicationSearchService = Depends(_get_service),
+):
+    """Contadores de envelhecimento do backlog pendente (régua/banner da tela)."""
+    return service.aging_summary()
 
 
 @router.get("/records/grouped/export")
@@ -1038,6 +1055,11 @@ def submit_classification_feedback(
         rec.polo = payload.corrected_polo
     if payload.corrected_natureza is not None:
         rec.natureza_processo = payload.corrected_natureza
+
+    # Classificação mudou → o vencimento estimado (pub012) acompanha.
+    from app.services.publication_prazo_estimado import atualizar_prazo_estimado
+
+    atualizar_prazo_estimado(service.db, rec)
 
     service.db.commit()
     return {"message": "Feedback registrado com sucesso.", "id": fb.id}

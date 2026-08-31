@@ -23,6 +23,10 @@ import sqlalchemy as sa
 from sqlalchemy import func as sa_func, literal_column, case, or_
 from sqlalchemy.orm import Session, joinedload
 
+from app.services.publication_prazo_estimado import (
+    atualizar_prazo_estimado,
+    hoje_brt,
+)
 from app.models.publication_search import (
     RECORD_STATUS_CLASSIFIED,
     RECORD_STATUS_ERROR,
@@ -1081,6 +1085,7 @@ class PublicationSearchService:
                             # Natureza do processo: só pra publicações sem pasta vinculada
                             if rec.linked_lawsuit_id is None:
                                 rec.natureza_processo = clean.natureza_processo
+                            atualizar_prazo_estimado(self.db, rec)
                             rec.status = RECORD_STATUS_CLASSIFIED
                             logger.debug(
                                 "Classificado #%s → %s / %s (polo=%s, aud=%s %s, nat=%s)",
@@ -2438,6 +2443,9 @@ class PublicationSearchService:
         cnj_search: Optional[str] = None,
         scheduled_by_user_id: Optional[str] = None,
         etiqueta: Optional[str] = None,
+        estado_prazo: Optional[str] = None,
+        idade_min_dias: Optional[int] = None,
+        idade_max_dias: Optional[int] = None,
     ):
         """Query base reutilizada por list_records_grouped e contagens."""
         query = self.db.query(PublicationRecord).filter(PublicationRecord.is_duplicate == False)  # noqa: E712
@@ -2464,6 +2472,36 @@ class PublicationSearchService:
             query = query.filter(PublicationRecord.creation_date >= date_from)
         if date_to:
             query = query.filter(PublicationRecord.creation_date < date_to + "T99")
+        # Régua de envelhecimento (pub012): estado do prazo ESTIMADO. Aceita
+        # CSV ("vencida,vence_hoje"). SEM_PRAZO = categoria ainda sem default
+        # de prazo na taxonomia (o estado de fábrica — a régua acende conforme
+        # o operador preencher os defaults).
+        estado_list = [e.strip().lower() for e in _parse_csv_strs(estado_prazo)]
+        if estado_list:
+            hoje = hoje_brt()
+            conds = []
+            if "vencida" in estado_list:
+                conds.append(PublicationRecord.prazo_estimado < hoje)
+            if "vence_hoje" in estado_list:
+                conds.append(PublicationRecord.prazo_estimado == hoje)
+            if "no_prazo" in estado_list:
+                conds.append(PublicationRecord.prazo_estimado > hoje)
+            if "sem_prazo" in estado_list:
+                conds.append(PublicationRecord.prazo_estimado.is_(None))
+            if conds:
+                query = query.filter(or_(*conds))
+        # Idade de captura em dias: min = "está há PELO MENOS N dias na fila",
+        # max = teto do bucket (inclusive). Corte por created_at em UTC.
+        if idade_min_dias is not None:
+            query = query.filter(
+                PublicationRecord.created_at
+                <= datetime.now(timezone.utc) - timedelta(days=int(idade_min_dias))
+            )
+        if idade_max_dias is not None:
+            query = query.filter(
+                PublicationRecord.created_at
+                > datetime.now(timezone.utc) - timedelta(days=int(idade_max_dias) + 1)
+            )
         # Todos os filtros abaixo aceitam CSV ("ativo,passivo") ou lista.
         # Usa .in_(list) quando >1 valor, == quando 1 (preserva plan do query).
         category_list = _parse_csv_strs(category)
@@ -2639,6 +2677,10 @@ class PublicationSearchService:
         cnj_search: Optional[str] = None,
         scheduled_by_user_id: Optional[str] = None,
         etiqueta: Optional[str] = None,
+        estado_prazo: Optional[str] = None,
+        idade_min_dias: Optional[int] = None,
+        idade_max_dias: Optional[int] = None,
+        order: str = "urgencia",
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -2658,6 +2700,9 @@ class PublicationSearchService:
             polo=polo, cnj_search=cnj_search,
             scheduled_by_user_id=scheduled_by_user_id,
             etiqueta=etiqueta,
+            estado_prazo=estado_prazo,
+            idade_min_dias=idade_min_dias,
+            idade_max_dias=idade_max_dias,
         )
 
         # ─── Etapa 1: contar e paginar grupos (lawsuit_ids distintos) ───
@@ -2676,9 +2721,15 @@ class PublicationSearchService:
 
         groups_subq = (
             base
-            .with_entities(group_key, sa_func.count().label("cnt"))
+            .with_entities(
+                group_key,
+                sa_func.count().label("cnt"),
+                # Agregados da régua de envelhecimento: o grupo herda a
+                # urgência da publicação mais urgente dele.
+                sa_func.min(PublicationRecord.prazo_estimado).label("min_prazo"),
+                sa_func.min(PublicationRecord.publication_date).label("min_pub"),
+            )
             .group_by(literal_column("group_key"))
-            .order_by(literal_column("group_key"))
             .subquery()
         )
 
@@ -2709,6 +2760,9 @@ class PublicationSearchService:
             polo=polo, cnj_search=cnj_search,
             scheduled_by_user_id=scheduled_by_user_id,
             etiqueta=etiqueta,
+            estado_prazo=estado_prazo,
+            idade_min_dias=idade_min_dias,
+            idade_max_dias=idade_max_dias,
         )
         available_ufs = [
             row[0] for row in uf_query
@@ -2782,15 +2836,30 @@ class PublicationSearchService:
             logger.exception("Falha ao listar etiquetas pro filtro (ignorado).")
             available_etiquetas = []
 
-        # Busca as group_keys da página atual
+        # Busca as group_keys da página atual. Ordem padrão = URGÊNCIA:
+        # menor prazo estimado primeiro (sem prazo vai pro fim), depois a
+        # publicação mais antiga. A ordem antiga ("grupo", por group_key =
+        # lawsuit_id como string) era arbitrária e enterrava publicação velha
+        # em posição aleatória da paginação — foi assim que uma publicação de
+        # 11/07 ficou 48 dias fora do campo de visão dos operadores.
+        if order == "grupo":
+            ordenacao = [groups_subq.c.group_key]
+        else:
+            ordenacao = [
+                case((groups_subq.c.min_prazo.is_(None), 1), else_=0),
+                groups_subq.c.min_prazo.asc(),
+                groups_subq.c.min_pub.asc(),
+                groups_subq.c.group_key,
+            ]
         page_keys_rows = (
             self.db.query(groups_subq.c.group_key)
-            .order_by(groups_subq.c.group_key)
+            .order_by(*ordenacao)
             .offset(offset)
             .limit(limit)
             .all()
         )
-        page_keys = {row[0] for row in page_keys_rows}
+        page_keys_order = [row[0] for row in page_keys_rows]
+        page_keys = set(page_keys_order)
 
         if not page_keys:
             return {
@@ -2823,6 +2892,9 @@ class PublicationSearchService:
             polo=polo, cnj_search=cnj_search,
             scheduled_by_user_id=scheduled_by_user_id,
             etiqueta=etiqueta,
+            estado_prazo=estado_prazo,
+            idade_min_dias=idade_min_dias,
+            idade_max_dias=idade_max_dias,
         )
 
         # Filtro: records que pertencem aos grupos da página
@@ -2858,10 +2930,11 @@ class PublicationSearchService:
             if key in page_keys:
                 groups_map[key].append(r)
 
-        # Mantém a ordem da paginação
+        # Mantém a ordem da paginação (a MESMA da query de page_keys —
+        # ordenar aqui por outra chave desfaria a ordenação por urgência)
         grouped_list = []
-        for k in sorted(groups_map.keys()):
-            items = groups_map[k]
+        for k in page_keys_order:
+            items = groups_map.get(k)
             if items:
                 grouped_list.append(self._build_group(items))
 
@@ -2898,6 +2971,77 @@ class PublicationSearchService:
             raise ValueError(f"Registro #{record_id} não encontrado.")
         self._attach_onenotify_bb_links([record])
         return self._record_to_dict(record, include_full_text=True)
+
+    # ── Régua de envelhecimento (pub012) ────────────────────────────────
+    def aging_summary(self) -> dict[str, Any]:
+        """Contadores do backlog pendente pra régua/banner da tela.
+
+        Pendente = NOVO/CLASSIFICADO/ERRO sem duplicata (o mesmo conjunto do
+        filtro padrão da listagem). Duas dimensões independentes: estado do
+        prazo ESTIMADO (acende conforme a taxonomia ganhar defaults) e idade
+        de captura (funciona desde o dia 1, sem depender de configuração).
+        """
+        hoje = hoje_brt()
+        agora = datetime.now(timezone.utc)
+
+        def _pend():
+            return self.db.query(PublicationRecord).filter(
+                PublicationRecord.is_duplicate == False,  # noqa: E712
+                PublicationRecord.status.in_(
+                    [RECORD_STATUS_NEW, RECORD_STATUS_CLASSIFIED, RECORD_STATUS_ERROR]
+                ),
+            )
+
+        total = _pend().count()
+        vencidas = _pend().filter(PublicationRecord.prazo_estimado < hoje).count()
+        vence_hoje = _pend().filter(PublicationRecord.prazo_estimado == hoje).count()
+        sem_prazo = _pend().filter(PublicationRecord.prazo_estimado.is_(None)).count()
+        no_prazo = total - vencidas - vence_hoje - sem_prazo
+
+        def _com_pelo_menos(dias: int) -> int:
+            return _pend().filter(
+                PublicationRecord.created_at <= agora - timedelta(days=dias)
+            ).count()
+
+        d31_mais = _com_pelo_menos(31)
+        d16_30 = _com_pelo_menos(16) - d31_mais
+        d8_15 = _com_pelo_menos(8) - d31_mais - d16_30
+        d3_7 = _com_pelo_menos(3) - d31_mais - d16_30 - d8_15
+        d0_2 = total - d31_mais - d16_30 - d8_15 - d3_7
+
+        mais_antiga = None
+        rec = (
+            _pend()
+            .order_by(PublicationRecord.created_at.asc())
+            .first()
+        )
+        if rec is not None and rec.created_at is not None:
+            criada = rec.created_at
+            ref = criada if criada.tzinfo else criada.replace(tzinfo=timezone.utc)
+            mais_antiga = {
+                "id": rec.id,
+                "cnj": rec.linked_lawsuit_cnj,
+                "publication_date": rec.publication_date,
+                "created_at": criada.isoformat(),
+                "dias_captura": max((agora - ref).days, 0),
+            }
+
+        return {
+            "hoje": hoje.isoformat(),
+            "total_pendentes": total,
+            "vencidas": vencidas,
+            "vence_hoje": vence_hoje,
+            "no_prazo": no_prazo,
+            "sem_prazo": sem_prazo,
+            "faixas": {
+                "d0_2": d0_2,
+                "d3_7": d3_7,
+                "d8_15": d8_15,
+                "d16_30": d16_30,
+                "d31_mais": d31_mais,
+            },
+            "mais_antiga": mais_antiga,
+        }
 
     def _attach_onenotify_bb_links(self, records: list[PublicationRecord]) -> None:
         """Anexa contexto OneNotify BB às publicações já carregadas."""
@@ -3548,6 +3692,8 @@ class PublicationSearchService:
                     "origem": "manual_override",
                 }]
             rec.classifications = new_list
+            # Classificação mudou → vencimento estimado (pub012) acompanha.
+            atualizar_prazo_estimado(self.db, rec)
             # Se estiver NOVO, promove para CLASSIFICADO
             if rec.status == RECORD_STATUS_NEW:
                 rec.status = RECORD_STATUS_CLASSIFIED
@@ -4616,6 +4762,9 @@ class PublicationSearchService:
             "classifications": record.classifications,
             "uf": record.uf,
             "natureza_processo": record.natureza_processo,
+            "prazo_estimado": (
+                record.prazo_estimado.isoformat() if record.prazo_estimado else None
+            ),
             "has_proposal": bool(proposal),
             "proposal": proposal if include_full_text else None,
             "proposals_count": len(proposals) if proposals else (1 if proposal else 0),

@@ -36,6 +36,7 @@ import {
   Link2,
   Loader2,
   MessageSquareWarning,
+  AlertTriangle,
   Newspaper,
   Play,
   Plus,
@@ -300,6 +301,23 @@ interface Classification {
   prazo_fundamentacao?: string | null;
 }
 
+interface AgingSummary {
+  hoje: string;
+  total_pendentes: number;
+  vencidas: number;
+  vence_hoje: number;
+  no_prazo: number;
+  sem_prazo: number;
+  faixas: { d0_2: number; d3_7: number; d8_15: number; d16_30: number; d31_mais: number };
+  mais_antiga: {
+    id: number;
+    cnj: string | null;
+    publication_date: string | null;
+    created_at: string | null;
+    dias_captura: number | null;
+  } | null;
+}
+
 interface PublicationRecord {
   id: number;
   search_id: number;
@@ -322,6 +340,10 @@ interface PublicationRecord {
   audiencia_hora: string | null;
   audiencia_link: string | null;
   natureza_processo: string | null;
+  // Vencimento estimado do prazo (pub012) — "YYYY-MM-DD" ou null quando a
+  // categoria ainda não tem prazo padrão na taxonomia.
+  prazo_estimado?: string | null;
+  created_at?: string | null;
   classifications: Classification[] | null;
   // Trilha de autoria do agendamento (pub002). Só preenchido quando status=AGENDADO.
   scheduled_by_user_id?: number | null;
@@ -550,6 +572,57 @@ interface AppUser {
 const officeLabel = (o: Office) => o.path || o.name;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+// ─── Régua de envelhecimento (pub012) ────────────────────────────────
+// Buckets de idade de captura — espelham os do backend (idade_min_dias /
+// idade_max_dias). "mais7" não vira chip: existe só pro botão do banner.
+const AGING_IDADE: Record<string, { label: string; min?: number; max?: number }> = {
+  d31_mais: { label: "+30d", min: 31 },
+  d16_30: { label: "16\u201330d", min: 16, max: 30 },
+  d8_15: { label: "8\u201315d", min: 8, max: 15 },
+  d3_7: { label: "3\u20137d", min: 3, max: 7 },
+  d0_2: { label: "0\u20132d", max: 2 },
+  mais7: { label: ">7d", min: 8 },
+};
+
+/** Dias corridos entre um timestamp ISO e hoje, ambos lidos em BRT. */
+function diasDesde(iso?: string | null): number | null {
+  const d = brtDateFromIso(iso);
+  const hoje = brtDateFromIso(new Date().toISOString());
+  if (!d || !hoje) return null;
+  return Math.max(
+    0,
+    Math.round((Date.parse(`${hoje}T00:00:00Z`) - Date.parse(`${d}T00:00:00Z`)) / 86400000),
+  );
+}
+
+/**
+ * Chip do prazo estimado de um grupo: pega o MENOR vencimento entre as
+ * publicações (a mais urgente manda). prazo_estimado é data pura
+ * ("YYYY-MM-DD", semântica BRT) — comparar como string/UTC direto, sem
+ * passar por conversão de fuso.
+ */
+function prazoChip(prazos: (string | null | undefined)[]): { texto: string; cls: string } | null {
+  const validos = (prazos.filter(Boolean) as string[]).sort();
+  if (validos.length === 0) return null;
+  const min = validos[0];
+  const hoje = brtDateFromIso(new Date().toISOString());
+  if (!hoje) return null;
+  const dias = Math.round((Date.parse(`${min}T00:00:00Z`) - Date.parse(`${hoje}T00:00:00Z`)) / 86400000);
+  if (dias < 0) {
+    return {
+      texto: `PRAZO VENCIDO há ${-dias}d (${formatDateShort(min)})`,
+      cls: "bg-red-100 text-red-800 border border-red-300",
+    };
+  }
+  if (dias === 0) {
+    return { texto: "PRAZO VENCE HOJE", cls: "bg-amber-100 text-amber-900 border border-amber-300" };
+  }
+  return {
+    texto: `prazo est. ${formatDateShort(min)} (${dias}d)`,
+    cls: "bg-emerald-50 text-emerald-800 border border-emerald-200",
+  };
+}
 
 const statusColor = (status: string): "default" | "secondary" | "destructive" | "outline" => {
   const map: Record<string, any> = {
@@ -871,6 +944,15 @@ const PublicationsPage = () => {
   const [filterCnj, setFilterCnj] = useState<string>("");
   // CSV de user_ids (LegalOneUser.id) — operador que cadastrou (scheduled_by_user_id).
   const [filterScheduledBy, setFilterScheduledBy] = useState<string>("");
+  // Régua de envelhecimento (pub012): filtro por estado do prazo estimado e
+  // por idade de captura. Refs espelham o estado pra loadGrouped ler sem
+  // closure velha — o padrão da página é passar filtro por argumento, e com
+  // ref os 14 call sites existentes de loadGrouped não precisam mudar.
+  const [filterEstadoPrazo, setFilterEstadoPrazo] = useState<string>("");
+  const filterEstadoPrazoRef = useRef<string>("");
+  const [filterIdadeBucket, setFilterIdadeBucket] = useState<string>("");
+  const filterIdadeBucketRef = useRef<string>("");
+  const [aging, setAging] = useState<AgingSummary | null>(null);
   // CSV de NOMES de etiqueta do L1 (ex.: "BASE NERC,Adverso Réu/Autor"). A
   // etiqueta não é coluna do registro: vive no cache pub_l1_etiqueta_cache e o
   // backend resolve por EXISTS, então este filtro é server-side como os outros.
@@ -1094,6 +1176,13 @@ const PublicationsPage = () => {
   // pesadas no backend, entao sem debounce a tela trava.
   const filterFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const loadAging = useCallback(async () => {
+    try {
+      const r = await apiFetch(`${API}/records/aging-summary`);
+      if (r.ok) setAging(await r.json());
+    } catch { /* régua é acessória — nunca derruba a listagem */ }
+  }, []);
+
   const loadGrouped = useCallback(async (
     page = 0, status = "", officeId = "", dateFrom = "", dateTo = "", category = "", ufParam = "", vinculoParam = "", naturezaParam = "", poloParam = "", cnjParam = "", scheduledByParam = "", etiquetaParam = "",
   ) => {
@@ -1112,6 +1201,12 @@ const PublicationsPage = () => {
       if (cnjParam) url += `&cnj_search=${encodeURIComponent(cnjParam)}`;
       if (scheduledByParam) url += `&scheduled_by_user_id=${encodeURIComponent(scheduledByParam)}`;
       if (etiquetaParam) url += `&etiqueta=${encodeURIComponent(etiquetaParam)}`;
+      if (filterEstadoPrazoRef.current) url += `&estado_prazo=${filterEstadoPrazoRef.current}`;
+      const idadeSel = AGING_IDADE[filterIdadeBucketRef.current];
+      if (idadeSel) {
+        if (idadeSel.min != null) url += `&idade_min_dias=${idadeSel.min}`;
+        if (idadeSel.max != null) url += `&idade_max_dias=${idadeSel.max}`;
+      }
       const res = await apiFetch(url);
       if (!res.ok) return;
       const data = await res.json();
@@ -1119,11 +1214,27 @@ const PublicationsPage = () => {
       // depois desta (filtro/pagina mais novos) — ela e a fonte de verdade.
       if (loadId !== latestGroupedLoadId.current) return;
       setGrouped(data);
+      loadAging();
     } catch { /* ignore */ }
     // groupPageSize precisa estar nas deps senão o useCallback captura
     // o valor inicial (20) e ignora o dropdown — bug que fazia "100 por
     // página" nunca aplicar. Outras deps são args explícitos da função.
-  }, [groupPageSize]);
+  }, [groupPageSize, loadAging]);
+
+  // Clique nos chips/botões da régua: alterna o filtro e recarrega do zero.
+  const aplicarFiltroAging = (tipo: "prazo" | "idade", valor: string) => {
+    if (tipo === "prazo") {
+      const v = filterEstadoPrazo === valor ? "" : valor;
+      setFilterEstadoPrazo(v);
+      filterEstadoPrazoRef.current = v;
+    } else {
+      const v = filterIdadeBucket === valor ? "" : valor;
+      setFilterIdadeBucket(v);
+      filterIdadeBucketRef.current = v;
+    }
+    setGroupPage(0);
+    loadGrouped(0, filterStatus, filterOffice, filterDateFrom, filterDateTo, filterCategory, filterUf, filterVinculo, filterNatureza, filterPolo, filterCnj, filterScheduledBy, filterEtiqueta);
+  };
 
   const handleExportExcel = async () => {
     if (isExporting) return;
@@ -3618,6 +3729,102 @@ const PublicationsPage = () => {
         )}
       </Card>
 
+      {/* Régua de envelhecimento (pub012): backlog antigo na cara do operador.
+          O banner não tem X de propósito — só some quando a fila zera. */}
+      {aging && aging.total_pendentes > 0 && (() => {
+        const atrasadas7 = aging.faixas.d8_15 + aging.faixas.d16_30 + aging.faixas.d31_mais;
+        return (
+          <>
+            {(aging.vencidas > 0 || atrasadas7 > 0) && (
+              <div className="rounded-md border-2 border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                  <AlertTriangle className="h-5 w-5 flex-shrink-0 text-red-600" />
+                  <div className="min-w-[240px] flex-1">
+                    {aging.vencidas > 0 && (
+                      <span className="font-semibold">
+                        {aging.vencidas} publicação(ões) com prazo estimado VENCIDO sem tratamento.{" "}
+                      </span>
+                    )}
+                    {atrasadas7 > 0 && (
+                      <span>
+                        {atrasadas7} pendente(s) há mais de 7 dias na fila
+                        {aging.mais_antiga
+                          ? ` \u2014 a mais antiga foi capturada em ${formatDateShort(aging.mais_antiga.created_at)} (${aging.mais_antiga.dias_captura}d)`
+                          : ""}
+                        .
+                      </span>
+                    )}
+                  </div>
+                  {aging.vencidas > 0 && (
+                    <Button size="sm" variant="destructive" onClick={() => aplicarFiltroAging("prazo", "vencida")}>
+                      Ver vencidas
+                    </Button>
+                  )}
+                  {atrasadas7 > 0 && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="border-red-300 text-red-800 hover:bg-red-100"
+                      onClick={() => aplicarFiltroAging("idade", "mais7")}
+                    >
+                      Ver com +7 dias
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
+            <Card>
+              <CardContent className="flex flex-wrap items-center gap-2 py-3 text-xs">
+                <span className="font-medium text-muted-foreground">Prazo estimado:</span>
+                {([
+                  ["vencida", `Vencidas ${aging.vencidas}`, aging.vencidas > 0 ? "bg-red-100 text-red-800 border-red-300" : ""],
+                  ["vence_hoje", `Vencem hoje ${aging.vence_hoje}`, aging.vence_hoje > 0 ? "bg-amber-100 text-amber-900 border-amber-300" : ""],
+                  ["no_prazo", `No prazo ${aging.no_prazo}`, ""],
+                  ["sem_prazo", `Sem prazo ${aging.sem_prazo}`, ""],
+                ] as [string, string, string][]).map(([chave, rotulo, destaque]) => (
+                  <button
+                    key={chave}
+                    type="button"
+                    onClick={() => aplicarFiltroAging("prazo", chave)}
+                    title={chave === "sem_prazo"
+                      ? "Categoria ainda sem prazo padrão na taxonomia — preencha os defaults pra régua acender"
+                      : undefined}
+                    className={`rounded-full border px-2.5 py-0.5 transition-colors ${filterEstadoPrazo === chave ? "border-blue-600 bg-blue-600 text-white" : destaque || "bg-muted/40 hover:bg-muted"}`}
+                  >
+                    {rotulo}
+                  </button>
+                ))}
+                <span className="mx-1 h-4 w-px bg-border" />
+                <span className="font-medium text-muted-foreground">Na fila há:</span>
+                {(["d31_mais", "d16_30", "d8_15", "d3_7", "d0_2"] as const).map((chave) => {
+                  const qtd = aging.faixas[chave];
+                  const alerta = (chave === "d31_mais" || chave === "d16_30") && qtd > 0;
+                  return (
+                    <button
+                      key={chave}
+                      type="button"
+                      onClick={() => aplicarFiltroAging("idade", chave)}
+                      className={`rounded-full border px-2.5 py-0.5 transition-colors ${filterIdadeBucket === chave ? "border-blue-600 bg-blue-600 text-white" : alerta ? "border-red-300 bg-red-100 text-red-800" : "bg-muted/40 hover:bg-muted"}`}
+                    >
+                      {AGING_IDADE[chave].label} {qtd}
+                    </button>
+                  );
+                })}
+                {(filterEstadoPrazo || filterIdadeBucket) && (
+                  <button
+                    type="button"
+                    className="ml-1 text-muted-foreground underline hover:text-foreground"
+                    onClick={() => aplicarFiltroAging(filterEstadoPrazo ? "prazo" : "idade", filterEstadoPrazo || filterIdadeBucket)}
+                  >
+                    limpar
+                  </button>
+                )}
+              </CardContent>
+            </Card>
+          </>
+        );
+      })()}
+
       {/* Groups */}
       <Card>
         <CardHeader>
@@ -4297,6 +4504,25 @@ const PublicationsPage = () => {
                                     <div className="text-[10px] text-muted-foreground">Captura</div>
                                     <div>{formatDateShort(first.creation_date)}</div>
                                   </div>
+                                  {(() => {
+                                    const dias = diasDesde(first.created_at);
+                                    const chip = prazoChip(group.records.map((r) => r.prazo_estimado));
+                                    if ((dias == null || dias <= 2) && !chip) return null;
+                                    return (
+                                      <div className="flex flex-col gap-0.5">
+                                        {dias != null && dias > 2 && (
+                                          <span className={`inline-flex w-fit items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${dias > 30 ? "border border-red-300 bg-red-100 text-red-800" : dias > 7 ? "border border-amber-300 bg-amber-100 text-amber-900" : "bg-muted text-muted-foreground"}`}>
+                                            há {dias}d na fila
+                                          </span>
+                                        )}
+                                        {chip && (
+                                          <span className={`inline-flex w-fit items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${chip.cls}`}>
+                                            {chip.texto}
+                                          </span>
+                                        )}
+                                      </div>
+                                    );
+                                  })()}
                                 </div>
                               );
                             })()}

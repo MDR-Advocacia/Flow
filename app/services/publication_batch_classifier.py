@@ -30,6 +30,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.services.publication_prazo_estimado import atualizar_prazo_estimado
 from app.models.classification import CLF_ITEM_FAILED, CLF_ITEM_SUCCESS
 from app.models.publication_batch import (
     ANTHROPIC_STATUS_ENDED,
@@ -291,6 +292,7 @@ class PublicationBatchClassifier:
             # motivo e criaria assimetria entre cópias do mesmo texto.
             sib.quem_pratica_ato = quem_pratica_ato
             sib.exige_providencia_nossa = exige_providencia_nossa
+            atualizar_prazo_estimado(self.db, sib)
             sib.status = RECORD_STATUS_CLASSIFIED
             count += 1
         return count
@@ -1025,6 +1027,7 @@ class PublicationBatchClassifier:
                         {k: v for k, v in c.items() if k != "_extra_classifications"}
                         for c in all_clf
                     ]
+                atualizar_prazo_estimado(self.db, rec)
                 rec.status = RECORD_STATUS_CLASSIFIED
                 succeeded += 1
                 logger.debug(
@@ -1279,6 +1282,7 @@ class PublicationBatchClassifier:
             rec.audiencia_hora = None
             rec.audiencia_link = None
             rec.classifications = None
+            rec.prazo_estimado = None
             rec.status = RECORD_STATUS_NEW
         self.db.commit()
 

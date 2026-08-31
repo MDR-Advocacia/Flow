@@ -5,7 +5,7 @@ PublicationSearch  → Registro de cada busca disparada (com filtros usados)
 PublicationRecord  → Cada publicação encontrada e seu status de processamento
 """
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -122,6 +122,14 @@ class PublicationRecord(Base):
     # Ex.: "SP", "RJ", "TRT7", "TRF1", "TRE-SP". Populada automaticamente
     # ao criar o registro e pela data migration perf002.
     uf = Column(String(10), nullable=True, index=True)
+
+    # Vencimento ESTIMADO do prazo da publicação (pub012), calculado dos
+    # defaults da taxonomia (default_prazo_dias/tipo da categoria ou
+    # subcategoria) + publication_date, pelo calculador de dias úteis dos
+    # Prazos Iniciais. NULL quando a categoria não tem default — a régua de
+    # envelhecimento então cai pra idade de captura. É ESTIMATIVA de triagem,
+    # não contagem oficial de prazo: feriado local e suspensão não entram.
+    prazo_estimado = Column(Date, nullable=True, index=True)
 
     # Autoria do agendamento (migration pub002).
     # Preenchido quando o registro vai pra status=AGENDADO via endpoints de
