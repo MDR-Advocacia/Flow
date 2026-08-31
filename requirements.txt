@@ -61,3 +61,10 @@ pikepdf==9.4.2
 # entre os 4 workers Uvicorn e persiste o cookie em arquivo (volume
 # /app/data) pra todos eles compartilharem a mesma sessão.
 filelock==3.16.1
+
+# ─── Pesquisa de vínculos no portal do BB ───────────────
+# O WAF do BB responde 403 (HTML) pra requests e até pro Chromium do
+# Playwright; só o chromedriver patcheado do undetected-chromedriver passa.
+# Reusa o Chromium que o Playwright já traz na imagem (sem download novo).
+undetected-chromedriver==3.5.5
+selenium==4.48.0

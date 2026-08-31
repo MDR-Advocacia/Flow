@@ -76,6 +76,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends xvfb \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir playwright==1.59.0
 
+# ── chromedriver do undetected-chromedriver (pesquisa de vínculos BB) ──
+# O WAF do BB só aceita o chromedriver patcheado do `uc` (ver
+# app/services/distribuidos_bb/vinculos_bb.py). O `uc` baixa e patcheia o
+# driver na primeira execução; fazer isso aqui evita 20s de download na
+# primeira coleta e o risco de a coleta depender de rede pro Google.
+# O Chromium é o do Playwright (mesma imagem, sem download extra).
+# Best-effort: se o download falhar no build, o `uc` tenta de novo em runtime.
+RUN set -eu; \
+    CHROME="$(ls /ms-playwright/chromium-*/chrome-linux64/chrome 2>/dev/null | head -1)"; \
+    MAJOR="$("$CHROME" --version 2>/dev/null | grep -oE "[0-9]+" | head -1)"; \
+    python -c "import undetected_chromedriver.patcher as p; pt = p.Patcher(version_main=$MAJOR); pt.auto(); print('chromedriver pronto:', pt.executable_path)" \
+    || echo "AVISO: pre-aquecimento do chromedriver falhou; sera baixado no primeiro uso."
+
 # Código por ÚLTIMO: é a única camada que muda a cada deploy.
 COPY . .
 

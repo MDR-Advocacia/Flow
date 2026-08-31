@@ -531,19 +531,9 @@ class Settings(BaseSettings):
     # ações ativas conduzidas pelo MDR — decide a distribuição especializada
     # (Equipe Mista) e alimenta o painel Acompanhamento Réu/Autor.
     distribuidos_bb_vinculos_ativo: bool = True
-    # COMO a pesquisa roda. "rpa" (default): o RPA externo no servidor AWS
-    # (repo RPA_encerramentos, modo --vinculos) consome a fila via intake e
-    # devolve os resultados — obrigatório em produção, porque o WAF do BB
-    # bloqueia requests/Playwright saindo do container (403 em HTML) e só o
-    # undetected-chromedriver passa. "inline": pesquisa direto na coleta via
-    # requests (só funciona se o BB liberar a API pro container um dia).
-    distribuidos_bb_vinculos_modo: str = "rpa"
-    # Janela da fila dinâmica do intake: só entram processos coletados nos
-    # últimos N dias (evita arrastar o estoque histórico pro RPA).
-    distribuidos_bb_vinculos_fila_dias: int = 7
-    # API key do intake do RPA de vínculos (header X-VinculosBB-Api-Key, CSV
-    # pra rotação) — mesmo padrão do intake da Análise de Risco.
-    distribuidos_bb_vinculos_intake_api_key: str | None = None
+    # Timeout (s) de cada chamada ao PAJ e do carregamento das páginas do
+    # navegador undetected que faz a pesquisa (ver vinculos_bb.py).
+    distribuidos_bb_vinculos_timeout_seg: int = 60
     # Base dos endpoints JSON do PAJ (mesma origem do portal).
     distribuidos_bb_paj_base: str = "https://juridico.bb.com.br/paj"
 
@@ -689,12 +679,6 @@ class Settings(BaseSettings):
     def onenotify_bb_intake_api_keys(self) -> set[str]:
         """Chaves válidas pro intake do OneNotify BB (rotação)."""
         raw = self.onenotify_bb_intake_api_key or ""
-        return {key.strip() for key in raw.split(",") if key.strip()}
-
-    @property
-    def distribuidos_bb_vinculos_intake_api_keys(self) -> set[str]:
-        """Chaves válidas pro intake do RPA de vínculos BB (rotação)."""
-        raw = self.distribuidos_bb_vinculos_intake_api_key or ""
         return {key.strip() for key in raw.split(",") if key.strip()}
 
     @property

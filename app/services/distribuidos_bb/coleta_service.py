@@ -310,12 +310,7 @@ def _processar_notificacao(
     # responsável vem da equipe especializada (o escritório segue o padrão).
     # Best-effort: falha aqui NUNCA derruba a coleta — segue o rodízio normal.
     responsavel_override = None
-    # Modo "rpa" (default): a pesquisa NÃO roda aqui — o processo cai na fila
-    # dinâmica do intake e o RPA externo devolve o resultado depois (a
-    # reatribuição acontece em aplicar_resultado_rpa enquanto o pool é NOVO).
-    # Modo "inline": pesquisa via requests direto na coleta (bloqueado pelo
-    # WAF do BB hoje; mantido pro dia em que liberarem).
-    if settings.distribuidos_bb_vinculos_ativo and settings.distribuidos_bb_vinculos_modo == "inline":
+    if settings.distribuidos_bb_vinculos_ativo:
         try:
             from app.services.distribuidos_bb.vinculos_service import pesquisar_e_decidir
 
@@ -724,6 +719,16 @@ def executar_coleta(
         )
         logger.exception("Distribuídos BB: coleta falhou (run %s).", run.id)
     finally:
+        # O navegador da pesquisa de vínculos é UM por coleta (abrir custa
+        # ~10s, então ele é reusado entre os processos). Aqui é o único lugar
+        # que sabe que a coleta acabou — sem isso sobra Chromium zumbi, e o
+        # servidor já teve 4.809 zumbis do OneLog derrubando o load.
+        try:
+            from app.services.distribuidos_bb.vinculos_bb import fechar_browser
+
+            fechar_browser()
+        except Exception:  # noqa: BLE001
+            logger.warning("Vínculos: falha ao fechar o navegador (ignorado).", exc_info=True)
         db.commit()
 
     return run

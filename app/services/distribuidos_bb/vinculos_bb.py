@@ -4,10 +4,7 @@ No ato da distribuição/cadastro, pra cada parte do processo capturado (exceto 
 próprio Banco do Brasil) a gente pergunta ao portal: essa pessoa é parte em
 OUTRAS ações? Quais estão ativas e conduzidas pelo NOSSO escritório (MDR)?
 
-Decodificado dos HARs reais (2026-07-20). São endpoints JSON limpos do PAJ — não
-precisa de Playwright; reusamos a sessão autenticada do OneLog num requests.Session.
-
-Fluxo (3 chamadas):
+Fluxo (3 chamadas JSON do PAJ, decodificadas dos HARs reais):
   1) doc → numeroPessoa:
        GET  {base}/resources/app/v2/portal/cadastro/processo/pessoas/
             pesquisa-avancada/{cpf | cnpj-alfanumerico}/{doc}?inicioBusca=0&somente=paj
@@ -22,38 +19,36 @@ Fluxo (3 chamadas):
 Regra do vínculo (campos decodificados, sem heurística):
   - ATIVO   = indicadorProcessoAtivo == 'A'  (cancelados vêm 'I')
   - NOSSO   = numeroAdvogadoProcesso == ADVOGADO_MDR  (outros vêm 'Não Cadastrado'/0)
+
+⚠️ POR QUE NÃO É `requests` (2026-08-31)
+O código nasceu com `requests.Session` + cookies do OneLog e funcionava. Hoje o
+WAF do BB devolve **403 com HTML** ("Ops! Erro no acesso", com ID de segurança e
+o IP) pra qualquer cliente que não seja um navegador de verdade. Medido:
+
+    requests (direto ou por proxy BR)           -> 403 até na raiz /paj
+    Playwright/Chromium (cookies+headers iguais)-> 200 na raiz, 403 nas SPAs e API
+    undetected-chromedriver                     -> 200 em tudo
+
+Não é IP nem permissão do usuário: a MESMA chave (C1330195) e o MESMO servidor
+respondem 200 pelo Chrome undetected. É detecção de automação (o chromedriver
+comum deixa rastro que o `uc` remove). Por isso as chamadas saem de dentro do
+navegador, via `fetch(credentials:'include')` na página da SPA de consulta —
+que também resolve o `Referer` que a API espera.
+
+O navegador é caro de abrir (~10s), então é UM por coleta, reusado entre os
+processos (`obter_browser` / `fechar_browser`).
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
+import threading
 from typing import Any, Optional
-
-import requests
 
 from app.core.config import settings
 
 logger = logging.getLogger("distribuidos_bb.vinculos")
-
-
-class VinculoAcessoNegado(RuntimeError):
-    """O portal recusou a consulta (403/401/HTML de erro) — NÃO é 'sem vínculo'.
-
-    Existe para separar dois estados que o código antigo confundia: "pesquisei e
-    a parte não tem outra ação nossa" (resultado legítimo, vazio) de "não
-    consegui nem pesquisar" (acesso caiu). Sem essa distinção o motor devolve
-    zero em silêncio e a operação lê isso como se fosse resposta do portal.
-    """
-
-
-def _checar_resposta(r: Any, etapa: str) -> None:
-    """Levanta VinculoAcessoNegado quando a resposta não é o JSON esperado."""
-    ct = (r.headers.get("content-type") or "").lower()
-    if r.status_code in (401, 403) or (r.status_code == 200 and "json" not in ct and r.text.strip().startswith("<")):
-        raise VinculoAcessoNegado(
-            f"{etapa}: portal recusou a consulta (HTTP {r.status_code}, content-type={ct or '?'}). "
-            "Sessão do BB sem permissão para a API do PAJ ou endpoint alterado."
-        )
 
 # Código do advogado do BB que identifica o nosso escritório (MARCOS DELLI
 # RIBEIRO) na lista de partes. Editável via config bbd_config `vinculo_advogado_mdr`.
@@ -68,19 +63,21 @@ CNPJ_BB = "00000000000191"
 SITUACOES_EXCLUIDAS_DEFAULT = "montagem"
 
 _BASE_DEFAULT = "https://juridico.bb.com.br/paj"
-# Página da SPA de consulta — é o Referer que o portal envia em toda chamada
-# da API. Sem ele a borda devolve 403 em HTML.
-REFERER_SPA = (
-    "https://juridico.bb.com.br/paj/app/paj-cadastro/spas/processo/consulta/"
-    "processo-consulta.app.html"
+# Página da SPA de consulta: as fetches partem dela pra herdar o Referer que a
+# API do PAJ espera.
+_SPA_CONSULTA = (
+    "/app/paj-cadastro/spas/processo/consulta/processo-consulta.app.html"
 )
 
 
-def _origem(base_url: Optional[str] = None) -> str:
-    """Só o esquema+host do portal (o Origin que o navegador manda no POST)."""
-    b = _base(base_url)
-    partes = b.split("/")
-    return "//".join([partes[0], partes[2]]) if len(partes) > 2 else b
+class VinculoAcessoNegado(RuntimeError):
+    """O portal recusou a consulta (403/401/HTML de erro) — NÃO é 'sem vínculo'.
+
+    Existe para separar dois estados que o código antigo confundia: "pesquisei e
+    a parte não tem outra ação nossa" (resultado legítimo, vazio) de "não
+    consegui nem pesquisar" (acesso caiu). Sem essa distinção o motor devolve
+    zero em silêncio e a operação lê isso como se fosse resposta do portal.
+    """
 
 
 def apenas_digitos(v: Optional[str]) -> str:
@@ -91,40 +88,222 @@ def _base(base_url: Optional[str] = None) -> str:
     return (base_url or getattr(settings, "distribuidos_bb_paj_base", _BASE_DEFAULT)).rstrip("/")
 
 
-def montar_sessao(cookies_onelog: list[dict[str, Any]], user_agent: str) -> requests.Session:
-    """requests.Session com os cookies autenticados do OneLog (mesma sessão do RPA)."""
-    sess = requests.Session()
-    for c in cookies_onelog or []:
-        nome = c.get("name")
-        valor = c.get("value")
-        if not nome:
-            continue
-        sess.cookies.set(
-            nome, valor,
-            domain=c.get("domain") or "juridico.bb.com.br",
-            path=c.get("path") or "/",
+class VinculosBrowser:
+    """Chromium undetected com a sessão do OneLog, parado na SPA de consulta.
+
+    Só sabe fazer uma coisa: `fetch_json`, que executa a chamada DENTRO da
+    página (mesma origem, cookies e Referer da SPA). Toda a decodificação do
+    PAJ fica nas funções abaixo — isto aqui é transporte.
+    """
+
+    def __init__(self, sessao_onelog: dict[str, Any], base_url: Optional[str] = None):
+        self.sessao = sessao_onelog or {}
+        self.base = _base(base_url)
+        self._driver = None
+
+    # ── ciclo de vida ────────────────────────────────────────────────
+
+    def abrir(self) -> None:
+        import undetected_chromedriver as uc
+
+        chrome = self._chrome_path()
+        opts = uc.ChromeOptions()
+        for arg in (
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--window-size=1920,1080",
+        ):
+            opts.add_argument(arg)
+        kwargs: dict[str, Any] = {"options": opts, "use_subprocess": True}
+        if chrome:
+            kwargs["browser_executable_path"] = chrome
+            versao = self._chrome_major(chrome)
+            if versao:
+                kwargs["version_main"] = versao
+        self._driver = uc.Chrome(**kwargs)
+        self._driver.set_page_load_timeout(
+            settings.distribuidos_bb_vinculos_timeout_seg
         )
-    # Headers copiados do HAR real do portal (31/08/2026). Não é enfeite: a
-    # borda do BB recusava com 403 (HTML de erro, não JSON) o conjunto que
-    # usávamos antes. Duas diferenças mataram a chamada:
-    #   - mandávamos `X-Requested-With: XMLHttpRequest`, que o portal NÃO manda;
-    #   - não mandávamos `Referer`, que o portal manda em toda chamada da SPA.
-    # O 403 era indistinguível de "parte sem vínculo" até a exceção criada aqui.
-    sess.headers.update({
-        "User-Agent": user_agent or "Mozilla/5.0",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": REFERER_SPA,
-        "Origin": _origem(),
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-    })
-    return sess
+        self._injetar_sessao()
+        # Aterrissa na SPA de consulta: é daqui que as fetches saem.
+        self._driver.get(self.base + _SPA_CONSULTA)
+        logger.info("Vínculos: navegador pronto em %s", self._driver.current_url[:80])
+
+    def fechar(self) -> None:
+        if self._driver is None:
+            return
+        try:
+            self._driver.quit()
+        except Exception:  # noqa: BLE001
+            logger.warning("Vínculos: falha ao fechar o navegador (ignorado).", exc_info=True)
+        finally:
+            self._driver = None
+
+    def vivo(self) -> bool:
+        if self._driver is None:
+            return False
+        try:
+            _ = self._driver.current_url
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    # ── infra ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _chrome_path() -> Optional[str]:
+        """Reusa o Chromium que o Playwright já traz na imagem (sem download novo)."""
+        import glob
+        import os
+        import shutil
+
+        for env in ("DISTRIBUIDOS_BB_CHROME_PATH", "CHROME_PATH"):
+            caminho = os.getenv(env)
+            if caminho and os.path.exists(caminho):
+                return caminho
+        for padrao in (
+            "/ms-playwright/chromium-*/chrome-linux64/chrome",
+            "/ms-playwright/chromium-*/chrome-linux/chrome",
+            "/root/.cache/ms-playwright/chromium-*/chrome-linux64/chrome",
+        ):
+            achados = sorted(glob.glob(padrao))
+            if achados:
+                return achados[-1]
+        return shutil.which("google-chrome") or shutil.which("chromium")
+
+    @staticmethod
+    def _chrome_major(caminho: str) -> Optional[int]:
+        import subprocess
+
+        try:
+            saida = subprocess.run(
+                [caminho, "--version"], capture_output=True, text=True, timeout=20
+            ).stdout
+            achado = re.search(r"(\d+)\.", saida or "")
+            return int(achado.group(1)) if achado else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _injetar_sessao(self) -> None:
+        """Cookies do OneLog via CDP (antes de qualquer navegação)."""
+        ua = self.sessao.get("user_agent")
+        if ua:
+            try:
+                self._driver.execute_cdp_cmd(
+                    "Network.setUserAgentOverride", {"userAgent": ua}
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("Vínculos: user-agent do OneLog não aplicado.")
+        cookies = []
+        for c in self.sessao.get("cookies") or []:
+            nome = c.get("name")
+            if not nome:
+                continue
+            dominio = c.get("domain") or ".bb.com.br"
+            caminho = c.get("path") or "/"
+            cookies.append({
+                "name": nome,
+                "value": str(c.get("value")),
+                "domain": dominio,
+                "path": caminho,
+                "secure": True,
+                "url": f"https://{dominio.lstrip('.')}{caminho}",
+            })
+        if not cookies:
+            raise VinculoAcessoNegado("OneLog não devolveu cookies pra injetar no navegador.")
+        self._driver.execute_cdp_cmd("Network.enable", {})
+        self._driver.execute_cdp_cmd("Network.setCookies", {"cookies": cookies})
+        logger.info("Vínculos: %s cookies do OneLog injetados.", len(cookies))
+
+    # ── a única operação ─────────────────────────────────────────────
+
+    _JS = """
+    var cb = arguments[arguments.length - 1];
+    var opcoes = {
+        method: arguments[1],
+        credentials: 'include',
+        headers: {'Accept': 'application/json, text/plain, */*'}
+    };
+    if (arguments[2]) {
+        opcoes.headers['Content-Type'] = 'application/json;charset=UTF-8';
+        opcoes.body = arguments[2];
+    }
+    fetch(arguments[0], opcoes)
+        .then(function (r) {
+            return r.text().then(function (t) {
+                cb(JSON.stringify({status: r.status, body: t}));
+            });
+        })
+        .catch(function (e) { cb(JSON.stringify({status: 0, body: String(e)})); });
+    """
+
+    def fetch_json(self, url: str, method: str = "GET", body: Any = None) -> dict[str, Any]:
+        if self._driver is None:
+            raise VinculoAcessoNegado("Navegador de vínculos não está aberto.")
+        timeout = settings.distribuidos_bb_vinculos_timeout_seg
+        try:
+            self._driver.set_script_timeout(timeout)
+            bruto = self._driver.execute_async_script(
+                self._JS, url, method, json.dumps(body) if body else None
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise VinculoAcessoNegado(f"fetch falhou no navegador: {exc}") from exc
+
+        envelope = json.loads(bruto)
+        status = envelope.get("status")
+        texto = envelope.get("body") or ""
+        if status == 0:
+            raise VinculoAcessoNegado(f"fetch rejeitado pelo navegador: {texto[:120]}")
+        if status in (401, 403) or (status == 200 and texto.lstrip().startswith("<")):
+            raise VinculoAcessoNegado(
+                f"portal recusou a consulta (HTTP {status}, corpo HTML) — "
+                "sessão do BB caiu ou o WAF barrou o cliente."
+            )
+        if status != 200:
+            raise VinculoAcessoNegado(f"portal respondeu HTTP {status}: {texto[:150]}")
+        try:
+            return json.loads(texto)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise VinculoAcessoNegado(f"resposta não é JSON: {texto[:150]}") from exc
 
 
-def _resolver_numero_pessoa(sess: requests.Session, doc: str, *, base_url: str,
-                            timeout: int = 30) -> Optional[int]:
+# ── navegador compartilhado pela coleta ──────────────────────────────
+# Um por coleta, não por processo: abrir custa ~10s. A coleta roda num worker
+# só (advisory lock), mas o lock aqui protege contra chamada manual paralela.
+_browser: Optional[VinculosBrowser] = None
+_browser_lock = threading.Lock()
+
+
+def obter_browser(sessao_onelog: dict[str, Any]) -> VinculosBrowser:
+    """Devolve o navegador da coleta, abrindo (ou reabrindo se morreu)."""
+    global _browser
+    with _browser_lock:
+        if _browser is not None and not _browser.vivo():
+            logger.info("Vínculos: navegador anterior morreu — reabrindo.")
+            _browser.fechar()
+            _browser = None
+        if _browser is None:
+            novo = VinculosBrowser(sessao_onelog)
+            novo.abrir()
+            _browser = novo
+        return _browser
+
+
+def fechar_browser() -> None:
+    """Fecha o navegador da coleta (chamado no fim de `executar_coleta`)."""
+    global _browser
+    with _browser_lock:
+        if _browser is not None:
+            _browser.fechar()
+            _browser = None
+
+
+# ── as 3 chamadas do PAJ ─────────────────────────────────────────────
+
+
+def _resolver_numero_pessoa(browser: VinculosBrowser, doc: str) -> Optional[int]:
     """Passo 1: documento (CPF/CNPJ) → numeroPessoa do cadastro do BB."""
     digs = apenas_digitos(doc)
     if len(digs) == 14:
@@ -133,22 +312,19 @@ def _resolver_numero_pessoa(sess: requests.Session, doc: str, *, base_url: str,
         rota = f"cpf/{digs}"
     else:
         return None
-    url = f"{base_url}/resources/app/v2/portal/cadastro/processo/pessoas/pesquisa-avancada/{rota}"
-    r = sess.get(url, params={"inicioBusca": 0, "somente": "paj"}, timeout=timeout)
-    _checar_resposta(r, "pesquisa da pessoa")
-    if r.status_code != 200 or not r.text.strip():
-        logger.warning("Vínculos: pesquisa da pessoa devolveu HTTP %s (doc %s).", r.status_code, digs[:6] + "…")
-        return None
-    lista = (r.json().get("data") or {}).get("listaOcorrencia") or []
+    url = (
+        f"{browser.base}/resources/app/v2/portal/cadastro/processo/pessoas/"
+        f"pesquisa-avancada/{rota}?inicioBusca=0&somente=paj"
+    )
+    lista = (browser.fetch_json(url).get("data") or {}).get("listaOcorrencia") or []
     if not lista:
         return None
     return lista[0].get("numeroPessoa")
 
 
-def _listar_processos_da_parte(sess: requests.Session, numero_pessoa: int, *, base_url: str,
-                               timeout: int = 30) -> list[dict[str, Any]]:
+def _listar_processos_da_parte(browser: VinculosBrowser, numero_pessoa: int) -> list[dict[str, Any]]:
     """Passo 2: todos os processos em que a pessoa é parte envolvida."""
-    url = f"{base_url}/resources/app/v1/processo/consulta/consulta-parte-envolvida"
+    url = f"{browser.base}/resources/app/v1/processo/consulta/consulta-parte-envolvida"
     body = {
         "tipoEnvolvimento": "P",
         "numeroPessoaParte": numero_pessoa,
@@ -157,24 +333,20 @@ def _listar_processos_da_parte(sess: requests.Session, numero_pessoa: int, *, ba
         "tipoVariacao": "T",
         "inicioPesquisa": 1,
     }
-    r = sess.post(url, json=body, timeout=timeout)
-    _checar_resposta(r, "processos da parte")
-    if r.status_code != 200:
-        logger.warning("Vínculos: lista de processos da parte devolveu HTTP %s.", r.status_code)
-        return []
-    return (r.json().get("data") or {}).get("listaOcorrencia") or []
+    dados = browser.fetch_json(url, method="POST", body=body)
+    return (dados.get("data") or {}).get("listaOcorrencia") or []
 
 
-def _consultar_polo(sess: requests.Session, numero_processo: int, *, base_url: str,
-                    timeout: int = 30) -> Optional[str]:
+def _consultar_polo(browser: VinculosBrowser, numero_processo: Any) -> Optional[str]:
     """Passo 3: polo do banco no processo. 'A'=Ativo (Autor) / 'P'=Passivo (Réu)."""
-    url = f"{base_url}/resources/app/v1/processo/consulta/{numero_processo}"
-    r = sess.get(url, timeout=timeout)
-    if r.status_code != 200:
+    url = f"{browser.base}/resources/app/v1/processo/consulta/{numero_processo}"
+    try:
+        dados = browser.fetch_json(url)
+    except VinculoAcessoNegado as exc:
         # Tolerado de propósito: sem o polo o vínculo ainda é válido e útil.
-        logger.info("Vínculos: polo indisponível pro processo %s (HTTP %s).", numero_processo, r.status_code)
+        logger.info("Vínculos: polo indisponível pro processo %s (%s).", numero_processo, exc)
         return None
-    return (r.json().get("data") or {}).get("indicadorPoloBanco")
+    return (dados.get("data") or {}).get("indicadorPoloBanco")
 
 
 def _fmt_npj(numero_processo: Any) -> str:
@@ -210,11 +382,10 @@ def _posicao_texto(indicador: Optional[str]) -> Optional[str]:
 
 
 def pesquisar_vinculos_parte(
-    sess: requests.Session,
+    browser: VinculosBrowser,
     doc: str,
     *,
     advogado_mdr: int = ADVOGADO_MDR_DEFAULT,
-    base_url: Optional[str] = None,
     incluir_polo: bool = True,
     situacoes_excluidas: str = SITUACOES_EXCLUIDAS_DEFAULT,
 ) -> dict[str, Any]:
@@ -224,20 +395,22 @@ def pesquisar_vinculos_parte(
     `ativos_mdr` tem npj, cnj, cliente, advogado_bb, situacao, natureza, polo,
     posicao_banco. `todos` é a lista bruta (útil pra auditoria).
     """
-    base = _base(base_url)
     digs = apenas_digitos(doc)
     if not digs or digs == CNPJ_BB:
         return {"numero_pessoa": None, "total": 0, "ativos_mdr": [], "todos": []}
 
-    numero_pessoa = _resolver_numero_pessoa(sess, digs, base_url=base)
+    numero_pessoa = _resolver_numero_pessoa(browser, digs)
     if not numero_pessoa:
         return {"numero_pessoa": None, "total": 0, "ativos_mdr": [], "todos": []}
 
-    ocorrencias = _listar_processos_da_parte(sess, numero_pessoa, base_url=base)
+    ocorrencias = _listar_processos_da_parte(browser, numero_pessoa)
     ativos_mdr: list[dict[str, Any]] = []
     for o in ocorrencias:
         ativo = (o.get("indicadorProcessoAtivo") or "").strip().upper() == "A"
-        nosso = int(o.get("numeroAdvogadoProcesso") or 0) == int(advogado_mdr)
+        try:
+            nosso = int(o.get("numeroAdvogadoProcesso") or 0) == int(advogado_mdr)
+        except (TypeError, ValueError):
+            nosso = False
         if not (ativo and nosso):
             continue
         # Ainda não distribuído pra nós (montagem de dossiê) → não é vínculo.
@@ -245,7 +418,7 @@ def pesquisar_vinculos_parte(
             continue
         numero_proc = o.get("numeroProcesso")
         cnj = apenas_digitos(o.get("textoNumeroInventario")) or None
-        polo = _consultar_polo(sess, numero_proc, base_url=base) if incluir_polo else None
+        polo = _consultar_polo(browser, numero_proc) if incluir_polo else None
         ativos_mdr.append({
             "npj": _fmt_npj(numero_proc),
             "numero_processo": numero_proc,
