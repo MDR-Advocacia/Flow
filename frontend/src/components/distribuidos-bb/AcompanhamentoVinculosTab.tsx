@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import {
-  AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, ExternalLink, Loader2,
-  RefreshCw, Search, Undo2, Users,
+  AlertTriangle, ArrowRightLeft, CheckCircle2, ChevronDown, ChevronRight, ExternalLink,
+  Loader2, RefreshCw, Search, Undo2, Users, XCircle,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import {
   PainelVinculos,
   listarPainelVinculos,
   marcarTransicaoVinculo,
+  executarTransicaoVinculos,
 } from "@/services/distribuidos-bb";
 
 const CENARIO_META: Record<string, { label: string; cls: string }> = {
@@ -114,6 +115,9 @@ export default function AcompanhamentoVinculosTab() {
   const [busca, setBusca] = useState("");
   const [abertos, setAbertos] = useState<Set<number>>(new Set());
   const [marcando, setMarcando] = useState<number | null>(null);
+  // Chave do que está sendo transferido: `v:<id>` (uma pasta) ou `p:<id>`
+  // (todas as pendentes do processo) — trava só o botão clicado.
+  const [transferindo, setTransferindo] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -157,6 +161,40 @@ export default function AcompanhamentoVinculosTab() {
       toast({ title: "Erro", description: String((e as Error).message), variant: "destructive" });
     } finally {
       setMarcando(null);
+    }
+  };
+
+  /** Executa a troca de responsável no L1 e recarrega o painel.
+   *  O destino não é escolhido aqui: o back usa o responsável que o motor de
+   *  vínculos já definiu pro processo novo. */
+  const transferir = async (chave: string, vinculoIds: number[], destino: string | null) => {
+    setTransferindo(chave);
+    try {
+      const r = await executarTransicaoVinculos(vinculoIds);
+      const alvo = destino ? ` para ${destino}` : "";
+      if (r.falhas === 0) {
+        toast({
+          title: r.transferidos === 1 ? "Pasta transferida" : `${r.transferidos} pastas transferidas`,
+          description: `Responsável trocado no Legal One${alvo} e confirmado na releitura.`,
+        });
+      } else if (r.transferidos === 0) {
+        toast({
+          title: "Não foi possível transferir",
+          description: r.itens.find((i) => i.erro)?.erro ?? "Veja o motivo na linha da pasta.",
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: `${r.transferidos} transferida(s), ${r.falhas} com problema`,
+          description: "As que falharam continuam pendentes, com o motivo na linha.",
+          variant: "destructive",
+        });
+      }
+      load();
+    } catch (e) {
+      toast({ title: "Erro ao transferir", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setTransferindo(null);
     }
   };
 
@@ -314,8 +352,30 @@ export default function AcompanhamentoVinculosTab() {
                         <TableRow key={`${item.processo_id}-det`} className="bg-muted/20 hover:bg-muted/20">
                           <TableCell colSpan={8} className="p-0">
                             <div className="space-y-2 px-10 py-3">
-                              <div className="text-xs font-semibold uppercase text-muted-foreground">
-                                Processos vinculados da parte {item.vinculos[0]?.nome_parte ? `— ${item.vinculos[0].nome_parte}` : ""}
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="text-xs font-semibold uppercase text-muted-foreground">
+                                  Processos vinculados da parte {item.vinculos[0]?.nome_parte ? `— ${item.vinculos[0].nome_parte}` : ""}
+                                </div>
+                                {pendentes > 0 && item.responsavel_nome && (
+                                  <Button
+                                    size="sm"
+                                    className="h-7 bg-indigo-600 hover:bg-indigo-700"
+                                    disabled={transferindo !== null}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      transferir(
+                                        `p:${item.processo_id}`,
+                                        item.vinculos.filter((x) => x.transicao_pendente).map((x) => x.id),
+                                        item.responsavel_nome,
+                                      );
+                                    }}
+                                  >
+                                    {transferindo === `p:${item.processo_id}`
+                                      ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                                      : <ArrowRightLeft className="mr-1 h-3 w-3" />}
+                                    Transferir {pendentes} pasta(s) para {item.responsavel_nome.split(" ")[0]}
+                                  </Button>
+                                )}
                               </div>
                               <Table>
                                 <TableHeader>
@@ -360,24 +420,58 @@ export default function AcompanhamentoVinculosTab() {
                                       </TableCell>
                                       <TableCell>
                                         {v.transicao_pendente ? (
-                                          <Button
-                                            size="sm" variant="outline"
-                                            className="h-7 border-amber-300 text-amber-700 hover:bg-amber-50"
-                                            disabled={marcando === v.id}
-                                            onClick={(e) => { e.stopPropagation(); marcar(v.id, true); }}
-                                          >
-                                            {marcando === v.id
-                                              ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                                              : <CheckCircle2 className="mr-1 h-3 w-3" />}
-                                            Marcar transição concluída
-                                          </Button>
+                                          <div className="space-y-1">
+                                            <div className="flex flex-wrap items-center gap-1">
+                                              {/* Executa de verdade: troca o responsável no L1. */}
+                                              <Button
+                                                size="sm"
+                                                className="h-7 bg-indigo-600 hover:bg-indigo-700"
+                                                disabled={transferindo !== null || !item.responsavel_nome}
+                                                title={item.responsavel_nome
+                                                  ? `Troca o responsável desta pasta no Legal One para ${item.responsavel_nome}`
+                                                  : "O processo novo ainda não tem responsável definido"}
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  transferir(`v:${v.id}`, [v.id], item.responsavel_nome);
+                                                }}
+                                              >
+                                                {transferindo === `v:${v.id}`
+                                                  ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                                                  : <ArrowRightLeft className="mr-1 h-3 w-3" />}
+                                                Transferir
+                                              </Button>
+                                              {/* Escape pra quem já trocou na mão no L1. */}
+                                              <Button
+                                                size="sm" variant="outline"
+                                                className="h-7 border-amber-300 text-amber-700 hover:bg-amber-50"
+                                                disabled={marcando === v.id}
+                                                title="Só marca como resolvida, sem mexer no Legal One"
+                                                onClick={(e) => { e.stopPropagation(); marcar(v.id, true); }}
+                                              >
+                                                {marcando === v.id
+                                                  ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                                                  : <CheckCircle2 className="mr-1 h-3 w-3" />}
+                                                Só marcar
+                                              </Button>
+                                            </div>
+                                            {v.transicao_erro && (
+                                              <div className="flex items-start gap-1 text-[11px] text-red-600">
+                                                <XCircle className="mt-px h-3 w-3 shrink-0" />
+                                                <span>{v.transicao_erro}</span>
+                                              </div>
+                                            )}
+                                          </div>
                                         ) : v.transicao_concluida_em ? (
                                           <div className="flex items-center gap-2 text-xs text-emerald-700">
                                             <CheckCircle2 className="h-3.5 w-3.5" />
-                                            Concluída {fmtData(v.transicao_concluida_em)}
+                                            <span>
+                                              {v.transicao_para_nome ? `Transferida para ${v.transicao_para_nome}` : "Concluída"}
+                                              {" "}{fmtData(v.transicao_concluida_em)}
+                                            </span>
                                             <Button
                                               size="sm" variant="ghost" className="h-6 px-1 text-muted-foreground"
                                               disabled={marcando === v.id}
+                                              title="Reabrir a pendência (não desfaz a troca no Legal One)"
                                               onClick={(e) => { e.stopPropagation(); marcar(v.id, false); }}
                                             >
                                               <Undo2 className="h-3 w-3" />

@@ -503,9 +503,16 @@ class BbVinculo(Base):
     )
     responsavel_atual_nome = Column(String(160), nullable=True)
     na_equipe_mista = Column(Boolean, nullable=False, server_default="false")
-    # Cenário 1: antigo aguardando a transição manual pro especializado
+    # Cenário 1: antigo aguardando a transição pro especializado. O painel
+    # EXECUTA essa troca (ModalChangeInvolvedInBatch) — `transicao_para_user_id`
+    # guarda pra quem foi e `transicao_erro` por que falhou (falha mantém
+    # pendente, pra reaparecer na fila do supervisor).
     transicao_pendente = Column(Boolean, nullable=False, server_default="false", index=True)
     transicao_concluida_em = Column(DateTime(timezone=True), nullable=True)
+    transicao_para_user_id = Column(
+        Integer, ForeignKey("legal_one_users.id", ondelete="SET NULL"), nullable=True,
+    )
+    transicao_erro = Column(Text, nullable=True)
 
     raw = Column(jsonb(), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -513,6 +520,7 @@ class BbVinculo(Base):
 
     processo = relationship("BbProcesso", foreign_keys=[processo_id])
     responsavel_atual = relationship("LegalOneUser", foreign_keys=[responsavel_atual_user_id])
+    transicao_para = relationship("LegalOneUser", foreign_keys=[transicao_para_user_id])
 
 
 class BbEvento(Base):

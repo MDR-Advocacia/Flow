@@ -999,8 +999,25 @@ export interface VinculoItem {
   na_equipe_mista: boolean;
   transicao_pendente: boolean;
   transicao_concluida_em: string | null;
+  transicao_para_nome: string | null;
+  transicao_erro: string | null;
   nome_parte: string | null;
   doc_parte: string | null;
+}
+export interface TransicaoResultadoItem {
+  vinculo_id: number;
+  npj: string;
+  ok: boolean;
+  lawsuit_id?: number;
+  de?: string | null;
+  para?: string;
+  erro?: string;
+  ja_estava?: boolean;
+}
+export interface TransicaoResultado {
+  transferidos: number;
+  falhas: number;
+  itens: TransicaoResultadoItem[];
 }
 export interface PainelVinculoItem {
   processo_id: number;
@@ -1043,4 +1060,17 @@ export async function listarPainelVinculos(params: {
 }
 export async function marcarTransicaoVinculo(vinculoId: number, concluida: boolean): Promise<{ ok: boolean }> {
   return json(await apiFetch(`${BASE}/vinculos/${vinculoId}/transicao?concluida=${concluida}`, { method: "POST" }));
+}
+
+/** Executa no Legal One a troca de responsável das pastas residuais (cenário 1).
+ *  O destino não vai no payload: é o responsável que o motor definiu pro
+ *  processo novo. */
+export async function executarTransicaoVinculos(vinculoIds: number[]): Promise<TransicaoResultado> {
+  return json(
+    await apiFetch(`${BASE}/vinculos/transicao/executar`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vinculo_ids: vinculoIds }),
+    }),
+  );
 }

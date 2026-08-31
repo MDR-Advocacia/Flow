@@ -881,6 +881,15 @@ def painel_vinculos(
             vincs.setdefault(v.processo_id, []).append(v)
 
     resp_ids = {p.responsavel_user_id for p in rows if p.responsavel_user_id}
+    # Inclui o destino das transições já executadas: normalmente é o mesmo
+    # responsável do processo, mas se ele mudar depois o histórico ficaria sem
+    # nome no painel.
+    resp_ids |= {
+        v.transicao_para_user_id
+        for lista in vincs.values()
+        for v in lista
+        if v.transicao_para_user_id
+    }
     nomes = dict(
         db.query(LegalOneUser.id, LegalOneUser.name)
         .filter(LegalOneUser.id.in_(resp_ids or {0}))
@@ -904,6 +913,8 @@ def painel_vinculos(
             "na_equipe_mista": v.na_equipe_mista,
             "transicao_pendente": v.transicao_pendente,
             "transicao_concluida_em": v.transicao_concluida_em.isoformat() if v.transicao_concluida_em else None,
+            "transicao_para_nome": (nomes.get(v.transicao_para_user_id) if v.transicao_para_user_id else None),
+            "transicao_erro": v.transicao_erro,
             "nome_parte": v.nome_parte,
             "doc_parte": v.doc_parte,
         }
@@ -972,6 +983,45 @@ def marcar_transicao_vinculo(
     )
     db.commit()
     return {"ok": True, "vinculo_id": v.id, "transicao_pendente": v.transicao_pendente}
+
+
+@router.post(
+    "/vinculos/transicao/executar",
+    summary="Transfere as pastas residuais do cenário 1 pro responsável do processo novo",
+)
+def executar_transicao_vinculos(
+    payload: dict = Body(..., examples=[{"vinculo_ids": [1, 2, 3]}]),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    """Executa no Legal One a troca de responsável das pastas legado.
+
+    O destino não vem do payload de propósito: é o responsável que o motor de
+    vínculos já definiu pro processo novo (a advogada da Equipe Mista). O
+    operador confere e clica; a escolha continua sendo do motor.
+    """
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb.transicao_vinculo_service import transferir_vinculos
+
+    ids = payload.get("vinculo_ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="Informe ao menos um vínculo em 'vinculo_ids'.")
+    if len(ids) > 50:
+        # O POST em lote do L1 aguenta mais (55 validados), mas acima disso a
+        # confirmação por releitura passaria do timeout confortável do request.
+        raise HTTPException(status_code=400, detail="No máximo 50 pastas por vez.")
+    try:
+        ids = [int(x) for x in ids]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="'vinculo_ids' deve conter números.")
+
+    resultado = transferir_vinculos(db, ids, solicitante=current_user.name)
+    db.commit()
+    logger.info(
+        "Transição de vínculos por %s: %s transferida(s), %s falha(s).",
+        current_user.name, resultado["transferidos"], resultado["falhas"],
+    )
+    return resultado
 
 
 @router.post("/monitor-cadastro/verificar", summary="Roda o monitor de cadastro no L1 agora (manual)")
