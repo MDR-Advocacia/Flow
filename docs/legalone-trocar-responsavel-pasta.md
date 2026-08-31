@@ -257,5 +257,55 @@ execuções ele veio com acentuação normal e não deu problema.
 - [ ] Descobrir o teto prático de `SelectedIds` num POST.
 - [ ] Verificar se a troca dispara algum workflow/notificação no L1 (nas 4
       execuções não observamos efeito, mas não auditamos as tarefas da pasta).
-- [ ] Confirmar comportamento em pastas de **recurso/incidente** — a mensagem
-      de retorno os menciona, mas só testamos pasta de processo.
+- [x] ~~Confirmar comportamento em pastas de **recurso/incidente**~~ —
+      **validado em 2026-08-28** (ver §10).
+
+---
+
+## 10. Execução em lote real — tombo estratégico (2026-08-28)
+
+Primeira carga de verdade: **108 pastas** trocadas de responsável em 2 POSTs
+(55 → José Leonardo Jales / 53 → Gabriel Carvalho), a partir do recorte de
+execuções do BB acima de R$ 3 mi.
+
+**Resultado: 108/108 confirmados, 0 divergências.**
+
+### 10.1 Lote de 55 num POST só funciona
+
+O §6.4 recomendava lotes ≤ 50 por cautela. Na prática **55 ids num único POST
+passaram sem problema** e refletiram em menos de 90s. O teto real continua
+desconhecido, mas 55 está comprovadamente dentro dele.
+
+### 10.2 Incidente/recurso: funciona, mas a verificação por REST NÃO
+
+Uma das 108 (`60042`, `Proc - 0020284/002`) era um **incidente**. A troca
+**funcionou normalmente** — o mesmo POST, sem tratamento especial.
+
+⚠️ **A armadilha está na confirmação, não na escrita.** Incidente dá **404 nas
+duas entidades REST**:
+
+```
+GET /Lawsuits/60042/Participants     -> 404
+GET /Litigations/60042/Participants  -> 404
+```
+
+...mesmo a busca por CNJ devolvendo o id normalmente. Quem confiar só no REST
+vai registrar um falso negativo e "consertar" o que já estava certo.
+
+**Confirmar incidente pela via web:**
+
+```
+GET /processos/Processos/details/{id}     -> 200  (edit/{id} dá 404 aqui)
+```
+
+e procurar `Responsável principal:` no HTML. Mesma lição das etiquetas: leitura
+de recurso/incidente é `details/`, nunca `edit/`.
+
+### 10.3 Snapshot pré-tombo é obrigatório
+
+Antes dos POSTs, gravamos o responsável atual de cada pasta em
+`data/estoque_mista/snap_pre_tombo_28_08.json` (`lawsuit_id` → responsável
+anterior + participante_id). Serve para (a) rollback, (b) detectar divergência
+contra o esperado — a mitigação 2 do §6.1 — e (c) auditoria de quem perdeu
+carteira. As 108 estavam distribuídas entre **13 responsáveis diferentes**, e
+22 já estavam no destino final (o POST é idempotente nesses casos).
