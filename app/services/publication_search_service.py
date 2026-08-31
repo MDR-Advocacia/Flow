@@ -263,12 +263,74 @@ class PublicationSearchService:
 
         O resultado pode ser passado como `prefetched_publications` em
         chamadas subsequentes a `create_and_run_search`.
+
+        A janela é quebrada em FATIAS DE UM DIA. Quando a captura fica dias
+        sem fechar, o cursor não avança e a janela cresce: em 31/08/2026 ela
+        chegou a 5 dias / 11.547 publicações / ~385 páginas numa única
+        chamada contínua, que levava mais de uma hora sem nunca terminar.
+        Fatiar devolve o tamanho de requisição que o fluxo tinha antes (cada
+        dia traz ~1 a 3 mil), sem voltar ao desperdício de paginar uma vez
+        POR ESCRITÓRIO — o dia é buscado uma vez e distribuído a todos.
+
+        Fatia que falha não derruba as outras: o que deu certo é devolvido e
+        o log diz qual dia ficou de fora. Melhor trazer 4 dias de 5 do que
+        perder os 5 porque um deu erro.
         """
-        return self.client.fetch_all_publications(
-            date_from=date_from,
-            date_to=date_to,
-            origin_type=origin_type,
+        from datetime import datetime, timedelta, timezone
+
+        def _parse(txt):
+            if not txt:
+                return None
+            t = str(txt).replace("Z", "+00:00")
+            try:
+                d = datetime.fromisoformat(t)
+            except ValueError:
+                return None
+            return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+        ini, fim = _parse(date_from), _parse(date_to) or datetime.now(timezone.utc)
+        if ini is None or (fim - ini) <= timedelta(days=1):
+            return self.client.fetch_all_publications(
+                date_from=date_from, date_to=date_to, origin_type=origin_type,
+            )
+
+        publicacoes: list[dict] = []
+        vistos: set = set()
+        falhas: list[str] = []
+        corte = ini
+        while corte < fim:
+            prox = min(corte + timedelta(days=1), fim)
+            try:
+                fatia = self.client.fetch_all_publications(
+                    date_from=corte.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    date_to=prox.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    origin_type=origin_type,
+                )
+            except Exception as exc:  # noqa: BLE001
+                falhas.append(f"{corte:%d/%m} ({str(exc)[:60]})")
+                logger.warning(
+                    "Publicacoes: fatia %s..%s falhou (%s) — segue nas outras.",
+                    corte, prox, str(exc)[:110],
+                )
+                corte = prox
+                continue
+            # Dedupe por id: a janela de um dia e a do seguinte podem se
+            # tocar na borda, e publicação repetida viraria registro em dobro.
+            for pub in fatia:
+                pid = pub.get("id")
+                if pid is None or pid in vistos:
+                    continue
+                vistos.add(pid)
+                publicacoes.append(pub)
+            corte = prox
+
+        logger.info(
+            "Publicacoes: janela de %s a %s buscada em fatias de 1 dia — "
+            "%s publicacao(oes)%s.",
+            ini.date(), fim.date(), len(publicacoes),
+            f"; fatias com falha: {', '.join(falhas)}" if falhas else "",
         )
+        return publicacoes
 
     def create_and_run_search(
         self,
