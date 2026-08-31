@@ -35,6 +35,26 @@ from app.core.config import settings
 
 logger = logging.getLogger("distribuidos_bb.vinculos")
 
+
+class VinculoAcessoNegado(RuntimeError):
+    """O portal recusou a consulta (403/401/HTML de erro) — NÃO é 'sem vínculo'.
+
+    Existe para separar dois estados que o código antigo confundia: "pesquisei e
+    a parte não tem outra ação nossa" (resultado legítimo, vazio) de "não
+    consegui nem pesquisar" (acesso caiu). Sem essa distinção o motor devolve
+    zero em silêncio e a operação lê isso como se fosse resposta do portal.
+    """
+
+
+def _checar_resposta(r: Any, etapa: str) -> None:
+    """Levanta VinculoAcessoNegado quando a resposta não é o JSON esperado."""
+    ct = (r.headers.get("content-type") or "").lower()
+    if r.status_code in (401, 403) or (r.status_code == 200 and "json" not in ct and r.text.strip().startswith("<")):
+        raise VinculoAcessoNegado(
+            f"{etapa}: portal recusou a consulta (HTTP {r.status_code}, content-type={ct or '?'}). "
+            "Sessão do BB sem permissão para a API do PAJ ou endpoint alterado."
+        )
+
 # Código do advogado do BB que identifica o nosso escritório (MARCOS DELLI
 # RIBEIRO) na lista de partes. Editável via config bbd_config `vinculo_advogado_mdr`.
 ADVOGADO_MDR_DEFAULT = 8706512
@@ -48,6 +68,19 @@ CNPJ_BB = "00000000000191"
 SITUACOES_EXCLUIDAS_DEFAULT = "montagem"
 
 _BASE_DEFAULT = "https://juridico.bb.com.br/paj"
+# Página da SPA de consulta — é o Referer que o portal envia em toda chamada
+# da API. Sem ele a borda devolve 403 em HTML.
+REFERER_SPA = (
+    "https://juridico.bb.com.br/paj/app/paj-cadastro/spas/processo/consulta/"
+    "processo-consulta.app.html"
+)
+
+
+def _origem(base_url: Optional[str] = None) -> str:
+    """Só o esquema+host do portal (o Origin que o navegador manda no POST)."""
+    b = _base(base_url)
+    partes = b.split("/")
+    return "//".join([partes[0], partes[2]]) if len(partes) > 2 else b
 
 
 def apenas_digitos(v: Optional[str]) -> str:
@@ -71,10 +104,21 @@ def montar_sessao(cookies_onelog: list[dict[str, Any]], user_agent: str) -> requ
             domain=c.get("domain") or "juridico.bb.com.br",
             path=c.get("path") or "/",
         )
+    # Headers copiados do HAR real do portal (31/08/2026). Não é enfeite: a
+    # borda do BB recusava com 403 (HTML de erro, não JSON) o conjunto que
+    # usávamos antes. Duas diferenças mataram a chamada:
+    #   - mandávamos `X-Requested-With: XMLHttpRequest`, que o portal NÃO manda;
+    #   - não mandávamos `Referer`, que o portal manda em toda chamada da SPA.
+    # O 403 era indistinguível de "parte sem vínculo" até a exceção criada aqui.
     sess.headers.update({
         "User-Agent": user_agent or "Mozilla/5.0",
         "Accept": "application/json, text/plain, */*",
-        "X-Requested-With": "XMLHttpRequest",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": REFERER_SPA,
+        "Origin": _origem(),
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
     })
     return sess
 
@@ -91,7 +135,9 @@ def _resolver_numero_pessoa(sess: requests.Session, doc: str, *, base_url: str,
         return None
     url = f"{base_url}/resources/app/v2/portal/cadastro/processo/pessoas/pesquisa-avancada/{rota}"
     r = sess.get(url, params={"inicioBusca": 0, "somente": "paj"}, timeout=timeout)
+    _checar_resposta(r, "pesquisa da pessoa")
     if r.status_code != 200 or not r.text.strip():
+        logger.warning("Vínculos: pesquisa da pessoa devolveu HTTP %s (doc %s).", r.status_code, digs[:6] + "…")
         return None
     lista = (r.json().get("data") or {}).get("listaOcorrencia") or []
     if not lista:
@@ -112,7 +158,9 @@ def _listar_processos_da_parte(sess: requests.Session, numero_pessoa: int, *, ba
         "inicioPesquisa": 1,
     }
     r = sess.post(url, json=body, timeout=timeout)
+    _checar_resposta(r, "processos da parte")
     if r.status_code != 200:
+        logger.warning("Vínculos: lista de processos da parte devolveu HTTP %s.", r.status_code)
         return []
     return (r.json().get("data") or {}).get("listaOcorrencia") or []
 
@@ -123,6 +171,8 @@ def _consultar_polo(sess: requests.Session, numero_processo: int, *, base_url: s
     url = f"{base_url}/resources/app/v1/processo/consulta/{numero_processo}"
     r = sess.get(url, timeout=timeout)
     if r.status_code != 200:
+        # Tolerado de propósito: sem o polo o vínculo ainda é válido e útil.
+        logger.info("Vínculos: polo indisponível pro processo %s (HTTP %s).", numero_processo, r.status_code)
         return None
     return (r.json().get("data") or {}).get("indicadorPoloBanco")
 

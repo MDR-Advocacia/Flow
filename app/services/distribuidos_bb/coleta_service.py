@@ -310,7 +310,12 @@ def _processar_notificacao(
     # responsável vem da equipe especializada (o escritório segue o padrão).
     # Best-effort: falha aqui NUNCA derruba a coleta — segue o rodízio normal.
     responsavel_override = None
-    if settings.distribuidos_bb_vinculos_ativo:
+    # Modo "rpa" (default): a pesquisa NÃO roda aqui — o processo cai na fila
+    # dinâmica do intake e o RPA externo devolve o resultado depois (a
+    # reatribuição acontece em aplicar_resultado_rpa enquanto o pool é NOVO).
+    # Modo "inline": pesquisa via requests direto na coleta (bloqueado pelo
+    # WAF do BB hoje; mantido pro dia em que liberarem).
+    if settings.distribuidos_bb_vinculos_ativo and settings.distribuidos_bb_vinculos_modo == "inline":
         try:
             from app.services.distribuidos_bb.vinculos_service import pesquisar_e_decidir
 
@@ -593,6 +598,18 @@ def executar_coleta(
             run_id=run.id,
         )
         db.commit()
+
+        # Guarda do filtro de vínculos: se a pesquisa vem rodando e NUNCA acha
+        # nada, o código do advogado do MDR provavelmente mudou no BB (o motor
+        # responde 200 e devolve zero em silêncio). Best-effort, com trava de
+        # repetição própria — não interfere no resultado da coleta.
+        if settings.distribuidos_bb_vinculos_ativo:
+            try:
+                from app.services.distribuidos_bb.alertas import checar_vinculos_zerados
+
+                checar_vinculos_zerados(db)
+            except Exception:  # noqa: BLE001
+                logger.exception("Checagem de vínculos zerados falhou (ignorado).")
 
         # Pool de planilha: NÃO gera planilha automática. Os distribuídos ficam
         # como NOVO (default) aguardando o operador mandar gerar. Aqui só

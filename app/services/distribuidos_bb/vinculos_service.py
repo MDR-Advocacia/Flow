@@ -20,11 +20,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.distribuidos_bb import (
     EQUIPE_MISTA_NOME,
     NIVEL_AVISO,
+    NIVEL_ERRO,
     NIVEL_INFO,
     NIVEL_SUCESSO,
     SECAO_DISTRIBUICAO,
@@ -42,6 +44,7 @@ from app.services.distribuidos_bb.vinculos_bb import (
     ADVOGADO_MDR_DEFAULT,
     CNPJ_BB,
     SITUACOES_EXCLUIDAS_DEFAULT,
+    VinculoAcessoNegado,
     apenas_digitos,
     montar_sessao,
     pesquisar_vinculos_parte,
@@ -80,6 +83,43 @@ def _fila_equipe_mista(db: Session) -> tuple[Optional[BbEscritorio], set[int]]:
     return esc, membros
 
 
+def _mascara_cnj(digitos: str) -> Optional[str]:
+    """20 dígitos -> '0000000-00.0000.0.00.0000' (a forma como o CNJ é gravado)."""
+    d = digitos
+    return f"{d[:7]}-{d[7:9]}.{d[9:13]}.{d[13:14]}.{d[14:16]}.{d[16:]}" if len(d) == 20 else None
+
+
+def _mascara_npj(digitos: str) -> Optional[str]:
+    """14 dígitos -> '2003/0095619-000' (máscara NPJ da casa)."""
+    d = digitos
+    return f"{d[:4]}/{d[4:11]}-{d[11:]}" if len(d) == 14 else None
+
+
+def _buscar_por_digitos(db: Session, coluna, digitos: str, mascarar) -> Optional[BbProcesso]:
+    """Acha o processo comparando por DÍGITOS sem varrer a base em Python.
+
+    Antes daqui saía um `.all()` da tabela inteira (13,5k processos viravam
+    objetos ORM) para CADA vínculo de CADA processo. Agora são duas etapas:
+
+      1. igualdade contra as formas conhecidas (máscara da casa + dígitos crus),
+         que usa o índice btree da coluna — é o caminho de praticamente todos
+         os casos, já que CNJ e NPJ são gravados sempre mascarados;
+      2. só se a etapa 1 falhar, `regexp_replace` no servidor: continua sendo um
+         seq scan, mas roda no Postgres e devolve UMA linha, em vez de trazer a
+         tabela inteira para a memória do processo.
+    """
+    formas = [f for f in (mascarar(digitos), digitos) if f]
+    if formas:
+        achado = db.query(BbProcesso).filter(coluna.in_(formas)).first()
+        if achado is not None:
+            return achado
+    return (
+        db.query(BbProcesso)
+        .filter(coluna.isnot(None), func.regexp_replace(coluna, r"\D", "", "g") == digitos)
+        .first()
+    )
+
+
 def _casar_na_base(db: Session, cnj: Optional[str], npj: Optional[str]) -> dict[str, Any]:
     """Casa o processo vinculado com a NOSSA base (por CNJ, senão por NPJ).
 
@@ -95,17 +135,9 @@ def _casar_na_base(db: Session, cnj: Optional[str], npj: Optional[str]) -> dict[
     npj_d = apenas_digitos(npj or "")
     achado = None
     if cnj_d:
-        achado = next(
-            (p for p in db.query(BbProcesso).filter(BbProcesso.cnj.isnot(None)).all()
-             if apenas_digitos(p.cnj) == cnj_d),
-            None,
-        )
+        achado = _buscar_por_digitos(db, BbProcesso.cnj, cnj_d, _mascara_cnj)
     if achado is None and npj_d:
-        achado = next(
-            (p for p in db.query(BbProcesso).filter(BbProcesso.npj.isnot(None)).all()
-             if apenas_digitos(p.npj) == npj_d),
-            None,
-        )
+        achado = _buscar_por_digitos(db, BbProcesso.npj, npj_d, _mascara_npj)
     if achado is None:
         return vazio
     u = db.get(LegalOneUser, achado.responsavel_user_id) if achado.responsavel_user_id else None
@@ -163,6 +195,24 @@ def pesquisar_e_decidir(db: Session, run: Any, proc: BbProcesso, portal: Any) ->
             res = pesquisar_vinculos_parte(
                 sess, e.cpf_cnpj, advogado_mdr=advogado, situacoes_excluidas=excluidas,
             )
+        except VinculoAcessoNegado as exc:
+            # O portal recusou a consulta: NÃO dá pra afirmar que a parte não
+            # tem vínculo. Aborta o processo inteiro sem marcar como verificado
+            # — senão ele entra na estatística como "pesquisado, nada achado" e
+            # a falha some. Fica pro próximo run, com o erro visível no painel.
+            logger.error("Vínculos: acesso negado ao portal (proc %s): %s", proc.id, exc)
+            registrar_evento(
+                db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_ERRO, acao="Vínculos sem acesso",
+                mensagem=(
+                    f"O portal do BB recusou a pesquisa de vínculos ({exc}). O processo seguiu "
+                    "o rodízio padrão e NÃO foi marcado como verificado."
+                ),
+                dados={"parte": (e.cpf_cnpj or "")[:6] + "…"},
+                processo_id=proc.id, run_id=getattr(run, "id", None),
+            )
+            proc.vinculos_verificado_em = None
+            proc.vinculos_qtd = 0
+            return resultado
         except Exception as exc:  # noqa: BLE001
             logger.warning("Vínculos: pesquisa falhou pra parte %s (proc %s): %s",
                            e.cpf_cnpj, proc.id, exc)
@@ -176,6 +226,22 @@ def pesquisar_e_decidir(db: Session, run: Any, proc: BbProcesso, portal: Any) ->
             v["_nome_parte"] = e.nome
             v["_numero_pessoa"] = res["numero_pessoa"]
             achados[npj_d] = v
+
+    return decidir_e_persistir(db, run, proc, achados)
+
+
+def decidir_e_persistir(
+    db: Session, run: Any, proc: BbProcesso, achados: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Metade DECISÓRIA do fluxo — recebe os vínculos já pesquisados.
+
+    `achados` é {npj_digitos: vinculo} no formato de `pesquisar_vinculos_parte`
+    (+ chaves internas _envolvido_id/_doc_parte/_nome_parte/_numero_pessoa).
+    Quem alimenta pode ser a pesquisa inline (requests, modo "inline") ou o
+    RPA externo via intake (modo "rpa") — a regra de cenário, a persistência
+    de BbVinculo e os eventos são OS MESMOS nos dois caminhos.
+    """
+    resultado: dict[str, Any] = {"cenario": None, "responsavel_override_id": None}
 
     # Reprocesso idempotente: apaga os vínculos anteriores deste processo.
     db.query(BbVinculo).filter(BbVinculo.processo_id == proc.id).delete(synchronize_session=False)
@@ -274,4 +340,110 @@ def pesquisar_e_decidir(db: Session, run: Any, proc: BbProcesso, portal: Any) ->
 
     resultado["cenario"] = cenario
     resultado["responsavel_override_id"] = override
+    return resultado
+
+
+def aplicar_resultado_rpa(
+    db: Session, proc: BbProcesso, partes: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Entrada do intake: aplica o resultado que o RPA externo pesquisou.
+
+    `partes` = [{envolvido_id, doc, nome, numero_pessoa, processos: [linhas
+    CRUAS do portal (consulta-parte-envolvida) + indicador_polo]}]. O RPA
+    manda os dados sem regra de negócio além do filtro ativo+advogado (que
+    poupa as consultas de polo); situação excluída, dedupe, cenário e
+    persistência acontecem AQUI — mesma régua do modo inline.
+
+    Além de decidir, REATRIBUI o responsável quando o cenário pede: no modo
+    assíncrono o processo já passou pelo rodízio padrão da coleta, então o
+    override vira update em vez de parâmetro da distribuição. Só reatribui
+    enquanto o processo está NOVO no pool — depois que a planilha foi gerada,
+    o responsável já viajou pro L1 e a troca automática silenciosa seria
+    mentira; nesse caso fica o evento de AVISO pro supervisor agir.
+    """
+    from app.models.distribuidos_bb import POOL_NOVO
+    from app.services.distribuidos_bb.vinculos_bb import _fmt_npj, _polo_texto, _posicao_texto
+
+    excluidas = _cfg(db, "vinculo_situacoes_excluidas", SITUACOES_EXCLUIDAS_DEFAULT)
+    from app.services.distribuidos_bb.vinculos_bb import situacao_excluida
+
+    proprio_npj = apenas_digitos(proc.npj or "")
+    advogado = _advogado_mdr(db)
+    achados: dict[str, dict[str, Any]] = {}
+    for parte in partes or []:
+        for o in parte.get("processos") or []:
+            # Defesa em profundidade: o RPA JÁ filtra ativo+advogado (poupa as
+            # consultas de polo), mas um bug lá não pode virar vínculo falso
+            # aqui — refiltra com a mesma régua do modo inline.
+            if (o.get("indicadorProcessoAtivo") or "").strip().upper() != "A":
+                continue
+            try:
+                if int(o.get("numeroAdvogadoProcesso") or 0) != advogado:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if situacao_excluida(o.get("textoEstadoProcesso"), excluidas):
+                continue
+            numero_proc = o.get("numeroProcesso")
+            npj_d = apenas_digitos(str(numero_proc or ""))
+            npj_mascarado = _fmt_npj(numero_proc)
+            npj_masc_d = apenas_digitos(npj_mascarado)
+            if not npj_masc_d or npj_masc_d == proprio_npj or npj_masc_d in achados:
+                continue
+            polo = o.get("indicador_polo")
+            achados[npj_masc_d] = {
+                "npj": npj_mascarado,
+                "numero_processo": numero_proc,
+                "cnj": apenas_digitos(o.get("textoNumeroInventario")) or None,
+                "cliente": o.get("nomeContrarioPrincipal"),
+                "advogado_bb": o.get("nomeAdvogadoProcesso"),
+                "numero_advogado": o.get("numeroAdvogadoProcesso"),
+                "situacao": o.get("textoEstadoProcesso"),
+                "natureza": o.get("textoNaturezaProcesso"),
+                "uja": o.get("codigoPrefixoDependencia"),
+                "polo": _polo_texto(polo),
+                "posicao_banco": _posicao_texto(polo),
+                "_envolvido_id": parte.get("envolvido_id"),
+                "_doc_parte": apenas_digitos(parte.get("doc")),
+                "_nome_parte": parte.get("nome"),
+                "_numero_pessoa": parte.get("numero_pessoa"),
+            }
+
+    resultado = decidir_e_persistir(db, None, proc, achados)
+
+    override = resultado.get("responsavel_override_id")
+    if override and override != proc.responsavel_user_id:
+        from app.models.legal_one import LegalOneUser
+
+        anterior_id = proc.responsavel_user_id
+        u_novo = db.get(LegalOneUser, override)
+        u_ant = db.get(LegalOneUser, anterior_id) if anterior_id else None
+        if proc.planilha_status == POOL_NOVO:
+            proc.responsavel_user_id = override
+            registrar_evento(
+                db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_SUCESSO,
+                acao="Vínculo — responsável reatribuído",
+                mensagem=(
+                    f"Resultado dos vínculos (RPA) reatribuiu o responsável: "
+                    f"{(u_ant.name if u_ant else '—')} → {(u_novo.name if u_novo else override)} "
+                    f"({'mesmo responsável da parte' if resultado.get('cenario') == VINCULO_CENARIO_2 else 'rodízio da Equipe Mista'})."
+                ),
+                dados={"de": anterior_id, "para": override, "cenario": resultado.get("cenario")},
+                processo_id=proc.id,
+            )
+            resultado["reatribuido"] = True
+        else:
+            registrar_evento(
+                db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_AVISO,
+                acao="Vínculo após a planilha",
+                mensagem=(
+                    f"O resultado dos vínculos indicou {(u_novo.name if u_novo else override)} "
+                    f"como responsável, mas o processo já saiu do pool "
+                    f"(planilha_status={proc.planilha_status}) — a troca NÃO foi automática. "
+                    "Se preciso, transferir a pasta no L1 manualmente."
+                ),
+                dados={"sugerido": override, "cenario": resultado.get("cenario")},
+                processo_id=proc.id,
+            )
+            resultado["reatribuido"] = False
     return resultado

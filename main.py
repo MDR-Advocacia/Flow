@@ -50,6 +50,7 @@ from app.api.v1.endpoints import (
     cargos,
     uso,
     analise_risco_intake,
+    distribuidos_bb_vinculos_intake,
 )
 from app.core import auth as auth_security
 from app.core.config import settings
@@ -667,6 +668,10 @@ app.include_router(prazos_iniciais.intake_router, prefix="/api/v1")
 # Intake do RPA de Análise de Risco BB Réu (servidor AWS): auth via header
 # X-AnaliseRisco-Api-Key, SEM JWT. Entrega a fila e recebe os vereditos do portal.
 app.include_router(analise_risco_intake.intake_router, prefix="/api/v1")
+# Intake do RPA de Vínculos BB (mesmo servidor AWS, repo RPA_encerramentos
+# --vinculos): auth via header X-VinculosBB-Api-Key, SEM JWT. Entrega a fila de
+# partes e recebe os vínculos pesquisados no portal do BB.
+app.include_router(distribuidos_bb_vinculos_intake.intake_router, prefix="/api/v1")
 # Intake do OneRequest (motor RPA externo): auth via header
 # X-Onerequest-Api-Key, SEM JWT. Recebe números/detalhes das DMIs do BB.
 app.include_router(onerequest.intake_router, prefix="/api/v1")
