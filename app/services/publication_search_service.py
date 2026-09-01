@@ -259,6 +259,7 @@ class PublicationSearchService:
         date_from: str,
         date_to: Optional[str] = None,
         origin_type: str = "OfficialJournalsCrawler",
+        on_page=None,
     ) -> list[dict]:
         """
         Faz a chamada paginada ao Legal One pra trazer todas as publicações
@@ -296,6 +297,7 @@ class PublicationSearchService:
         if ini is None or (fim - ini) <= timedelta(days=1):
             return self.client.fetch_all_publications(
                 date_from=date_from, date_to=date_to, origin_type=origin_type,
+                on_page=on_page,
             )
 
         publicacoes: list[dict] = []
@@ -309,6 +311,7 @@ class PublicationSearchService:
                     date_from=corte.strftime("%Y-%m-%dT%H:%M:%SZ"),
                     date_to=prox.strftime("%Y-%m-%dT%H:%M:%SZ"),
                     origin_type=origin_type,
+                    on_page=on_page,
                 )
             except Exception as exc:  # noqa: BLE001
                 falhas.append(f"{corte:%d/%m} ({str(exc)[:60]})")
@@ -326,6 +329,13 @@ class PublicationSearchService:
                     continue
                 vistos.add(pid)
                 publicacoes.append(pub)
+            # Batida por FATIA além da batida por página: fatia vazia não
+            # gera on_page do client, e silêncio vira órfã pro reaper.
+            if on_page is not None:
+                try:
+                    on_page(0, None, len(publicacoes))
+                except Exception:  # noqa: BLE001
+                    pass
             corte = prox
 
         logger.info(

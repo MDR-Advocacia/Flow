@@ -5,6 +5,7 @@ Integra com APScheduler para executar jobs periodicamente.
 """
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 
@@ -709,10 +710,30 @@ class ScheduledAutomationService:
                     ),
                 )
 
+            # Heartbeat DURANTE o fetch (throttle 30s). Sem isto o run fica
+            # com progress_updated_at parado a busca inteira e o reaper
+            # periódico — que existe pra matar zumbi — derrubaria run viva.
+            _ultima_batida = {"t": 0.0}
+
+            def _batida_fetch(_paginas, total_rep, baixadas):
+                agora_mono = time.monotonic()
+                if agora_mono - _ultima_batida["t"] < 30:
+                    return
+                _ultima_batida["t"] = agora_mono
+                if run_id is not None:
+                    self._update_progress(
+                        run_id,
+                        message=(
+                            f"Buscando publicações L1 — {baixadas} baixada(s)"
+                            + (f" de ~{total_rep}" if total_rep else "")
+                        ),
+                    )
+
             try:
                 publications = search_service.fetch_publications_for_window(
                     date_from=union_from.strftime("%Y-%m-%dT%H:%M:%SZ"),
                     date_to=union_to.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    on_page=_batida_fetch,
                 )
                 logger.info(
                     "Batch L1 fetch: %s publicações no período união (%s..%s) — fan-out p/ %s escritórios.",
@@ -1409,3 +1430,169 @@ class ScheduledAutomationService:
                 }
 
             time.sleep(poll_seconds)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Reaper de runs órfãs — o MESMO critério de heartbeat do boot, como função
+# reutilizável e como job periódico.
+#
+# Por que boot não basta (run 219, madrugada de 01/09/2026): o worker líder
+# morreu ~24s depois de iniciar a captura; o worker substituto virou líder,
+# o reaper de boot olhou o heartbeat — 24 segundos, fresco — e poupou a run.
+# Só que a thread dela morreu com o processo antigo: ficou um zumbi 'running'
+# pra sempre, e o disparo da noite seguinte é PULADO quando já existe run
+# rodando. Zumbi de um segundo custou a madrugada inteira.
+#
+# O job roda a cada 10 min no líder: carimba como órfã a run sem sinal de
+# vida há mais de AUTOMATION_ORFA_APOS_MIN (15) e — se a automação está
+# habilitada, a run era desta janela e nenhuma outra veio depois — RETOMA a
+# execução na hora, em thread própria (o advisory lock do _execute_automation
+# impede corrida). A noite se recupera às 01:15 em vez de morrer calada.
+# ═══════════════════════════════════════════════════════════════════════
+
+_RETOMADAS_MAX_24H = 5      # trava de loop: morte em série para de insistir
+
+
+def _retomar_automation(automation_id: int) -> None:
+    """Reexecuta a automation em sessão própria (alvo de Thread daemon)."""
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        ScheduledAutomationService(db=db)._execute_automation(automation_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("Retomada da automation %d falhou.", automation_id)
+    finally:
+        db.close()
+
+
+def reapear_runs_orfas(db, *, retomar: bool, apos_min: Optional[int] = None,
+                       disparar=None) -> dict:
+    """Carimba runs sem heartbeat e (opcional) retoma a automação.
+
+    `disparar(automation_id)` é injetável pra teste; o default sobe a
+    retomada numa Thread daemon.
+    """
+    import os as _os
+    import threading as _threading
+
+    if apos_min is None:
+        apos_min = int(_os.environ.get("AUTOMATION_ORFA_APOS_MIN", "15"))
+    if disparar is None:
+        def disparar(aid):  # noqa: ANN001
+            _threading.Thread(
+                target=_retomar_automation, args=(aid,),
+                name=f"retomada-automation-{aid}", daemon=True,
+            ).start()
+
+    agora = datetime.now(timezone.utc)
+    corte = agora - timedelta(minutes=apos_min)
+    candidatas = (
+        db.query(ScheduledAutomationRun)
+        .filter(ScheduledAutomationRun.status == "running")
+        .all()
+    )
+    orfas, vivas = [], 0
+    for run in candidatas:
+        batida = run.progress_updated_at or run.started_at
+        if batida is not None and batida.tzinfo is None:
+            batida = batida.replace(tzinfo=timezone.utc)
+        if batida is not None and batida > corte:
+            vivas += 1              # deu sinal agora: viva em outro worker
+            continue
+        orfas.append(run)
+
+    retomadas: list[int] = []
+    for run in orfas:
+        run.status = "failed"
+        run.error_message = (
+            f"Execução sem sinal de vida há mais de {apos_min} min "
+            f"— o processo que a conduzia morreu."
+        )
+        run.finished_at = agora
+        run.progress_phase = "orphaned"
+        run.progress_message = "Execução interrompida — worker morreu no meio"
+        run.progress_updated_at = agora
+        automation = (
+            db.query(ScheduledAutomation)
+            .filter(ScheduledAutomation.id == run.automation_id)
+            .first()
+        )
+        if automation is None:
+            continue
+        automation.last_status = "failed"
+        automation.last_error = run.error_message
+        if not retomar or not automation.is_enabled:
+            continue
+        inicio = run.started_at
+        if inicio is not None and inicio.tzinfo is None:
+            inicio = inicio.replace(tzinfo=timezone.utc)
+        if inicio is None or inicio < agora - timedelta(hours=12):
+            continue                # órfã pré-histórica: não é "a noite de hoje"
+        mais_nova = (
+            db.query(ScheduledAutomationRun)
+            .filter(
+                ScheduledAutomationRun.automation_id == run.automation_id,
+                ScheduledAutomationRun.started_at > run.started_at,
+            )
+            .count()
+        )
+        if mais_nova:
+            continue                # alguém já tentou de novo depois dela
+        ultimas_24h = (
+            db.query(ScheduledAutomationRun)
+            .filter(
+                ScheduledAutomationRun.automation_id == run.automation_id,
+                ScheduledAutomationRun.started_at > agora - timedelta(hours=24),
+            )
+            .count()
+        )
+        if ultimas_24h >= _RETOMADAS_MAX_24H:
+            logger.warning(
+                "Automation %d: %d runs em 24h — retomada suspensa pra não "
+                "insistir em morte em série.", run.automation_id, ultimas_24h,
+            )
+            continue
+        if run.automation_id not in retomadas:
+            retomadas.append(run.automation_id)
+
+    if orfas:
+        db.commit()
+        logger.warning(
+            "Reaper: %d run(s) órfã(s) carimbadas, %d viva(s) preservadas.",
+            len(orfas), vivas,
+        )
+    for aid in retomadas:
+        logger.warning("Reaper: retomando automation %d após run órfã.", aid)
+        disparar(aid)
+    return {"orfas": len(orfas), "vivas": vivas, "retomadas": retomadas}
+
+
+def register_automation_reaper_job(scheduler) -> None:
+    """Job periódico do reaper (10 min) — só existe no worker líder."""
+    from app.db.session import SessionLocal
+
+    def _tick():
+        db = SessionLocal()
+        try:
+            reapear_runs_orfas(db, retomar=True)
+        except Exception:  # noqa: BLE001
+            logger.exception("Reaper periódico de automations falhou.")
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            db.close()
+
+    scheduler.add_job(
+        _tick,
+        trigger="interval",
+        minutes=10,
+        id="automation_orphan_reaper",
+        name="Reaper de runs órfãs de automations",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    logger.info("Reaper periódico de automations registrado (10 min).")

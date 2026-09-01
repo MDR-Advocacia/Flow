@@ -46,6 +46,8 @@ import re
 import threading
 from typing import Any, Optional
 
+import requests
+
 from app.core.config import settings
 
 logger = logging.getLogger("distribuidos_bb.vinculos")
@@ -82,6 +84,50 @@ class VinculoAcessoNegado(RuntimeError):
 
 def apenas_digitos(v: Optional[str]) -> str:
     return re.sub(r"\D", "", v or "")
+
+
+REFERER_SPA = (
+    "https://juridico.bb.com.br/paj/app/paj-cadastro/spas/processo/consulta/"
+    "processo-consulta.app.html"
+)
+
+
+def montar_sessao(cookies_onelog: list[dict[str, Any]], user_agent: str) -> "requests.Session":
+    """requests.Session com os cookies autenticados do OneLog.
+
+    COMPATIBILIDADE: o modulo de vinculos migrou pro navegador undetected
+    (c11e48e) e parou de usar isto — mas o portal_verify_worker da ANALISE DE
+    RISCO ainda importa daqui, e a remocao derrubou o job dele com ImportError
+    a cada 10 minutos (madrugada de 01/09/2026). Fica ate a analise de risco
+    migrar tambem.
+    """
+    sess = requests.Session()
+    for c in cookies_onelog or []:
+        nome = c.get("name")
+        valor = c.get("value")
+        if not nome:
+            continue
+        sess.cookies.set(
+            nome, valor,
+            domain=c.get("domain") or "juridico.bb.com.br",
+            path=c.get("path") or "/",
+        )
+    # Headers do HAR real do portal (31/08/2026): sem Referer da SPA (e com
+    # X-Requested-With) a borda do BB devolve 403 em HTML.
+    b = _base(None)
+    partes = b.split("/")
+    origem = "//".join([partes[0], partes[2]]) if len(partes) > 2 else b
+    sess.headers.update({
+        "User-Agent": user_agent or "Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": REFERER_SPA,
+        "Origin": origem,
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+    })
+    return sess
 
 
 def _base(base_url: Optional[str] = None) -> str:

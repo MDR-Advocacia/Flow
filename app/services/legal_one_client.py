@@ -2093,10 +2093,17 @@ class LegalOneApiClient:
         date_to: Optional[str] = None,
         origin_type: str = "OfficialJournalsCrawler",
         max_pages: int = 500,
+        on_page=None,
     ) -> List[Dict[str, Any]]:
         """
         Busca TODAS as publicações paginando automaticamente.
         Usa o mesmo padrão de _paginated_catalog_loader.
+
+        `on_page(paginas, total_reportado, baixadas)` é chamado após cada
+        página — é o heartbeat de quem chamou. Existe porque a busca longa
+        (janela acumulada + degrau de 502) pode passar de 15 min sem nenhum
+        outro sinal de vida, e o reaper de automations derrubaria uma
+        execução VIVA por silêncio. Erro no callback nunca derruba a busca.
         """
         all_publications: List[Dict[str, Any]] = []
         skip = 0
@@ -2123,6 +2130,11 @@ class LegalOneApiClient:
                 break
 
             all_publications.extend(items)
+            if on_page is not None:
+                try:
+                    on_page(page + 1, total_reported, len(all_publications))
+                except Exception:  # noqa: BLE001
+                    self.logger.debug("on_page falhou (ignorado).", exc_info=True)
 
             # Paginacao baseada em count + item count (LegalOne nao retorna @odata.nextLink)
             if total_reported is not None and len(all_publications) >= total_reported:

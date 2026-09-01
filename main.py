@@ -168,73 +168,21 @@ async def lifespan(_: FastAPI):
         logger.exception("Falha ao repopular automations no startup.")
 
     try:
-        from datetime import datetime, timedelta, timezone
-
         from app.db.session import SessionLocal
-        from app.models.scheduled_automation import ScheduledAutomation, ScheduledAutomationRun
+        from app.services.scheduled_automation_service import reapear_runs_orfas
 
-        # Só é órfã a run que está PARADA — não toda run "running".
-        #
-        # Antes isto derrubava qualquer execução em andamento, e o estrago foi
-        # exatamente esse: nas madrugadas de 29, 30 e 31/08/2026 a captura de
-        # publicações começou às 01:00, estava na página 58 de 385 e progredindo,
-        # um worker do uvicorn subiu (a liderança é por filelock e troca sem o
-        # container reiniciar — `restartCount` ficou em 0 os três dias), e este
-        # bloco carimbou a run viva como "API reiniciou durante a execução".
-        # Três dias sem publicação nenhuma, e a mensagem apontava pra um
-        # reinício que nunca houve.
-        #
-        # O critério agora é heartbeat: run cujo `progress_updated_at` (ou, na
-        # falta dele, `started_at`) parou há mais de _ORFA_APOS_MIN de fato
-        # morreu com o processo. Quem atualizou progresso agora há pouco está
-        # viva em OUTRO worker e não se toca.
-        _ORFA_APOS_MIN = int(os.environ.get("AUTOMATION_ORFA_APOS_MIN", "15"))
-
-        db = SessionLocal()
+        # Reaper por HEARTBEAT (não por status): run que atualizou progresso
+        # agora há pouco está viva em outro worker e não se toca; run muda há
+        # mais de AUTOMATION_ORFA_APOS_MIN morreu com o processo. A história
+        # completa (3 madrugadas do reaper cego + o zumbi do run 219) está no
+        # docstring de reapear_runs_orfas — que também RETOMA a automação da
+        # noite quando a órfã é recente. O mesmo critério roda periodicamente
+        # via register_automation_reaper_job.
+        _db_reaper = SessionLocal()
         try:
-            corte = datetime.now(timezone.utc) - timedelta(minutes=_ORFA_APOS_MIN)
-            candidatas = (
-                db.query(ScheduledAutomationRun)
-                .filter(ScheduledAutomationRun.status == "running")
-                .all()
-            )
-            orphans, vivas = [], 0
-            for run in candidatas:
-                batida = run.progress_updated_at or run.started_at
-                if batida is not None and batida.tzinfo is None:
-                    batida = batida.replace(tzinfo=timezone.utc)
-                if batida is not None and batida > corte:
-                    vivas += 1          # deu sinal de vida agora: outro worker
-                    continue
-                orphans.append(run)
-            if vivas:
-                logger.info(
-                    "%d run(s) em andamento com heartbeat recente — preservadas "
-                    "(rodando em outro worker).", vivas,
-                )
-            for run in orphans:
-                run.status = "failed"
-                run.error_message = (
-                    f"Execução sem sinal de vida há mais de {_ORFA_APOS_MIN} min "
-                    f"— o processo que a conduzia morreu."
-                )
-                run.finished_at = datetime.now(timezone.utc)
-                run.progress_phase = "orphaned"
-                run.progress_message = "Execução interrompida por reinício da API"
-                run.progress_updated_at = datetime.now(timezone.utc)
-                automation = (
-                    db.query(ScheduledAutomation)
-                    .filter(ScheduledAutomation.id == run.automation_id)
-                    .first()
-                )
-                if automation:
-                    automation.last_status = "failed"
-                    automation.last_error = run.error_message
-            if orphans:
-                logger.warning("Reapei %d run(s) órfãs de automations.", len(orphans))
-                db.commit()
+            reapear_runs_orfas(_db_reaper, retomar=True)
         finally:
-            db.close()
+            _db_reaper.close()
     except Exception:
         logger.exception("Falha ao reapear runs órfãs no startup.")
 
@@ -362,6 +310,19 @@ async def lifespan(_: FastAPI):
         logger.exception(
             "Falha ao registrar worker do Classificador no startup."
         )
+
+    # Reaper PERIÓDICO de runs de automation — o boot só cobre quem vira
+    # líder; um zumbi criado DEPOIS do boot (worker morre 24s após iniciar a
+    # run, caso 219 de 01/09/2026) ficaria 'running' pra sempre e a automação
+    # pularia as próximas noites por "já existe run rodando".
+    try:
+        from app.services.scheduled_automation_service import (
+            register_automation_reaper_job,
+        )
+
+        register_automation_reaper_job(scheduler)
+    except Exception:
+        logger.exception("Falha ao registrar reaper periódico de automations.")
 
     # Motor dormente do Classificador — agrupa PDFs do robo em batches.
     try:

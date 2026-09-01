@@ -17,7 +17,7 @@ class _ClientFake:
         self._explode_em = explode_em or set()
         self._seq = 0
 
-    def fetch_all_publications(self, *, date_from, date_to=None, origin_type=None):
+    def fetch_all_publications(self, *, date_from, date_to=None, origin_type=None, on_page=None):
         self.chamadas.append((date_from, date_to))
         dia = str(date_from)[:10]
         if dia in self._explode_em:
@@ -74,7 +74,7 @@ def test_fatia_que_falha_nao_derruba_as_outras():
 def test_publicacao_repetida_na_borda_nao_duplica():
     """Fatias vizinhas podem se tocar; id repetido não pode virar 2 registros."""
     class _Repete(_ClientFake):
-        def fetch_all_publications(self, *, date_from, date_to=None, origin_type=None):
+        def fetch_all_publications(self, *, date_from, date_to=None, origin_type=None, on_page=None):
             self.chamadas.append((date_from, date_to))
             return [{"id": 777, "dia": str(date_from)[:10]}]
 
