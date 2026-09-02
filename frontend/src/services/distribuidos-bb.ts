@@ -22,6 +22,7 @@ export interface DashboardKpis {
   coletados: number;
   ciencia_dada: number;
   distribuidos: number;
+  cadastro_direto?: number;
   cadastrados: number;
   erros: number;
   revisao: number;
@@ -71,7 +72,7 @@ export interface DashboardData {
   por_posicao?: { posicao: string; total: number }[];
   por_responsavel?: { responsavel: string; total: number }[];
   por_estado?: { uf: string; total: number }[];
-  por_data?: { data: string; total: number; clientes?: Record<string, number> }[];
+  por_data?: { data: string; total: number; clientes?: Record<string, number>; escritorios?: Record<string, number> }[];
   ultima_passagem?: { data: string | null; capturados: number; status: string } | null;
   por_cliente?: { cliente: string; total: number }[];
 }

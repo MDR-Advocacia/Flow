@@ -26,6 +26,7 @@ from app.models.distribuidos_bb import (
     POOL_NOVO,
     POOL_PENDENTE_CADASTRO,
     PROC_COLETADO,
+    PROC_CADASTRADO,
     PROC_DISTRIBUIDO,
     SECAO_EXTRACAO,
 )
@@ -108,8 +109,17 @@ class DistribuidosBBService:
             "total": total,
             "coletados": por_status.get("COLETADO", 0),
             "ciencia_dada": por_status.get("CIENCIA_DADA", 0),
-            "distribuidos": por_status.get("DISTRIBUIDO", 0),
+            # Funil CUMULATIVO: quem ja passou de uma etapa conta nela.
+            # Os 11 do cadastro direto da Ativos (status CADASTRADO) sumiam
+            # das contas — o card mostrava 2.350 capturados x 2.339
+            # distribuidos e ninguem sabia dizer onde os 11 tinham ido parar.
+            "distribuidos": (
+                por_status.get("DISTRIBUIDO", 0) + por_status.get("CADASTRADO", 0)
+            ),
             "cadastrados": por_status.get("CADASTRADO", 0),
+            # Quantos foram cadastrados pelo fluxo direto (pasta ja existia /
+            # cadastro imediato) — vira a nota de rodape do card no painel.
+            "cadastro_direto": por_status.get("CADASTRADO", 0),
             "erros": por_status.get("ERRO", 0),
             "revisao": por_status.get("REVISAO", 0),
             "sem_responsavel": int(sem_responsavel or 0),
@@ -137,7 +147,10 @@ class DistribuidosBBService:
             self._sem_tombamento(
                 self.db.query(BbProcesso.planilha_status, func.count(BbProcesso.id))
             )
-            .filter(BbProcesso.status == PROC_DISTRIBUIDO)
+            # CADASTRADO entra junto: sao os 11 do cadastro direto, que
+            # tambem tem planilha_status CADASTRADO_L1 e devem fechar a conta
+            # do card "Cadastrados no L1" com o total capturado.
+            .filter(BbProcesso.status.in_((PROC_DISTRIBUIDO, PROC_CADASTRADO)))
             .group_by(BbProcesso.planilha_status)
             .all()
         )
@@ -250,6 +263,38 @@ class DistribuidosBBService:
             linha["clientes"][cli or "BB"] = (
                 linha["clientes"].get(cli or "BB", 0) + int(q)
             )
+        # Mesma timeline, agora tambem com a quebra POR ESCRITORIO
+        # RESPONSAVEL por dia (pedido de 02/09: o conjunto dia/escritorio).
+        # Mesmo desenho da quebra por cliente: uma resposta so, o frontend
+        # filtra client-side clicando no card "Por escritorio responsavel".
+        for d, esc_path, esc_nome, q in (
+            self._sem_tombamento(
+                self.db.query(
+                    func.date(BbProcesso.created_at),
+                    BbEscritorio.escritorio_path,
+                    BbEscritorio.nome,
+                    func.count(BbProcesso.id),
+                )
+                .outerjoin(
+                    BbEscritorio, BbProcesso.escritorio_id == BbEscritorio.id
+                )
+            )
+            .group_by(
+                func.date(BbProcesso.created_at),
+                BbEscritorio.escritorio_path,
+                BbEscritorio.nome,
+            )
+            .all()
+        ):
+            linha = por_data_map.setdefault(
+                str(d), {"data": str(d), "total": 0, "clientes": {}}
+            )
+            escs = linha.setdefault("escritorios", {})
+            # A MESMA chave do "por_escritorio" (path > nome > travessao),
+            # senao o clique no card nao casa com a serie do grafico.
+            chave = esc_path or esc_nome or "—"
+            escs[chave] = escs.get(chave, 0) + int(q)
+
         por_data = list(por_data_map.values())
         ultima_passagem = None
         if ultima_run is not None:

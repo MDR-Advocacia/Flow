@@ -89,12 +89,14 @@ function Kpi({
   icon: Icon,
   tone,
   onClick,
+  hint,
 }: {
   label: string;
   value: number;
   icon: LucideIcon;
   tone: string;
   onClick?: () => void;
+  hint?: string;
 }) {
   return (
     <Card
@@ -110,6 +112,11 @@ function Kpi({
         <div className="min-w-0">
           <div className="text-2xl font-bold leading-none">{value}</div>
           <div className="truncate text-xs text-muted-foreground">{label}</div>
+          {hint && (
+            <div className="truncate text-[10px] text-muted-foreground/80" title={hint}>
+              {hint}
+            </div>
+          )}
         </div>
       </CardContent>
     </Card>
@@ -192,6 +199,9 @@ export default function DistribuidosBBDashboardPage() {
   // série; clicar de novo (ou no chip ativo) volta ao total. Client-side — a
   // resposta do dashboard já traz a quebra por cliente por dia.
   const [clienteFiltro, setClienteFiltro] = useState<string | null>(null);
+  // Recorte do gráfico de capturas por escritório responsável (clicando no
+  // card "Por escritório responsável"). Exclusivo com o filtro de cliente.
+  const [escritorioFiltro, setEscritorioFiltro] = useState<string | null>(null);
 
   // Carteiras conhecidas do módulo. O que não estiver aqui cai em "Outros
   // clientes" (pasta avulsa), então toda carteira nova precisa entrar nos dois
@@ -402,8 +412,15 @@ export default function DistribuidosBBDashboardPage() {
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <Kpi label="Total capturados" value={k?.total ?? 0} icon={Inbox} tone="bg-blue-100 text-blue-700" onClick={() => navigate("/distribuidos-bb")} />
-        <Kpi label="Distribuídos" value={k?.distribuidos ?? 0} icon={Users} tone="bg-sky-100 text-sky-700" onClick={() => navigate("/distribuidos-bb?status=DISTRIBUIDO")} />
-        <Kpi label="Cadastrados no L1" value={data?.planilhas?.cadastrado_l1 ?? 0} icon={CheckCircle2} tone="bg-emerald-100 text-emerald-700" onClick={() => navigate("/distribuidos-bb")} />
+        <Kpi label="Distribuídos" value={k?.distribuidos ?? 0} icon={Users} tone="bg-sky-100 text-sky-700" onClick={() => navigate("/distribuidos-bb")} />
+        <Kpi
+          label="Cadastrados no L1"
+          value={data?.planilhas?.cadastrado_l1 ?? 0}
+          icon={CheckCircle2}
+          tone="bg-emerald-100 text-emerald-700"
+          onClick={() => navigate("/distribuidos-bb")}
+          hint={(k?.cadastro_direto ?? 0) > 0 ? `${k!.cadastro_direto} já existiam no L1 (vinculados)` : undefined}
+        />
         <Kpi label="Sem responsável" value={k?.sem_responsavel ?? 0} icon={UserX} tone="bg-amber-100 text-amber-700" />
         <Kpi label="Erros / revisão" value={(k?.erros ?? 0) + (k?.revisao ?? 0)} icon={AlertTriangle} tone="bg-rose-100 text-rose-700" onClick={() => navigate("/distribuidos-bb?status=ERRO")} />
       </div>
@@ -419,9 +436,10 @@ export default function DistribuidosBBDashboardPage() {
               <button
                 key={c.cliente}
                 type="button"
-                onClick={() =>
-                  setClienteFiltro((atual) => (atual === c.cliente ? null : c.cliente))
-                }
+                onClick={() => {
+                  setEscritorioFiltro(null);
+                  setClienteFiltro((atual) => (atual === c.cliente ? null : c.cliente));
+                }}
                 title="Filtrar o gráfico de capturas por este cliente"
                 className={`flex items-center gap-2 rounded-md border bg-card px-3 py-2 transition-colors hover:bg-accent ${
                   clienteFiltro === c.cliente
@@ -457,6 +475,18 @@ export default function DistribuidosBBDashboardPage() {
                 </button>
               </span>
             )}
+            {escritorioFiltro && (
+              <span className="ml-2 text-sm font-normal text-muted-foreground">
+                · {escritorioFiltro.split("/").pop()?.trim() || escritorioFiltro} —{" "}
+                <button
+                  type="button"
+                  className="underline hover:text-foreground"
+                  onClick={() => setEscritorioFiltro(null)}
+                >
+                  limpar
+                </button>
+              </span>
+            )}
           </CardTitle>
           {data?.ultima_passagem?.data && (
             <span className="flex items-center gap-2 rounded-md bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground">
@@ -482,7 +512,11 @@ export default function DistribuidosBBDashboardPage() {
                 <AreaChart
                   data={(data!.por_data ?? []).map((d) => ({
                     ...d,
-                    total: clienteFiltro ? (d.clientes?.[clienteFiltro] ?? 0) : d.total,
+                    total: escritorioFiltro
+                      ? (d.escritorios?.[escritorioFiltro] ?? 0)
+                      : clienteFiltro
+                        ? (d.clientes?.[clienteFiltro] ?? 0)
+                        : d.total,
                   }))}
                   margin={{ left: -14, right: 8, top: 6 }}
                 >
@@ -571,8 +605,18 @@ export default function DistribuidosBBDashboardPage() {
                 <button
                   key={row.escritorio}
                   type="button"
-                  onClick={() => navigate("/distribuidos-bb")}
-                  className="flex items-center justify-between rounded-md border bg-card px-3 py-2 text-sm transition-colors hover:bg-muted/50"
+                  title="Filtrar o gráfico de capturas por este escritório (dia × escritório)"
+                  onClick={() => {
+                    setClienteFiltro(null);
+                    setEscritorioFiltro((atual) => (atual === row.escritorio ? null : row.escritorio));
+                  }}
+                  className={`flex items-center justify-between rounded-md border bg-card px-3 py-2 text-sm transition-colors hover:bg-muted/50 ${
+                    escritorioFiltro === row.escritorio
+                      ? "ring-2 ring-primary border-primary"
+                      : escritorioFiltro
+                        ? "opacity-50"
+                        : ""
+                  }`}
                 >
                   <span className="flex items-center gap-2">
                     <Building2 className="h-4 w-4 shrink-0 text-muted-foreground" />
