@@ -12,18 +12,22 @@ Por que a coluna e não uma consulta ao L1: ler etiqueta é uma requisição web
 por pasta (não tem endpoint em lote), o que sairia caro só pra decidir se
 precisa escrever.
 
-Nota: nasceu apontando pra pub012 (o head de produção na hora), mas o repo
-ja tinha pub013/pub014 de outra frente — re-encadeada pra pub014 antes do
-commit pra nao subir com MultipleHeads e travar o boot do Coolify.
+Nota sobre o encadeamento (custou um deploy quebrado em 04/09/2026): eu a
+re-encadeei pra `pub014` ao ver essa revisão no checkout local, mas pub013 e
+pub014 estavam UNTRACKED — trabalho em andamento de outra frente, fora da
+main. Em produção o alembic subiu com `KeyError: 'pub014'` e o container
+entrou em loop de restart. Lição: conferir a cadeia contra o que está NA MAIN
+(`git ls-files`), não contra o disco. Aqui volta pra pub012, que é o head
+real do repositório.
 
 Revision ID: bbd021
-Revises: pub014
+Revises: pub012
 """
 from alembic import op
 import sqlalchemy as sa
 
 revision = "bbd021"
-down_revision = "pub014"
+down_revision = "pub012"
 branch_labels = None
 depends_on = None
 
