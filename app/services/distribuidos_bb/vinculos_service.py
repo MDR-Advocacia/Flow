@@ -23,6 +23,8 @@ from typing import Any, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
+
 from app.models.distribuidos_bb import (
     EQUIPE_MISTA_NOME,
     NIVEL_AVISO,
@@ -120,12 +122,115 @@ def _buscar_por_digitos(db: Session, coluna, digitos: str, mascarar) -> Optional
     )
 
 
+# Cache do casamento no L1 dentro do processo: várias partes do mesmo processo
+# costumam apontar o mesmo vínculo, e a coleta roda dezenas de processos em
+# sequência. Chave = CNJ em dígitos. Zerado junto com o navegador (uma vez por
+# coleta), pra não servir responsável velho na coleta seguinte.
+_cache_l1: dict[str, dict[str, Any]] = {}
+
+
+def limpar_cache_l1() -> None:
+    """Esvazia o cache do casamento — chamado no fim da coleta."""
+    _cache_l1.clear()
+
+
+def _casar_no_l1(db: Session, cnj_d: str) -> Optional[dict[str, Any]]:
+    """Pergunta ao PRÓPRIO L1 quem conduz a pasta desse CNJ.
+
+    Por que existe: `_casar_na_base` só enxergava `bbd_processos`, ou seja, o
+    que passou pelo fluxo de cadastro do Flow. As 1.341 pastas da Equipe Mista
+    vieram da Base Analítica e NÃO estão lá — então o cenário 2 ("a parte já é
+    conduzida pela equipe") era inalcançável justamente na carteira que motivou
+    o módulo. Medido em 04/09/2026: dos 358 vínculos, só 136 estavam na base do
+    Flow, e o cenário 2 deu ZERO em 190 processos; numa amostra de 40 vínculos
+    não casados, 40 tinham pasta no L1 e 3 eram conduzidos pela Ingrid.
+
+    Devolve o mesmo formato de `_casar_na_base`, ou None quando não achar.
+    """
+    from app.models.legal_one import LegalOneUser
+
+    if cnj_d in _cache_l1:
+        return _cache_l1[cnj_d]
+    mascarado = _mascara_cnj(cnj_d)
+    if not mascarado:
+        return None
+    from app.services.legal_one_client import LegalOneApiClient
+
+    api = LegalOneApiClient()
+    try:
+        achados = api.search_lawsuits_by_cnj_numbers([mascarado]) or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Vínculos: busca do CNJ %s no L1 falhou: %s", mascarado, exc)
+        return None
+    lawsuit = next((v for v in achados.values() if v.get("id")), None)
+    if not lawsuit:
+        _cache_l1[cnj_d] = None
+        return None
+    lid = int(lawsuit["id"])
+    try:
+        participantes = api.get_lawsuit_participants(lid) or []
+    except Exception as exc:  # noqa: BLE001
+        # Recurso/incidente dá 404 aqui; sem responsável não dá pra decidir.
+        logger.info("Vínculos: participantes da pasta %s indisponíveis (%s).", lid, str(exc)[:80])
+        return None
+    principal = next(
+        (p for p in participantes
+         if p.get("type") == "PersonInCharge" and p.get("isMainParticipant")),
+        None,
+    )
+    if not principal:
+        _cache_l1[cnj_d] = None
+        return None
+    # `contactId` do participante é o `external_id` do LegalOneUser — não o id
+    # interno (mesma equivalência usada no tombo de pastas).
+    contato = principal.get("contactId")
+    usuario = (
+        db.query(LegalOneUser).filter(LegalOneUser.external_id == contato).first()
+        if contato is not None else None
+    )
+    resultado = {
+        "responsavel_id": (usuario.id if usuario else None),
+        "responsavel_nome": (usuario.name if usuario else principal.get("contactName")),
+        "l1_lawsuit_id": lid,
+        "l1_folder": None,
+    }
+    if len(_cache_l1) > 5000:      # trava de memória: coleta longa não infla
+        _cache_l1.clear()
+    _cache_l1[cnj_d] = resultado
+    return resultado
+
+
+def _polos_opostos(posicao_novo, posicao_vinculado) -> bool:
+    """True só quando o processo novo e o vinculado estão em polos CONTRÁRIOS.
+
+    `posicao` é o lado do BANCO: "Autor" ou "Réu". A Equipe Mista trata a parte
+    que aparece dos dois lados da carteira — ser autor contra alguém e réu numa
+    ação dele. Mesmo polo é fila normal.
+
+    Polo desconhecido (a consulta do polo no portal falhou) devolve False de
+    propósito: sem saber o lado não dá pra afirmar que é oposto, e um falso
+    positivo aqui reatribui processo pra equipe errada.
+    """
+    a = (posicao_novo or "").strip().lower()
+    b = (posicao_vinculado or "").strip().lower()
+    if not a or not b:
+        return False
+    return a != b
+
+
 def _casar_na_base(db: Session, cnj: Optional[str], npj: Optional[str]) -> dict[str, Any]:
-    """Casa o processo vinculado com a NOSSA base (por CNJ, senão por NPJ).
+    """Descobre quem conduz o processo vinculado.
+
+    Duas fontes, nessa ordem:
+      1. `bbd_processos` — o que passou pelo fluxo de cadastro do Flow. É
+         local e indexado, então vem primeiro;
+      2. o L1 — para tudo que existe na carteira mas nunca passou pelo Flow
+         (as pastas migradas da Base Analítica, por exemplo). Custa duas
+         chamadas de API, com cache por CNJ.
 
     Devolve o responsável atual e a pasta no L1 (pro link direto do painel).
-    Processos antigos que nunca passaram pelo Flow não casam — ficam sem
-    responsável conhecido, o que os classifica como "fora da equipe".
+    Quando nenhuma das duas acha, o processo fica sem responsável conhecido —
+    o que o classifica como "fora da equipe" (cenário 1).
     """
     from app.models.legal_one import LegalOneUser
 
@@ -139,6 +244,11 @@ def _casar_na_base(db: Session, cnj: Optional[str], npj: Optional[str]) -> dict[
     if achado is None and npj_d:
         achado = _buscar_por_digitos(db, BbProcesso.npj, npj_d, _mascara_npj)
     if achado is None:
+        # Não passou pelo Flow: pergunta ao L1 (é onde vive a carteira real).
+        if cnj_d and settings.distribuidos_bb_vinculos_casar_no_l1:
+            no_l1 = _casar_no_l1(db, cnj_d)
+            if no_l1:
+                return no_l1
         return vazio
     u = db.get(LegalOneUser, achado.responsavel_user_id) if achado.responsavel_user_id else None
     return {
@@ -237,6 +347,15 @@ def pesquisar_e_decidir(db: Session, run: Any, proc: BbProcesso, portal: Any) ->
         for v in res["ativos_mdr"]:
             npj_d = apenas_digitos(v["npj"])
             if npj_d == proprio_npj or npj_d in achados:
+                continue
+            # REGRA DA EQUIPE MISTA: só interessa quando os polos são OPOSTOS.
+            # A equipe existe pra conduzir a parte que é adversa dos dois lados
+            # — somos autor contra ela num processo e réu noutro. Dois processos
+            # do MESMO polo são trabalho normal da fila, não caso de equipe
+            # mista. Sem essa checagem o motor marcou 80 processos em 04/09/2026
+            # dos quais só 16 tinham vínculo de polo oposto (95% dos 358
+            # vínculos eram Réu×Réu ou Autor×Autor).
+            if not _polos_opostos(proc.posicao, v.get("posicao_banco")):
                 continue
             v["_envolvido_id"] = e.id
             v["_doc_parte"] = apenas_digitos(e.cpf_cnpj)

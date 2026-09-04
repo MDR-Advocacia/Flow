@@ -735,8 +735,12 @@ def executar_coleta(
         # servidor já teve 4.809 zumbis do OneLog derrubando o load.
         try:
             from app.services.distribuidos_bb.vinculos_bb import fechar_browser
+            from app.services.distribuidos_bb.vinculos_service import limpar_cache_l1
 
             fechar_browser()
+            # O cache do casamento no L1 vive por coleta: guardar entre coletas
+            # serviria responsável velho depois de uma transferência de pasta.
+            limpar_cache_l1()
         except Exception:  # noqa: BLE001
             logger.warning("Vínculos: falha ao fechar o navegador (ignorado).", exc_info=True)
         db.commit()

@@ -534,6 +534,12 @@ class Settings(BaseSettings):
     # Timeout (s) de cada chamada ao PAJ e do carregamento das páginas do
     # navegador undetected que faz a pesquisa (ver vinculos_bb.py).
     distribuidos_bb_vinculos_timeout_seg: int = 60
+    # Quando o processo vinculado NÃO está em bbd_processos (não passou pelo
+    # fluxo de cadastro do Flow), pergunta ao próprio L1 quem conduz a pasta.
+    # É o que torna o cenário 2 alcançável para a carteira migrada da Base
+    # Analítica — que é a maioria da Equipe Mista. Custa 2 chamadas de API por
+    # vínculo novo, com cache por CNJ.
+    distribuidos_bb_vinculos_casar_no_l1: bool = True
     # Base dos endpoints JSON do PAJ (mesma origem do portal).
     distribuidos_bb_paj_base: str = "https://juridico.bb.com.br/paj"
 
