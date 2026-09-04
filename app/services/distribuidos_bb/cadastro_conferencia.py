@@ -29,7 +29,12 @@ from typing import Any, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.models.distribuidos_bb import NIVEL_ERRO, NIVEL_INFO, SECAO_CADASTRO
+from app.models.distribuidos_bb import (
+    NIVEL_AVISO,
+    NIVEL_ERRO,
+    NIVEL_INFO,
+    SECAO_CADASTRO,
+)
 from app.services.distribuidos_bb.log_service import registrar_evento
 
 logger = logging.getLogger("distribuidos_bb.conferencia")
@@ -37,6 +42,15 @@ logger = logging.getLogger("distribuidos_bb.conferencia")
 ACAO_OK = "Conferência pós-import"
 ACAO_DUP = "Pasta duplicada no L1"
 ACAO_SEM_PASTA = "Processo sem pasta no L1"
+ACAO_AGUARDANDO = "Aguardando o L1 criar as pastas"
+
+# O import do L1 e ASSINCRONO: ele aceita a planilha e cria as pastas
+# depois, por fora da chamada. Medido na coleta 227 (04/09/2026): envio
+# 14:23:57, pastas criadas 14:25 — 17 de 17, todas certas. So que a
+# conferencia rodou 14:24:38 e gritou "o L1 NAO criou pasta para 17 de 17".
+# Alarme que mente treina o operador a ignorar alarme, entao antes desta
+# carencia "ninguem tem pasta ainda" e' o esperado, nao um erro.
+_CARENCIA_L1_MIN = 10
 
 # O L1 rejeita $top acima de 30 em /Lawsuits, e cada CNJ vira 1 cláusula OR.
 _CHUNK = 8
@@ -73,6 +87,23 @@ def _parse_data(bruto) -> Optional[datetime]:
     except (ValueError, TypeError):
         return None
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _cedo_demais(planilha) -> bool:
+    """A planilha subiu ha menos que a carencia do L1?
+
+    Sem `subido_em` (planilha antiga, ou fluxo que nao carimba) assume que NAO
+    e cedo: melhor um alarme a mais do que engolir um cadastro que falhou de
+    verdade.
+    """
+    subido = getattr(planilha, "subido_em", None)
+    if subido is None:
+        return False
+    if subido.tzinfo is None:
+        subido = subido.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - subido) < timedelta(
+        minutes=_CARENCIA_L1_MIN
+    )
 
 
 def conferir_duplicacao(
@@ -254,6 +285,26 @@ def _registrar(db: Session, planilha, resumo: dict) -> None:
         logger.error(
             "Planilha %s: %s processo(s) com pasta duplicada no L1 (%s extras).",
             planilha.id, resumo["duplicados"], resumo["pastas_extras"],
+        )
+    elif resumo.get("sem_pasta") and _cedo_demais(planilha):
+        # Cedo demais pra concluir qualquer coisa: o L1 ainda esta criando.
+        # Quem cobra de verdade e o monitor de cadastro, que roda em ciclos e
+        # ve o tempo passar — aqui so' fica o registro de que ainda nao deu.
+        registrar_evento(
+            db, secao=SECAO_CADASTRO, nivel=NIVEL_INFO, acao=ACAO_AGUARDANDO,
+            mensagem=(
+                f"Conferência logo após o envio: {resumo['com_pasta']} de "
+                f"{resumo['conferidos']} processo(s) já com pasta. O import do "
+                f"Legal One é assíncrono e costuma levar alguns minutos — o "
+                f"monitor de cadastro confirma o restante nos próximos ciclos."
+            ),
+            dados={"planilha_id": planilha.id, **resumo},
+        )
+        logger.info(
+            "Planilha %s: %s de %s ainda sem pasta %s min apos o envio — "
+            "dentro da carencia do L1.",
+            planilha.id, resumo["sem_pasta"], resumo["conferidos"],
+            _CARENCIA_L1_MIN,
         )
     elif resumo.get("sem_pasta"):
         # O import diz o que foi ENVIADO, não o que o L1 criou — e o job dele
