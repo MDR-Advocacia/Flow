@@ -497,6 +497,25 @@ async def lifespan(_: FastAPI):
             "Falha ao registrar o autorun do Tratamento Web de publicações no startup."
         )
 
+    # Coletas BB que morreram com o processo (redeploy no meio da raspagem)
+    # ficavam EM_ANDAMENTO pra sempre e o painel mentia "coleta em andamento".
+    # Fecha no boot e a cada 10 min — mesmo desenho do reaper de automations.
+    try:
+        from app.db.session import SessionLocal
+        from app.services.distribuidos_bb.coleta_service import (
+            reapear_runs_zumbis,
+            register_coleta_reaper_job,
+        )
+
+        _db_col = SessionLocal()
+        try:
+            reapear_runs_zumbis(_db_col)
+        finally:
+            _db_col.close()
+        register_coleta_reaper_job(scheduler)
+    except Exception:
+        logger.exception("Falha no reaper de coletas BB zumbis.")
+
     # Distribuídos BB (Cadastro de Processo): coleta agendada 3x/dia + planilha.
     try:
         from app.services.distribuidos_bb.schedule_worker import (
