@@ -379,18 +379,34 @@ export default function AcompanhamentoVinculosTab() {
                               diferentes e o operador confundia as duas. */}
                           {item.responsavel_sugerido_nome
                             && item.responsavel_sugerido_nome !== item.responsavel_nome && (
+                            <>
                             <Button
                               size="sm"
                               className="mt-2 h-7 w-full bg-emerald-600 hover:bg-emerald-700"
                               disabled={transferindo !== null}
-                              title={`Troca o responsável DESTE processo (${item.npj ?? item.cnj ?? "novo"}) no Legal One: ${item.responsavel_nome ?? "—"} → ${item.responsavel_sugerido_nome}`}
+                              title={item.cenario === "CENARIO_2"
+                                ? `Troca o responsável DESTE processo (${item.npj ?? item.cnj ?? "novo"}) no Legal One: ${item.responsavel_nome ?? "—"} → ${item.responsavel_sugerido_nome} (quem já conduz a parte)`
+                                : `Manda DESTE processo (${item.npj ?? item.cnj ?? "novo"}) pro rodízio da Equipe Mista. A vez agora é de ${item.responsavel_sugerido_nome}; a cada transferência a fila alterna, então os próximos vão pra outra pessoa.`}
                               onClick={(e) => { e.stopPropagation(); transferirNovo(item); }}
                             >
                               {transferindo === `n:${item.processo_id}`
                                 ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
                                 : <ArrowRightLeft className="mr-1 h-3 w-3" />}
-                              Este processo → {item.responsavel_sugerido_nome.split(" ")[0]}
+                              {/* No cenário 2 o destino é uma PESSOA (quem já conduz a
+                                  parte). No 1 é a FILA — mostrar um nome fixo aqui
+                                  mentiria: espiar não avança o rodízio, então todas as
+                                  linhas exibiriam a mesma pessoa, mas na hora do clique
+                                  a fila alterna. */}
+                              {item.cenario === "CENARIO_2"
+                                ? <>Este processo → {item.responsavel_sugerido_nome.split(" ")[0]}</>
+                                : <>Este processo → Equipe Mista</>}
                             </Button>
+                            {item.cenario !== "CENARIO_2" && (
+                              <div className="mt-1 text-[10px] text-muted-foreground">
+                                rodízio · a vez é de {item.responsavel_sugerido_nome.split(" ")[0]}
+                              </div>
+                            )}
+                            </>
                           )}
                         </TableCell>
                         <TableCell className="text-center font-semibold">{item.vinculos_qtd}</TableCell>
@@ -428,7 +444,9 @@ export default function AcompanhamentoVinculosTab() {
                                     {transferindo === `p:${item.processo_id}`
                                       ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
                                       : <ArrowRightLeft className="mr-1 h-3 w-3" />}
-                                    {pendentes === 1 ? "A pasta antiga" : `As ${pendentes} pastas antigas`} → {item.responsavel_sugerido_nome.split(" ")[0]}
+                                    {pendentes === 1 ? "A pasta antiga" : `As ${pendentes} pastas antigas`} → {item.cenario === "CENARIO_2"
+                                      ? item.responsavel_sugerido_nome.split(" ")[0]
+                                      : "Equipe Mista"}
                                   </Button>
                                 )}
                               </div>
@@ -482,9 +500,11 @@ export default function AcompanhamentoVinculosTab() {
                                                 size="sm"
                                                 className="h-7 bg-indigo-600 hover:bg-indigo-700"
                                                 disabled={transferindo !== null || !item.responsavel_sugerido_nome}
-                                                title={item.responsavel_sugerido_nome
-                                                  ? `Troca o responsável desta pasta no Legal One para ${item.responsavel_sugerido_nome}`
-                                                  : "O motor de vínculos não tem sugestão de responsável pra este processo"}
+                                                title={!item.responsavel_sugerido_nome
+                                                  ? "O motor de vínculos não tem sugestão de responsável pra este processo"
+                                                  : item.cenario === "CENARIO_2"
+                                                    ? `Troca o responsável desta pasta no Legal One para ${item.responsavel_sugerido_nome}`
+                                                    : `Manda esta pasta pro rodízio da Equipe Mista (a vez é de ${item.responsavel_sugerido_nome})`}
                                                 onClick={(e) => {
                                                   e.stopPropagation();
                                                   transferir(`v:${v.id}`, [v.id], item.responsavel_sugerido_nome);
