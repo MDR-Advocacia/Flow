@@ -317,6 +317,10 @@ def pesquisar_e_decidir(db: Session, run: Any, proc: BbProcesso, portal: Any) ->
     # Pesquisa cada parte e agrega os vínculos (dedupe por NPJ; exclui o próprio
     # processo novo, que também aparece na busca da parte).
     achados: dict[str, dict[str, Any]] = {}
+    # Polos de TODAS as pastas ativas da parte no MDR, inclusive as que o filtro
+    # de polo oposto descarta. É o que permite saber se a parte já era mista
+    # ANTES deste processo (ver `ja_era_mista` em decidir_e_persistir).
+    polos_da_parte: set[str] = set()
     for e in partes:
         try:
             res = pesquisar_vinculos_parte(
@@ -355,6 +359,12 @@ def pesquisar_e_decidir(db: Session, run: Any, proc: BbProcesso, portal: Any) ->
             # mista. Sem essa checagem o motor marcou 80 processos em 04/09/2026
             # dos quais só 16 tinham vínculo de polo oposto (95% dos 358
             # vínculos eram Réu×Réu ou Autor×Autor).
+            # O polo de TODA pasta da parte é anotado ANTES do filtro — é ele
+            # que diz se a parte já era mista antes deste processo chegar (ver
+            # `ja_era_mista` em decidir_e_persistir). Como o filtro abaixo só
+            # deixa passar o polo OPOSTO, sem anotar aqui essa informação se
+            # perderia: entre os vínculos gravados nunca há dois polos.
+            polos_da_parte.add((v.get("posicao_banco") or "").strip())
             if not _polos_opostos(proc.posicao, v.get("posicao_banco")):
                 continue
             v["_envolvido_id"] = e.id
@@ -363,11 +373,16 @@ def pesquisar_e_decidir(db: Session, run: Any, proc: BbProcesso, portal: Any) ->
             v["_numero_pessoa"] = res["numero_pessoa"]
             achados[npj_d] = v
 
-    return decidir_e_persistir(db, run, proc, achados)
+    return decidir_e_persistir(db, run, proc, achados, polos_da_parte=polos_da_parte)
 
 
 def decidir_e_persistir(
-    db: Session, run: Any, proc: BbProcesso, achados: dict[str, dict[str, Any]]
+    db: Session,
+    run: Any,
+    proc: BbProcesso,
+    achados: dict[str, dict[str, Any]],
+    *,
+    polos_da_parte: Optional[set[str]] = None,
 ) -> dict[str, Any]:
     """Metade DECISÓRIA do fluxo — recebe os vínculos já pesquisados.
 
@@ -426,7 +441,29 @@ def decidir_e_persistir(
             raw={k: v[k] for k in v if not k.startswith("_")},
         ))
 
-    if responsavel_especializado:
+    # A parte JÁ era mista antes deste processo chegar?
+    #
+    # Não basta uma pasta antiga estar com alguém da fila da equipe: pertencer à
+    # fila não quer dizer que aquela pasta foi parar lá POR SER NERC. O que
+    # define a carteira é a parte ser adversa dos DOIS lados — logo, a parte só
+    # já era mista se as pastas antigas, entre si, já tinham os dois polos.
+    #
+    # Caso que expôs o erro (K C SERVIÇOS, 04/09/2026): duas pastas antigas, as
+    # duas BB Autor, e chegou uma de Réu. O conflito nasceu AGORA. O motor dizia
+    # "parte já especializada" porque a Ingrid conduzia uma delas — e como o
+    # cenário 2 não marca transição, a outra pasta (com a Letícia) nunca foi
+    # sinalizada e ficou fora da equipe. Reação do operador: "tinham dois
+    # processos autor e chegou um réu, ele não devia estar no NERC
+    # anteriormente, ele deveria ir agora".
+    #
+    # Sem a informação (caminho do RPA, que não anota os polos), assume-se que
+    # NÃO era mista: manda tudo pra equipe com transição. É o lado seguro de
+    # errar — a transferência é idempotente e fecha sem POST o que já está no
+    # lugar certo.
+    polos = {p.strip().lower() for p in (polos_da_parte or set()) if p and p.strip()}
+    ja_era_mista = len(polos) >= 2
+
+    if responsavel_especializado and ja_era_mista:
         # CENÁRIO 2 — a parte já é conduzida pela equipe: mesmo responsável.
         cenario = VINCULO_CENARIO_2
         override = responsavel_especializado

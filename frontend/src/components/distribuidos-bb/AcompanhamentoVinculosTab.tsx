@@ -19,7 +19,11 @@ import {
 } from "@/services/distribuidos-bb";
 
 const CENARIO_META: Record<string, { label: string; cls: string }> = {
-  CENARIO_1: { label: "Novo na equipe — transição pendente", cls: "bg-amber-100 text-amber-800" },
+  // O badge diz o CENÁRIO, que é permanente — não o estado da transição, que
+  // muda. Dizer "transição pendente" aqui continuava mentindo depois de tudo
+  // transferido; quem mostra o estado é a contagem em âmbar logo abaixo, que
+  // some quando zera.
+  CENARIO_1: { label: "Entrou na equipe", cls: "bg-amber-100 text-amber-800" },
   CENARIO_2: { label: "Parte já especializada", cls: "bg-emerald-100 text-emerald-700" },
 };
 
