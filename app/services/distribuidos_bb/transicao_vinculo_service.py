@@ -244,6 +244,34 @@ def responsavel_sugerido(
     )
     if esc is None:
         return None, None
+
+    # ANTES do rodízio: o processo já está com alguém da equipe?
+    #
+    # Desde que a coleta passou a pesquisar vínculos ANTES de distribuir, o
+    # processo do cenário 1 já nasce com a advogada certa (o override entra na
+    # própria distribuição). Puxar o rodízio nesse caso mandaria a pasta pra
+    # PRÓXIMA da fila — trocando o responsável de um processo que já estava
+    # correto, e ainda gastando uma vez do rodízio à toa. Pior: as pastas
+    # antigas iriam junto pra essa outra pessoa, e a parte, que já estava
+    # inteira com uma advogada, mudaria de mão sem motivo.
+    #
+    # Quem manda é o roster: se o responsável atual está na fila da equipe, ele
+    # é o destino. O rodízio existe pra escolher alguém quando o processo veio
+    # de FORA da equipe (o passivo distribuído antes do motor funcionar).
+    if proc.responsavel_user_id:
+        na_equipe = (
+            db.query(BbResponsavel.id)
+            .filter(
+                BbResponsavel.escritorio_id == esc.id,
+                BbResponsavel.user_id == proc.responsavel_user_id,
+                BbResponsavel.ativo.is_(True),
+            )
+            .first()
+        )
+        if na_equipe is not None:
+            u = db.get(LegalOneUser, proc.responsavel_user_id)
+            return proc.responsavel_user_id, (u.name if u else None)
+
     from app.services.distribuidos_bb.distribuicao_service import (
         _proximo_responsavel_rr,
         peek_responsavel_rr,
