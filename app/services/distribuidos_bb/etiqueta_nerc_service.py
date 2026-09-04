@@ -37,11 +37,18 @@ from app.services.distribuidos_bb.log_service import registrar_evento
 
 logger = logging.getLogger("distribuidos_bb.etiqueta_nerc")
 
-# A etiqueta da casa. Cuidado: o catálogo do L1 tem três parecidas —
-# 7 "NERC" (esta, a oficial), 83 "BASE NERC" (do lote de julho, a caminho de
-# ser aposentada) e 112 "NERC-CRÉD. A RECEBER". Já houve reporte de operador
-# confundindo as duas primeiras.
-TAG_NERC_ID = 7
+# A etiqueta da casa.
+#
+# ⚠️ O ID MUDOU EM 04/09/2026. Existiam três parecidas: 7 "NERC" (antiga),
+# 83 "BASE NERC" (o lote de julho) e 112 "NERC-CRÉD. A RECEBER". A unificação
+# foi feita direto no L1 — a 7 foi EXCLUÍDA e a 83 renomeada para "NERC".
+#
+# Isso importa porque etiquetar com id inexistente é FALHA SILENCIOSA: o
+# ModalAlterarEmLote responde 200 "Success: true, inclusão iniciada" e não
+# escreve nada. Foi assim que 34 pastas voltaram sem etiqueta apesar do POST
+# aceito. Se a etiqueta for reorganizada de novo, conferir aqui primeiro —
+# o catálogo vive em GET /config/Tag/LookupTags.
+TAG_NERC_ID = 83
 TAG_NERC_NOME = "NERC"
 # Teto por POST. O modal aguenta mais (100 validado na unificação de 01/09),
 # mas o volume por coleta é pequeno e lote menor falha menos feio.
