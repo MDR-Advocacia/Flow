@@ -373,6 +373,25 @@ export default function AcompanhamentoVinculosTab() {
                               {pendentes} transição(ões) pendente(s)
                             </div>
                           )}
+                          {/* Ação sobre ESTE processo (o da linha). A ação sobre as
+                              pastas antigas fica lá embaixo, dentro do detalhe —
+                              separadas de propósito, porque mexem em coisas
+                              diferentes e o operador confundia as duas. */}
+                          {item.responsavel_sugerido_nome
+                            && item.responsavel_sugerido_nome !== item.responsavel_nome && (
+                            <Button
+                              size="sm"
+                              className="mt-2 h-7 w-full bg-emerald-600 hover:bg-emerald-700"
+                              disabled={transferindo !== null}
+                              title={`Troca o responsável DESTE processo (${item.npj ?? item.cnj ?? "novo"}) no Legal One: ${item.responsavel_nome ?? "—"} → ${item.responsavel_sugerido_nome}`}
+                              onClick={(e) => { e.stopPropagation(); transferirNovo(item); }}
+                            >
+                              {transferindo === `n:${item.processo_id}`
+                                ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                                : <ArrowRightLeft className="mr-1 h-3 w-3" />}
+                              Este processo → {item.responsavel_sugerido_nome.split(" ")[0]}
+                            </Button>
+                          )}
                         </TableCell>
                         <TableCell className="text-center font-semibold">{item.vinculos_qtd}</TableCell>
                         <TableCell className="text-xs text-muted-foreground">{fmtData(item.criado_em)}</TableCell>
@@ -382,27 +401,14 @@ export default function AcompanhamentoVinculosTab() {
                           <TableCell colSpan={8} className="p-0">
                             <div className="space-y-2 px-10 py-3">
                               <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div className="text-xs font-semibold uppercase text-muted-foreground">
-                                  Processos vinculados da parte {item.vinculos[0]?.nome_parte ? `— ${item.vinculos[0].nome_parte}` : ""}
+                                <div>
+                                  <div className="text-xs font-semibold uppercase text-muted-foreground">
+                                    Processos vinculados da parte {item.vinculos[0]?.nome_parte ? `— ${item.vinculos[0].nome_parte}` : ""}
+                                  </div>
+                                  <div className="text-[11px] text-muted-foreground">
+                                    Ações aqui mexem nas pastas ANTIGAS listadas abaixo — o processo novo tem botão próprio na linha de cima.
+                                  </div>
                                 </div>
-                                {/* O processo NOVO precisa ir pra equipe? No cenário 2
-                                    é o movimento principal — as pastas antigas já
-                                    estão com quem conduz a parte. */}
-                                {item.responsavel_sugerido_nome
-                                  && item.responsavel_sugerido_nome !== item.responsavel_nome && (
-                                  <Button
-                                    size="sm"
-                                    className="h-7 bg-emerald-600 hover:bg-emerald-700"
-                                    disabled={transferindo !== null}
-                                    title={`Troca o responsável DESTE processo no Legal One para ${item.responsavel_sugerido_nome}`}
-                                    onClick={(e) => { e.stopPropagation(); transferirNovo(item); }}
-                                  >
-                                    {transferindo === `n:${item.processo_id}`
-                                      ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                                      : <ArrowRightLeft className="mr-1 h-3 w-3" />}
-                                    Passar este processo para {item.responsavel_sugerido_nome.split(" ")[0]}
-                                  </Button>
-                                )}
                                 {/* Destino = quem o MOTOR sugere (a advogada da Equipe
                                     Mista), nunca o responsável atual do processo novo. */}
                                 {pendentes > 0 && item.responsavel_sugerido_nome && (
@@ -422,7 +428,7 @@ export default function AcompanhamentoVinculosTab() {
                                     {transferindo === `p:${item.processo_id}`
                                       ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
                                       : <ArrowRightLeft className="mr-1 h-3 w-3" />}
-                                    Transferir {pendentes} pasta(s) para {item.responsavel_sugerido_nome.split(" ")[0]}
+                                    {pendentes === 1 ? "A pasta antiga" : `As ${pendentes} pastas antigas`} → {item.responsavel_sugerido_nome.split(" ")[0]}
                                   </Button>
                                 )}
                               </div>
