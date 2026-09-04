@@ -203,6 +203,16 @@ def _persistir_envolvidos(db: Session, proc: BbProcesso, lista: list) -> int:
         ))
         existentes.add(chave)
         novos += 1
+    if novos:
+        # FLUSH OBRIGATÓRIO. A sessão do projeto é `autoflush=False`, então
+        # objetos só adicionados NÃO aparecem em query subsequente — e a
+        # pesquisa de vínculos, que roda logo abaixo no mesmo
+        # `_processar_notificacao`, procura as partes por
+        # `db.query(BbEnvolvido)`. Sem o flush ela via ZERO partes, marcava o
+        # processo como "verificado, 0 vínculos" e nem abria o navegador:
+        # 192 processos passaram assim entre 31/08 e 04/09/2026, sem um único
+        # erro no log (o alerta de vínculos zerados foi o que denunciou).
+        db.flush()
     return novos
 
 
