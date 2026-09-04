@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import {
   AlertTriangle, ArrowRightLeft, CheckCircle2, ChevronDown, ChevronRight, ExternalLink,
-  Loader2, RefreshCw, Search, Undo2, Users, XCircle,
+  FileSpreadsheet, Loader2, RefreshCw, Search, Undo2, Users, XCircle,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -13,10 +13,9 @@ import { useToast } from "@/hooks/use-toast";
 import {
   PainelVinculoItem,
   PainelVinculos,
+  exportarBaseNerc,
   listarPainelVinculos,
-  marcarTransicaoVinculo,
-  executarTransicaoVinculos,
-  transferirProcessoNovo,
+  transferirConjunto,
 } from "@/services/distribuidos-bb";
 
 const CENARIO_META: Record<string, { label: string; cls: string }> = {
@@ -115,10 +114,9 @@ export default function AcompanhamentoVinculosTab() {
   const [buscaInput, setBuscaInput] = useState("");
   const [busca, setBusca] = useState("");
   const [abertos, setAbertos] = useState<Set<number>>(new Set());
-  const [marcando, setMarcando] = useState<number | null>(null);
-  // Chave do que está sendo transferido: `v:<id>` (uma pasta) ou `p:<id>`
-  // (todas as pendentes do processo) — trava só o botão clicado.
-  const [transferindo, setTransferindo] = useState<string | null>(null);
+  // Processo cuja transferência está em curso — trava só o botão clicado.
+  const [transferindo, setTransferindo] = useState<number | null>(null);
+  const [exportando, setExportando] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -147,75 +145,61 @@ export default function AcompanhamentoVinculosTab() {
     });
   };
 
-  const marcar = async (vinculoId: number, concluida: boolean) => {
-    setMarcando(vinculoId);
+  /** Baixa a base NERC em Excel, com o MESMO recorte que estiver na tela.
+   *
+   *  Não é a "Gerar planilha" do topo da página — aquela monta o arquivo que o
+   *  import do Legal One consome pra CRIAR pasta. Esta é relatório: a carteira
+   *  como ela está, pasta a pasta. */
+  const exportar = async () => {
+    setExportando(true);
     try {
-      await marcarTransicaoVinculo(vinculoId, concluida);
-      toast({
-        title: concluida ? "Transição concluída" : "Transição reaberta",
-        description: concluida
-          ? "O processo antigo foi marcado como transferido pra equipe especializada."
-          : "O processo voltou pra lista de transições pendentes.",
+      const pastas = await exportarBaseNerc({
+        cenario: cenarioFiltro || undefined,
+        transicao: transicaoFiltro || undefined,
+        busca: busca || undefined,
       });
-      load();
+      toast({
+        title: "Planilha gerada",
+        description: `${pastas} pasta(s) da base NERC — o processo novo e as pastas vinculadas de cada parte.`,
+      });
     } catch (e) {
-      toast({ title: "Erro", description: String((e as Error).message), variant: "destructive" });
+      toast({ title: "Erro ao gerar a planilha", description: String((e as Error).message), variant: "destructive" });
     } finally {
-      setMarcando(null);
+      setExportando(false);
     }
   };
 
-  /** Executa a troca de responsável no L1 e recarrega o painel.
-   *  O destino não é escolhido aqui: o back usa o responsável que o motor de
-   *  vínculos já definiu pro processo novo. */
-  const transferir = async (chave: string, vinculoIds: number[], destino: string | null) => {
-    setTransferindo(chave);
+  /** Move o processo novo E as pastas antigas da parte pro MESMO responsável.
+   *
+   *  Um clique só, de propósito. Cada botão antigo resolvia o destino por conta
+   *  própria consumindo o rodízio: no cenário 1 a fila andava duas vezes e as
+   *  pastas da mesma parte acabavam com advogadas diferentes — exatamente o que
+   *  a carteira especializada existe pra impedir. O destino continua sendo
+   *  decisão do motor; aqui só se executa. */
+  const transferirTudo = async (item: PainelVinculoItem) => {
+    setTransferindo(item.processo_id);
     try {
-      const r = await executarTransicaoVinculos(vinculoIds);
-      const alvo = destino ? ` para ${destino}` : "";
-      if (r.falhas === 0) {
-        toast({
-          title: r.transferidos === 1 ? "Pasta transferida" : `${r.transferidos} pastas transferidas`,
-          description: `Responsável trocado no Legal One${alvo} e confirmado na releitura.`,
-        });
-      } else if (r.transferidos === 0) {
-        toast({
-          title: "Não foi possível transferir",
-          description: r.itens.find((i) => i.erro)?.erro ?? "Veja o motivo na linha da pasta.",
-          variant: "destructive",
-        });
-      } else {
-        toast({
-          title: `${r.transferidos} transferida(s), ${r.falhas} com problema`,
-          description: "As que falharam continuam pendentes, com o motivo na linha.",
-          variant: "destructive",
-        });
-      }
-      load();
-    } catch (e) {
-      toast({ title: "Erro ao transferir", description: String((e as Error).message), variant: "destructive" });
-    } finally {
-      setTransferindo(null);
-    }
-  };
-
-  /** Move o PROCESSO NOVO pro responsável que o motor apontou. */
-  const transferirNovo = async (item: PainelVinculoItem) => {
-    const chave = `n:${item.processo_id}`;
-    setTransferindo(chave);
-    try {
-      const r = await transferirProcessoNovo(item.processo_id);
+      const r = await transferirConjunto(item.processo_id);
+      const movidas = r.transferidas + r.ja_estavam;
       if (r.ok) {
         toast({
-          title: r.ja_estava ? "Já estava com o responsável certo" : "Processo transferido",
-          description: r.ja_estava
-            ? `O processo já é conduzido por ${r.para}.`
-            : `Responsável trocado no Legal One de ${r.de ?? "—"} para ${r.para}, e confirmado na releitura.`,
+          title: r.transferidas === 0
+            ? "Já estava tudo com o responsável certo"
+            : `${movidas} pasta(s) agora com ${r.para}`,
+          description: r.transferidas === 0
+            ? `As pastas da parte já são conduzidas por ${r.para}.`
+            : `Responsável trocado no Legal One e confirmado na releitura.`,
+        });
+      } else if (movidas === 0) {
+        toast({
+          title: "Não foi possível transferir",
+          description: r.erro ?? r.itens.find((i) => i.erro)?.erro ?? "O Legal One recusou a troca.",
+          variant: "destructive",
         });
       } else {
         toast({
-          title: "Não foi possível transferir",
-          description: r.erro ?? "O Legal One recusou a troca.",
+          title: `${movidas} transferida(s), ${r.falhas} com problema`,
+          description: "As que falharam continuam pendentes, com o motivo na linha.",
           variant: "destructive",
         });
       }
@@ -304,6 +288,20 @@ export default function AcompanhamentoVinculosTab() {
         <Button variant="outline" size="icon" onClick={load} disabled={loading}>
           <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
         </Button>
+        {/* Fica aqui, junto dos filtros, e não no topo da página: o que sai na
+            planilha é o recorte que os filtros ao lado definem. O botão do topo
+            é outra coisa — a planilha de migração que cria pasta no L1. */}
+        <Button
+          variant="outline"
+          onClick={exportar}
+          disabled={exportando || loading}
+          title="Baixa a carteira NERC em Excel (processo novo + pastas vinculadas), com os filtros atuais"
+        >
+          {exportando
+            ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            : <FileSpreadsheet className="mr-2 h-4 w-4" />}
+          Gerar planilha (base NERC)
+        </Button>
       </div>
 
       {/* Tabela */}
@@ -336,6 +334,13 @@ export default function AcompanhamentoVinculosTab() {
                   const aberto = abertos.has(item.processo_id);
                   const cm = CENARIO_META[item.cenario] ?? { label: item.cenario, cls: "bg-slate-100 text-slate-700" };
                   const pendentes = item.vinculos.filter((v) => v.transicao_pendente).length;
+                  // O conjunto que o botão move: as pastas antigas pendentes
+                  // mais o processo novo, quando ele tem pasta e ainda não está
+                  // com o responsável que o motor apontou.
+                  const processoEntra = !!item.l1_lawsuit_id
+                    && !!item.responsavel_sugerido_nome
+                    && item.responsavel_nome !== item.responsavel_sugerido_nome;
+                  const totalPastas = pendentes + (processoEntra ? 1 : 0);
                   return (
                     <>
                       <TableRow
@@ -373,23 +378,26 @@ export default function AcompanhamentoVinculosTab() {
                               {pendentes} transição(ões) pendente(s)
                             </div>
                           )}
-                          {/* Ação sobre ESTE processo (o da linha). A ação sobre as
-                              pastas antigas fica lá embaixo, dentro do detalhe —
-                              separadas de propósito, porque mexem em coisas
-                              diferentes e o operador confundia as duas. */}
-                          {item.responsavel_sugerido_nome
-                            && item.responsavel_sugerido_nome !== item.responsavel_nome && (
+                          {/* UM botão só. Ele leva o processo desta linha E as
+                              pastas antigas da mesma parte pro MESMO responsável
+                              — que é a regra da carteira especializada, não
+                              economia de tela. Ver `transferirTudo`. */}
+                          {item.responsavel_sugerido_nome && totalPastas > 0 && (
                             <>
                             <Button
                               size="sm"
                               className="mt-2 h-7 w-full bg-emerald-600 hover:bg-emerald-700"
                               disabled={transferindo !== null}
-                              title={item.cenario === "CENARIO_2"
-                                ? `Troca o responsável DESTE processo (${item.npj ?? item.cnj ?? "novo"}) no Legal One: ${item.responsavel_nome ?? "—"} → ${item.responsavel_sugerido_nome} (quem já conduz a parte)`
-                                : `Manda DESTE processo (${item.npj ?? item.cnj ?? "novo"}) pro rodízio da Equipe Mista. A vez agora é de ${item.responsavel_sugerido_nome}; a cada transferência a fila alterna, então os próximos vão pra outra pessoa.`}
-                              onClick={(e) => { e.stopPropagation(); transferirNovo(item); }}
+                              title={`Passa pro mesmo responsável, de uma vez: ${
+                                processoEntra ? "este processo" : "(este processo já está lá)"
+                              }${pendentes > 0 ? ` e ${pendentes} pasta(s) antiga(s) da parte` : ""}. ${
+                                item.cenario === "CENARIO_2"
+                                  ? `Destino: ${item.responsavel_sugerido_nome}, que já conduz a parte.`
+                                  : `Destino: a Equipe Mista — a vez é de ${item.responsavel_sugerido_nome}, e a fila alterna a cada transferência.`
+                              }`}
+                              onClick={(e) => { e.stopPropagation(); transferirTudo(item); }}
                             >
-                              {transferindo === `n:${item.processo_id}`
+                              {transferindo === item.processo_id
                                 ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
                                 : <ArrowRightLeft className="mr-1 h-3 w-3" />}
                               {/* No cenário 2 o destino é uma PESSOA (quem já conduz a
@@ -397,9 +405,9 @@ export default function AcompanhamentoVinculosTab() {
                                   mentiria: espiar não avança o rodízio, então todas as
                                   linhas exibiriam a mesma pessoa, mas na hora do clique
                                   a fila alterna. */}
-                              {item.cenario === "CENARIO_2"
-                                ? <>Este processo → {item.responsavel_sugerido_nome.split(" ")[0]}</>
-                                : <>Este processo → Equipe Mista</>}
+                              Tudo da parte ({totalPastas}) → {item.cenario === "CENARIO_2"
+                                ? item.responsavel_sugerido_nome.split(" ")[0]
+                                : "Equipe Mista"}
                             </Button>
                             {item.cenario !== "CENARIO_2" && (
                               <div className="mt-1 text-[10px] text-muted-foreground">
@@ -425,30 +433,6 @@ export default function AcompanhamentoVinculosTab() {
                                     Ações aqui mexem nas pastas ANTIGAS listadas abaixo — o processo novo tem botão próprio na linha de cima.
                                   </div>
                                 </div>
-                                {/* Destino = quem o MOTOR sugere (a advogada da Equipe
-                                    Mista), nunca o responsável atual do processo novo. */}
-                                {pendentes > 0 && item.responsavel_sugerido_nome && (
-                                  <Button
-                                    size="sm"
-                                    className="h-7 bg-indigo-600 hover:bg-indigo-700"
-                                    disabled={transferindo !== null}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      transferir(
-                                        `p:${item.processo_id}`,
-                                        item.vinculos.filter((x) => x.transicao_pendente).map((x) => x.id),
-                                        item.responsavel_sugerido_nome,
-                                      );
-                                    }}
-                                  >
-                                    {transferindo === `p:${item.processo_id}`
-                                      ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                                      : <ArrowRightLeft className="mr-1 h-3 w-3" />}
-                                    {pendentes === 1 ? "A pasta antiga" : `As ${pendentes} pastas antigas`} → {item.cenario === "CENARIO_2"
-                                      ? item.responsavel_sugerido_nome.split(" ")[0]
-                                      : "Equipe Mista"}
-                                  </Button>
-                                )}
                               </div>
                               <Table>
                                 <TableHeader>
@@ -494,41 +478,13 @@ export default function AcompanhamentoVinculosTab() {
                                       <TableCell>
                                         {v.transicao_pendente ? (
                                           <div className="space-y-1">
-                                            <div className="flex flex-wrap items-center gap-1">
-                                              {/* Executa de verdade: troca o responsável no L1. */}
-                                              <Button
-                                                size="sm"
-                                                className="h-7 bg-indigo-600 hover:bg-indigo-700"
-                                                disabled={transferindo !== null || !item.responsavel_sugerido_nome}
-                                                title={!item.responsavel_sugerido_nome
-                                                  ? "O motor de vínculos não tem sugestão de responsável pra este processo"
-                                                  : item.cenario === "CENARIO_2"
-                                                    ? `Troca o responsável desta pasta no Legal One para ${item.responsavel_sugerido_nome}`
-                                                    : `Manda esta pasta pro rodízio da Equipe Mista (a vez é de ${item.responsavel_sugerido_nome})`}
-                                                onClick={(e) => {
-                                                  e.stopPropagation();
-                                                  transferir(`v:${v.id}`, [v.id], item.responsavel_sugerido_nome);
-                                                }}
-                                              >
-                                                {transferindo === `v:${v.id}`
-                                                  ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                                                  : <ArrowRightLeft className="mr-1 h-3 w-3" />}
-                                                Transferir
-                                              </Button>
-                                              {/* Escape pra quem já trocou na mão no L1. */}
-                                              <Button
-                                                size="sm" variant="outline"
-                                                className="h-7 border-amber-300 text-amber-700 hover:bg-amber-50"
-                                                disabled={marcando === v.id}
-                                                title="Só marca como resolvida, sem mexer no Legal One"
-                                                onClick={(e) => { e.stopPropagation(); marcar(v.id, true); }}
-                                              >
-                                                {marcando === v.id
-                                                  ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                                                  : <CheckCircle2 className="mr-1 h-3 w-3" />}
-                                                Só marcar
-                                              </Button>
-                                            </div>
+                                            {/* Sem botão por pasta: quem move é o
+                                                botão único da linha do processo, que
+                                                leva a parte inteira pro mesmo
+                                                responsável. */}
+                                            <Badge variant="secondary" className="bg-amber-100 text-amber-700">
+                                              aguardando transferência
+                                            </Badge>
                                             {v.transicao_erro && (
                                               <div className="flex items-start gap-1 text-[11px] text-red-600">
                                                 <XCircle className="mt-px h-3 w-3 shrink-0" />
@@ -543,14 +499,6 @@ export default function AcompanhamentoVinculosTab() {
                                               {v.transicao_para_nome ? `Transferida para ${v.transicao_para_nome}` : "Concluída"}
                                               {" "}{fmtData(v.transicao_concluida_em)}
                                             </span>
-                                            <Button
-                                              size="sm" variant="ghost" className="h-6 px-1 text-muted-foreground"
-                                              disabled={marcando === v.id}
-                                              title="Reabrir a pendência (não desfaz a troca no Legal One)"
-                                              onClick={(e) => { e.stopPropagation(); marcar(v.id, false); }}
-                                            >
-                                              <Undo2 className="h-3 w-3" />
-                                            </Button>
                                           </div>
                                         ) : (
                                           <span className="text-xs text-muted-foreground">—</span>

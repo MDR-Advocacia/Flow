@@ -1008,27 +1008,30 @@ export interface VinculoItem {
   nome_parte: string | null;
   doc_parte: string | null;
 }
-export interface TransicaoResultadoItem {
-  vinculo_id: number;
-  npj: string;
+export interface TransferenciaItem {
+  /** "processo" (o que acabou de entrar) ou "vinculo" (uma pasta antiga da parte). */
+  tipo: "processo" | "vinculo";
+  /** Pasta do L1, ou NPJ/CNJ quando ela ainda não existe. */
+  rotulo: string;
   ok: boolean;
+  vinculo_id?: number;
   lawsuit_id?: number;
   de?: string | null;
   para?: string;
   erro?: string;
   ja_estava?: boolean;
 }
-export interface TransicaoResultado {
-  transferidos: number;
-  falhas: number;
-  itens: TransicaoResultadoItem[];
-}
-export interface TransferenciaProcessoResultado {
+/** Resultado da transferência do CONJUNTO da parte (processo novo + pastas
+ *  antigas). Um resultado só porque é uma operação só: a carteira
+ *  especializada existe pra manter a mesma parte com a mesma advogada. */
+export interface TransferenciaResultado {
   ok: boolean;
-  de?: string | null;
-  para?: string | null;
+  para: string | null;
+  transferidas: number;
+  ja_estavam: number;
+  falhas: number;
   erro?: string | null;
-  ja_estava?: boolean;
+  itens: TransferenciaItem[];
 }
 export interface PainelVinculoItem {
   processo_id: number;
@@ -1069,27 +1072,52 @@ export async function listarPainelVinculos(params: {
   qs.set("offset", String(params.offset ?? 0));
   return json(await apiFetch(`${BASE}/vinculos/painel?${qs.toString()}`));
 }
-export async function marcarTransicaoVinculo(vinculoId: number, concluida: boolean): Promise<{ ok: boolean }> {
-  return json(await apiFetch(`${BASE}/vinculos/${vinculoId}/transicao?concluida=${concluida}`, { method: "POST" }));
+/** Move o processo NOVO e as pastas ANTIGAS da parte pro MESMO responsável.
+ *
+ *  Chamada única de propósito. Antes eram três (processo novo, lote de pastas
+ *  antigas, uma pasta por vez) e cada uma resolvia o destino por conta própria
+ *  consumindo o rodízio — no cenário 1, dois cliques caíam em advogadas
+ *  diferentes e espalhavam a mesma parte, o oposto do que a carteira
+ *  especializada existe pra fazer.
+ *
+ *  O destino não vai no payload: é decisão do motor (cenário 2, quem já conduz
+ *  a parte; cenário 1, o próximo do rodízio). O clique só executa. */
+/** Baixa a planilha da base NERC com o recorte que estiver na tela.
+ *  Devolve quantas PASTAS entraram (processo novo + pastas vinculadas). */
+export async function exportarBaseNerc(params: {
+  cenario?: string;
+  transicao?: string;
+  busca?: string;
+}): Promise<number> {
+  const qs = new URLSearchParams();
+  if (params.cenario) qs.set("cenario", params.cenario);
+  if (params.transicao) qs.set("transicao", params.transicao);
+  if (params.busca) qs.set("busca", params.busca);
+  const res = await apiFetch(`${BASE}/vinculos/exportar?${qs.toString()}`);
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      detail = (await res.json())?.detail || detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  const total = Number(res.headers.get("X-Total") || "0");
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "base_nerc.xlsx";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return total;
 }
 
-/** Executa no Legal One a troca de responsável das pastas residuais (cenário 1).
- *  O destino não vai no payload: é o responsável que o motor definiu pro
- *  processo novo. */
-/** Transfere o PROCESSO NOVO pro responsável que o motor sugeriu (o destino
- *  não vai no payload — é decisão do motor, o clique só executa). */
-export async function transferirProcessoNovo(processoId: number): Promise<TransferenciaProcessoResultado> {
+export async function transferirConjunto(processoId: number): Promise<TransferenciaResultado> {
   return json(
     await apiFetch(`${BASE}/vinculos/processo/${processoId}/transferir`, { method: "POST" }),
-  );
-}
-
-export async function executarTransicaoVinculos(vinculoIds: number[]): Promise<TransicaoResultado> {
-  return json(
-    await apiFetch(`${BASE}/vinculos/transicao/executar`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ vinculo_ids: vinculoIds }),
-    }),
   );
 }

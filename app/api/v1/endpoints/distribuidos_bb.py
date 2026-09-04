@@ -836,6 +836,43 @@ def detalhe_planilha(
 
 # ── Acompanhamento Réu/Autor (vínculos da parte com o MDR) ───────────────────
 
+@router.get("/vinculos/exportar", summary="Exporta a base do NERC (carteira especializada) em Excel")
+def exportar_base_nerc_endpoint(
+    cenario: Optional[str] = Query(None, description="CENARIO_1 | CENARIO_2"),
+    transicao: Optional[str] = Query(None, description="'pendente' filtra quem ainda tem transição em aberto"),
+    busca: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    """Planilha da carteira NERC com o MESMO recorte que estiver na tela.
+
+    Não é a planilha de migração do topo da página (aquela alimenta o import do
+    L1): é relatório de conferência. A unidade é a PASTA — o processo novo e as
+    pastas antigas da mesma parte, que juntos formam a carteira.
+    """
+    from datetime import datetime
+
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb.export_nerc import exportar_base_nerc
+
+    buf, pastas, processos = exportar_base_nerc(
+        db, cenario=cenario, transicao=transicao, busca=busca,
+    )
+    nome = f"base_nerc_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{nome}"',
+            "X-Total": str(pastas),
+            "X-Processos": str(processos),
+            # Sem isto o front não enxerga os contadores: o navegador só expõe
+            # os headers da allowlist do CORS.
+            "Access-Control-Expose-Headers": "X-Total, X-Processos",
+        },
+    )
+
+
 @router.get("/vinculos/painel", summary="Painel Acompanhamento Réu/Autor: processos com vínculos ativos do MDR")
 def painel_vinculos(
     cenario: Optional[str] = Query(None, description="CENARIO_1 | CENARIO_2"),
@@ -1002,69 +1039,41 @@ def marcar_transicao_vinculo(
 
 
 @router.post(
-    "/vinculos/transicao/executar",
-    summary="Transfere as pastas residuais do cenário 1 pro responsável do processo novo",
-)
-def executar_transicao_vinculos(
-    payload: dict = Body(..., examples=[{"vinculo_ids": [1, 2, 3]}]),
-    db: Session = Depends(get_db),
-    current_user: LegalOneUser = Depends(auth.get_current_user),
-):
-    """Executa no Legal One a troca de responsável das pastas legado.
-
-    O destino não vem do payload de propósito: é o responsável que o motor de
-    vínculos já definiu pro processo novo (a advogada da Equipe Mista). O
-    operador confere e clica; a escolha continua sendo do motor.
-    """
-    _require_gestao(current_user)
-    from app.services.distribuidos_bb.transicao_vinculo_service import transferir_vinculos
-
-    ids = payload.get("vinculo_ids") or []
-    if not isinstance(ids, list) or not ids:
-        raise HTTPException(status_code=400, detail="Informe ao menos um vínculo em 'vinculo_ids'.")
-    if len(ids) > 50:
-        # O POST em lote do L1 aguenta mais (55 validados), mas acima disso a
-        # confirmação por releitura passaria do timeout confortável do request.
-        raise HTTPException(status_code=400, detail="No máximo 50 pastas por vez.")
-    try:
-        ids = [int(x) for x in ids]
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="'vinculo_ids' deve conter números.")
-
-    resultado = transferir_vinculos(db, ids, solicitante=current_user.name)
-    db.commit()
-    logger.info(
-        "Transição de vínculos por %s: %s transferida(s), %s falha(s).",
-        current_user.name, resultado["transferidos"], resultado["falhas"],
-    )
-    return resultado
-
-
-@router.post(
     "/vinculos/processo/{processo_id}/transferir",
-    summary="Transfere o PROCESSO NOVO pro responsável que o motor de vínculos sugeriu",
+    summary="Transfere o processo novo E as pastas antigas da parte pro mesmo responsável",
 )
-def transferir_processo_novo_endpoint(
+def transferir_conjunto_endpoint(
     processo_id: int,
     db: Session = Depends(get_db),
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
-    """Troca o responsável da pasta do processo recém-capturado.
+    """Move de uma vez tudo que é da mesma parte pro responsável que o motor apontou.
 
-    Complemento do `/vinculos/transicao/executar`, que move as pastas antigas:
-    aqui move o processo novo. O destino não vem do payload — é o que o motor
-    decidiu (cenário 2: quem já conduz a parte; cenário 1: rodízio da equipe).
+    É o único botão de transferência do painel de propósito. Antes havia três
+    (o processo novo, o lote das pastas antigas e uma pasta por vez) e cada um
+    resolvia o destino sozinho consumindo o rodízio — no cenário 1 dois cliques
+    caíam em advogadas DIFERENTES, espalhando a mesma parte, que é justamente o
+    que a carteira especializada existe pra evitar.
+
+    O destino não vem do payload: é o que o motor decidiu (cenário 2, quem já
+    conduz a parte; cenário 1, o próximo do rodízio da Equipe Mista).
     """
     _require_gestao(current_user)
-    from app.services.distribuidos_bb.transicao_vinculo_service import transferir_processo_novo
+    from app.services.distribuidos_bb.transicao_vinculo_service import transferir_conjunto
 
-    resultado = transferir_processo_novo(db, processo_id, solicitante=current_user.name)
+    resultado = transferir_conjunto(db, processo_id, solicitante=current_user.name)
     db.commit()
-    if not resultado.get("ok"):
-        logger.warning("Transferência do processo %s recusada: %s", processo_id, resultado.get("erro"))
+    if resultado.get("ok"):
+        logger.info(
+            "Conjunto do processo %s transferido pra %s por %s (%s transferida[s], %s já estava[m]).",
+            processo_id, resultado.get("para"), current_user.name,
+            resultado.get("transferidas"), resultado.get("ja_estavam"),
+        )
     else:
-        logger.info("Processo %s transferido de %s para %s por %s.",
-                    processo_id, resultado.get("de"), resultado.get("para"), current_user.name)
+        logger.warning(
+            "Transferência do conjunto do processo %s incompleta: %s falha(s), erro=%s",
+            processo_id, resultado.get("falhas"), resultado.get("erro"),
+        )
     return resultado
 
 

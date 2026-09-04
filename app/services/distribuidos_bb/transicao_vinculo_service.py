@@ -270,262 +270,218 @@ def _destino_do_processo(
     return cache[proc.id]
 
 
-def transferir_vinculos(
-    db: Session,
-    vinculo_ids: list[int],
-    *,
-    solicitante: Optional[str] = None,
+def transferir_conjunto(
+    db: Session, processo_id: int, *, solicitante: Optional[str] = None
 ) -> dict[str, Any]:
-    """Transfere as pastas residuais pro responsável do processo novo.
+    """Move o processo NOVO **e** as pastas ANTIGAS da parte pro MESMO responsável.
 
-    O destino NÃO é escolhido pelo operador: é quem os vínculos já definiram
-    como condutor do processo novo (`BbProcesso.responsavel_user_id`), que no
-    cenário 1 é a advogada da Equipe Mista. Isso mantém a decisão no motor e
-    deixa pro clique só a execução.
+    É o único caminho de transferência do painel, e isso é regra de negócio, não
+    simplificação de tela. A carteira NERC existe pra concentrar tudo de uma
+    mesma parte numa advogada só; oferecer botões separados (um pro processo
+    novo, outro pras pastas antigas) permitia mandar metade pra uma e metade pra
+    outra — exatamente o que o módulo existe pra impedir.
 
-    Devolve {transferidos, falhas, itens:[{vinculo_id, ok, ...}]}. Não commita.
+    Havia um segundo problema, pior porque silencioso: cada botão resolvia o
+    destino por conta própria com `consumir_rodizio=True`. No cenário 1 a fila
+    andava DUAS vezes e os dois cliques caíam em pessoas diferentes, mesmo com o
+    operador achando que estava juntando as pastas. Aqui o destino é resolvido
+    UMA vez, no topo, e vale pro conjunto inteiro.
+
+    Uma pasta que já está com o destino (troca feita na mão no L1, por exemplo)
+    é fechada sem POST — quem decide isso é a releitura anterior à escrita, o
+    que torna dispensável o antigo botão "só marcar".
+
+    Devolve {ok, para, transferidas, ja_estavam, falhas, itens, erro}.
+    Não commita.
     """
-    resultado: dict[str, Any] = {"transferidos": 0, "falhas": 0, "itens": []}
-    if not vinculo_ids:
-        return resultado
+    vazio: dict[str, Any] = {
+        "ok": False, "para": None, "transferidas": 0, "ja_estavam": 0,
+        "falhas": 0, "itens": [], "erro": None,
+    }
+    proc = db.get(BbProcesso, processo_id)
+    if proc is None:
+        return {**vazio, "erro": "Processo não encontrado."}
 
-    vinculos = (
-        db.query(BbVinculo).filter(BbVinculo.id.in_(list(dict.fromkeys(vinculo_ids)))).all()
-    )
+    # Uma resolução só, consumindo o rodízio uma única vez.
+    destino_id, destino_nome = responsavel_sugerido(db, proc, consumir_rodizio=True)
+    if not destino_id:
+        return {**vazio, "erro": (
+            "O motor de vínculos não tem sugestão de responsável pra este processo "
+            "(sem cenário, ou fila da Equipe Mista vazia)."
+        )}
+    external = _external_id(db, destino_id)
+    if not external:
+        return {**vazio, "para": destino_nome,
+                "erro": f"'{destino_nome}' não tem external_id no cadastro do L1."}
+
     agora = datetime.now(timezone.utc)
-    # Destino resolvido UMA vez por processo. Resolver por vínculo faria o
-    # rodízio andar a cada pasta e espalharia as pastas da MESMA parte entre
-    # advogadas diferentes — o oposto do que o módulo quer.
-    destinos: dict[int, tuple] = {}
+    res: dict[str, Any] = {
+        "ok": False, "para": destino_nome, "transferidas": 0, "ja_estavam": 0,
+        "falhas": 0, "itens": [], "erro": None,
+    }
+    # (tipo, objeto, lawsuit_id)
+    alvos: list[tuple[str, Any, int]] = []
 
-    # Agrupa por destino: um POST por advogada, não um por pasta.
-    por_destino: dict[int, list[BbVinculo]] = {}
-    for v in vinculos:
-        item: dict[str, Any] = {"vinculo_id": v.id, "npj": v.npj, "ok": False}
-        proc = db.get(BbProcesso, v.processo_id)
-        # O destino é quem o MOTOR aponta (a advogada da Equipe Mista), não o
-        # responsável atual do processo novo. Enquanto o motor rodava dentro da
-        # coleta os dois coincidiam, porque o override já era aplicado na
-        # distribuição; num processo reprocessado depois, o responsável atual é
-        # o do rodízio normal — e mandar a pasta pra ele jogaria o trabalho pra
-        # fora da equipe, que é o oposto do que o módulo existe pra fazer.
-        # (Caso real: o painel oferecia "transferir para Gabriel/Beatriz", que
-        # não estão na fila da Equipe Mista.)
-        destino_id, destino_nome_sug = _destino_do_processo(db, proc, destinos)
-        if not destino_id:
-            item["erro"] = (
-                "O motor de vínculos não tem sugestão de responsável pra este processo "
-                "(sem cenário, ou fila da Equipe Mista vazia)."
-            )
-            v.transicao_erro = item["erro"]
-            resultado["falhas"] += 1
-            resultado["itens"].append(item)
-            continue
+    # -- 1) o processo novo -------------------------------------------------
+    rot_proc = proc.l1_folder or proc.npj or proc.cnj or f"#{proc.id}"
+    if proc.responsavel_user_id == destino_id:
+        res["ja_estavam"] += 1
+        res["itens"].append({"tipo": "processo", "rotulo": rot_proc, "ok": True, "ja_estava": True})
+    elif not proc.l1_lawsuit_id:
+        res["falhas"] += 1
+        res["itens"].append({"tipo": "processo", "rotulo": rot_proc, "ok": False,
+                             "erro": "O processo ainda não tem pasta no Legal One."})
+    else:
+        alvos.append(("processo", proc, int(proc.l1_lawsuit_id)))
+
+    # -- 2) as pastas antigas com transição em aberto ------------------------
+    vincs = (
+        db.query(BbVinculo)
+        .filter(BbVinculo.processo_id == proc.id, BbVinculo.transicao_pendente.is_(True))
+        .all()
+    )
+    for v in vincs:
+        rot = v.l1_folder or v.npj or v.cnj or f"#{v.id}"
         if v.responsavel_atual_user_id == destino_id:
-            # Já está com quem deveria: fecha sem chamar o L1.
             v.transicao_pendente = False
             v.transicao_concluida_em = agora
             v.transicao_para_user_id = destino_id
             v.transicao_erro = None
-            item["ok"] = True
-            item["ja_estava"] = True
-            resultado["transferidos"] += 1
-            resultado["itens"].append(item)
+            res["ja_estavam"] += 1
+            res["itens"].append({"tipo": "vinculo", "vinculo_id": v.id, "rotulo": rot,
+                                 "ok": True, "ja_estava": True})
             continue
-        lawsuit_id = _resolver_lawsuit_id(db, v)
-        if not lawsuit_id:
-            item["erro"] = "Pasta não encontrada no Legal One (sem id e sem CNJ resolvível)."
-            v.transicao_erro = item["erro"]
-            resultado["falhas"] += 1
-            resultado["itens"].append(item)
+        lid = _resolver_lawsuit_id(db, v)
+        if not lid:
+            erro = "Pasta não encontrada no Legal One (sem id e sem CNJ resolvível)."
+            v.transicao_erro = erro
+            res["falhas"] += 1
+            res["itens"].append({"tipo": "vinculo", "vinculo_id": v.id, "rotulo": rot,
+                                 "ok": False, "erro": erro})
             continue
-        item["lawsuit_id"] = lawsuit_id
-        por_destino.setdefault(destino_id, []).append(v)
+        alvos.append(("vinculo", v, int(lid)))
 
-    for destino_id, lista in por_destino.items():
-        usuario = db.get(LegalOneUser, destino_id)
-        external = _external_id(db, destino_id)
-        nome_destino = usuario.name if usuario else str(destino_id)
-        if not external:
-            for v in lista:
-                erro = f"'{nome_destino}' não tem external_id no cadastro do L1."
-                v.transicao_erro = erro
-                resultado["falhas"] += 1
-                resultado["itens"].append({"vinculo_id": v.id, "npj": v.npj, "ok": False, "erro": erro})
+    if not alvos:
+        res["ok"] = res["falhas"] == 0 and res["ja_estavam"] > 0
+        if not res["ok"] and not res["erro"]:
+            res["erro"] = next((i.get("erro") for i in res["itens"] if i.get("erro")), None)
+        return res
+
+    # -- 3) releitura ANTES de escrever -------------------------------------
+    # Serve pra duas coisas: guardar o responsável anterior (auditoria) e tirar
+    # do POST quem já está no destino — o que substitui o antigo "só marcar",
+    # escape pra quem trocou na mão direto no L1.
+    anteriores: dict[int, tuple[Optional[int], Optional[str]]] = {}
+    restantes: list[tuple[str, Any, int]] = []
+    for tipo, obj, lid in alvos:
+        atual_id, atual_nome, _legivel = _responsavel_atual_no_l1(lid)
+        anteriores[lid] = (atual_id, atual_nome)
+        if tipo == "vinculo" and atual_nome:
+            obj.responsavel_atual_nome = atual_nome
+        if atual_id is not None and atual_id == external:
+            rot = obj.l1_folder or obj.npj or obj.cnj or f"#{obj.id}"
+            if tipo == "vinculo":
+                obj.transicao_pendente = False
+                obj.transicao_concluida_em = agora
+                obj.transicao_para_user_id = destino_id
+                obj.transicao_erro = None
+            else:
+                obj.responsavel_user_id = destino_id
+            res["ja_estavam"] += 1
+            res["itens"].append({"tipo": tipo, "rotulo": rot, "ok": True, "ja_estava": True,
+                                 "lawsuit_id": lid})
             continue
+        restantes.append((tipo, obj, lid))
 
-        ids = [int(v.l1_lawsuit_id) for v in lista]
-        # Snapshot do responsável anterior ANTES de escrever (rollback/auditoria).
-        anteriores: dict[int, tuple[Optional[int], Optional[str]]] = {}
-        for v in lista:
-            atual_id, atual_nome, _ = _responsavel_atual_no_l1(int(v.l1_lawsuit_id))
-            if atual_id is not None:
-                v.responsavel_atual_user_id = v.responsavel_atual_user_id or None
-                v.responsavel_atual_nome = atual_nome or v.responsavel_atual_nome
-            anteriores[int(v.l1_lawsuit_id)] = (atual_id, atual_nome or v.responsavel_atual_nome)
-
+    if restantes:
+        # -- 4) UM POST pro conjunto inteiro --------------------------------
+        ids = sorted({lid for _t, _o, lid in restantes})
         try:
-            _post_troca(ids, external, nome_destino)
+            _post_troca(ids, external, destino_nome)
         except TransicaoErro as exc:
-            for v in lista:
-                v.transicao_erro = str(exc)[:400]
-                resultado["falhas"] += 1
-                resultado["itens"].append(
-                    {"vinculo_id": v.id, "npj": v.npj, "ok": False, "erro": str(exc)[:200]}
-                )
+            for tipo, obj, lid in restantes:
+                rot = obj.l1_folder or obj.npj or obj.cnj or f"#{obj.id}"
+                if tipo == "vinculo":
+                    obj.transicao_erro = str(exc)[:400]
+                res["falhas"] += 1
+                res["itens"].append({"tipo": tipo, "rotulo": rot, "ok": False,
+                                     "lawsuit_id": lid, "erro": str(exc)[:200]})
             registrar_evento(
-                db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_ERRO, acao="Transição de vínculo falhou",
-                mensagem=f"O L1 recusou a troca de {len(ids)} pasta(s) pra {nome_destino}: {exc}",
+                db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_ERRO,
+                acao="Transferência do conjunto falhou",
+                mensagem=f"O L1 recusou a troca de {len(ids)} pasta(s) pra {destino_nome}: {exc}",
                 dados={"lawsuit_ids": ids, "destino": destino_id},
+                processo_id=proc.id,
             )
-            continue
+            res["erro"] = str(exc)[:300]
+            return res
 
-        # Confirmação por releitura — `Success` não basta (§6.2 do doc).
-        pendentes = {int(v.l1_lawsuit_id): v for v in lista}
+        # -- 5) confirmação por releitura — `Success` não basta -------------
         confirmados: set[int] = set()
+        pendentes_ids = {lid for _t, _o, lid in restantes}
         for espera in _ESPERAS_CONFIRMACAO:
-            if not set(pendentes) - confirmados:
+            if not pendentes_ids - confirmados:
                 break
             time.sleep(espera)
-            for lid, v in pendentes.items():
-                if lid in confirmados:
-                    continue
+            for lid in sorted(pendentes_ids - confirmados):
                 atual, _nome, legivel = _responsavel_atual_no_l1(lid)
                 if legivel and atual == external:
                     confirmados.add(lid)
-                elif not legivel and _confirmou_pela_web(lid, nome_destino):
+                elif not legivel and _confirmou_pela_web(lid, destino_nome):
                     # Recurso/incidente: 404 no REST, confere pela web.
                     confirmados.add(lid)
 
-        for lid, v in pendentes.items():
-            anterior_id, anterior_nome = anteriores.get(lid, (None, None))
+        for tipo, obj, lid in restantes:
+            rot = obj.l1_folder or obj.npj or obj.cnj or f"#{obj.id}"
+            _ant_id, ant_nome = anteriores.get(lid, (None, None))
             if lid in confirmados:
-                v.transicao_pendente = False
-                v.transicao_concluida_em = agora
-                v.transicao_para_user_id = destino_id
-                v.transicao_erro = None
-                resultado["transferidos"] += 1
-                resultado["itens"].append(
-                    {"vinculo_id": v.id, "npj": v.npj, "ok": True, "lawsuit_id": lid,
-                     "de": anterior_nome, "para": nome_destino}
-                )
-                registrar_evento(
-                    db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_SUCESSO,
-                    acao="Transição de vínculo executada",
-                    mensagem=(
-                        f"Pasta {v.l1_folder or v.npj} transferida de "
-                        f"{anterior_nome or '—'} para {nome_destino}"
-                        + (f" por {solicitante}." if solicitante else ".")
-                    ),
-                    dados={"lawsuit_id": lid, "de": anterior_id, "para": destino_id,
-                           "vinculo_id": v.id},
-                    processo_id=v.processo_id,
-                )
+                if tipo == "vinculo":
+                    obj.transicao_pendente = False
+                    obj.transicao_concluida_em = agora
+                    obj.transicao_para_user_id = destino_id
+                    obj.transicao_erro = None
+                else:
+                    obj.responsavel_user_id = destino_id
+                res["transferidas"] += 1
+                res["itens"].append({"tipo": tipo, "rotulo": rot, "ok": True,
+                                     "lawsuit_id": lid, "de": ant_nome, "para": destino_nome})
             else:
-                erro = (
-                    "O L1 aceitou o pedido mas a pasta ainda não refletiu a troca "
-                    "(a fila do L1 pode demorar). Confira no L1 e tente de novo."
-                )
-                v.transicao_erro = erro
-                resultado["falhas"] += 1
-                resultado["itens"].append(
-                    {"vinculo_id": v.id, "npj": v.npj, "ok": False, "lawsuit_id": lid, "erro": erro}
-                )
-                registrar_evento(
-                    db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_AVISO,
-                    acao="Transição de vínculo não confirmada",
-                    mensagem=(
-                        f"POST aceito para a pasta {v.l1_folder or v.npj} → {nome_destino}, "
-                        "mas a releitura ainda mostra o responsável antigo."
-                    ),
-                    dados={"lawsuit_id": lid, "para": destino_id, "vinculo_id": v.id},
-                    processo_id=v.processo_id,
-                )
+                erro = ("O L1 aceitou o pedido mas a pasta ainda não refletiu a troca "
+                        "(a fila do L1 pode demorar). Confira no L1 e tente de novo.")
+                if tipo == "vinculo":
+                    obj.transicao_erro = erro
+                res["falhas"] += 1
+                res["itens"].append({"tipo": tipo, "rotulo": rot, "ok": False,
+                                     "lawsuit_id": lid, "erro": erro})
 
-    return resultado
+    # -- 6) um evento só pro conjunto ---------------------------------------
+    from app.models.distribuidos_bb import VINCULO_CENARIO_2
 
-
-def transferir_processo_novo(
-    db: Session, processo_id: int, *, solicitante: Optional[str] = None
-) -> dict[str, Any]:
-    """Troca no L1 o responsável da pasta do processo NOVO, pro que o motor sugeriu.
-
-    Complementa a transição das pastas residuais: aquela move o passado, esta
-    move o processo que acabou de entrar. Mesmo método
-    (`ModalChangeInvolvedInBatch`) e a mesma disciplina de confirmar relendo.
-
-    Devolve {"ok", "de", "para", "erro"}. Não commita.
-    """
-    proc = db.get(BbProcesso, processo_id)
-    if proc is None:
-        return {"ok": False, "erro": "Processo não encontrado."}
-
-    destino_id, destino_nome = responsavel_sugerido(db, proc, consumir_rodizio=True)
-    if not destino_id:
-        return {"ok": False, "erro": "O motor de vínculos não tem sugestão de responsável pra este processo."}
-    if proc.responsavel_user_id == destino_id:
-        return {"ok": True, "ja_estava": True, "para": destino_nome,
-                "de": destino_nome, "erro": None}
-
-    lawsuit_id = proc.l1_lawsuit_id
-    if not lawsuit_id:
-        return {"ok": False, "erro": "O processo ainda não tem pasta no Legal One."}
-
-    external = _external_id(db, destino_id)
-    if not external:
-        return {"ok": False, "erro": f"'{destino_nome}' não tem external_id no cadastro do L1."}
-
-    anterior_id = proc.responsavel_user_id
-    u_ant = db.get(LegalOneUser, anterior_id) if anterior_id else None
-    anterior_nome = (u_ant.name if u_ant else None)
-
-    try:
-        _post_troca([int(lawsuit_id)], external, destino_nome)
-    except TransicaoErro as exc:
+    total_ok = res["transferidas"] + res["ja_estavam"]
+    res["ok"] = res["falhas"] == 0 and total_ok > 0
+    motivo = ("mesma condutora da parte" if proc.vinculo_cenario == VINCULO_CENARIO_2
+              else "rodízio da Equipe Mista")
+    if res["falhas"] == 0:
         registrar_evento(
-            db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_ERRO,
-            acao="Transferência do processo novo falhou",
-            mensagem=f"O L1 recusou a troca da pasta {proc.l1_folder or lawsuit_id}: {exc}",
+            db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_SUCESSO,
+            acao="Conjunto da parte transferido",
+            mensagem=(
+                f"{total_ok} pasta(s) da parte agora sob {destino_nome} ({motivo}): "
+                f"o processo novo e {len(vincs)} pasta(s) antiga(s)"
+                + (f", por {solicitante}." if solicitante else ".")
+            ),
+            dados={"para": destino_id, "pastas": total_ok, "cenario": proc.vinculo_cenario},
             processo_id=proc.id,
         )
-        return {"ok": False, "erro": str(exc)[:300], "de": anterior_nome, "para": destino_nome}
-
-    # Confirmação por releitura — a fila do L1 é assíncrona (§6.2 do doc).
-    confirmado = False
-    for espera in _ESPERAS_CONFIRMACAO:
-        time.sleep(espera)
-        atual, _nome, legivel = _responsavel_atual_no_l1(int(lawsuit_id))
-        if legivel and atual == external:
-            confirmado = True
-            break
-        if not legivel and _confirmou_pela_web(int(lawsuit_id), destino_nome):
-            confirmado = True
-            break
-
-    if not confirmado:
-        erro = ("O L1 aceitou o pedido mas a pasta ainda não refletiu a troca "
-                "(a fila do L1 pode demorar). Confira no L1 e tente de novo.")
+    else:
         registrar_evento(
             db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_AVISO,
-            acao="Transferência do processo novo não confirmada",
-            mensagem=f"POST aceito para a pasta {proc.l1_folder or lawsuit_id} → {destino_nome}, "
-                     "mas a releitura ainda mostra o responsável antigo.",
+            acao="Conjunto da parte transferido em parte",
+            mensagem=(
+                f"{total_ok} pasta(s) foram pra {destino_nome} e {res['falhas']} não. "
+                "As que faltaram continuam pendentes, com o motivo na linha."
+            ),
+            dados={"para": destino_id, "ok": total_ok, "falhas": res["falhas"]},
             processo_id=proc.id,
         )
-        return {"ok": False, "erro": erro, "de": anterior_nome, "para": destino_nome}
-
-    proc.responsavel_user_id = destino_id
-    registrar_evento(
-        db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_SUCESSO,
-        acao="Processo novo transferido pra equipe especializada",
-        mensagem=(
-            f"Pasta {proc.l1_folder or lawsuit_id} transferida de "
-            f"{anterior_nome or '—'} para {destino_nome} "
-            f"({'mesma condutora da parte' if proc.vinculo_cenario == 'CENARIO_2' else 'rodízio da Equipe Mista'})"
-            + (f" por {solicitante}." if solicitante else ".")
-        ),
-        dados={"lawsuit_id": lawsuit_id, "de": anterior_id, "para": destino_id,
-               "cenario": proc.vinculo_cenario},
-        processo_id=proc.id,
-    )
-    return {"ok": True, "de": anterior_nome, "para": destino_nome, "erro": None}
+    return res

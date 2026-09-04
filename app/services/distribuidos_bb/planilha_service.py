@@ -19,7 +19,9 @@ from zoneinfo import ZoneInfo
 import openpyxl
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.distribuidos_bb import (
+    CLIENTE_BB,
     L1_PASTA_FECHADAS,
     L1_PASTA_LABEL,
     NIVEL_AVISO,
@@ -432,6 +434,51 @@ def gerar_e_persistir(
     if not elegiveis:
         return None
     processos = elegiveis
+
+    # TRAVA 1.5: processo do BB NÃO vai pro L1 antes de a identificação de
+    # vínculos ter rodado.
+    #
+    # Motivo (decisão do operador, 04/09/2026): quando o processo tem vínculo, o
+    # responsável certo é a advogada da equipe especializada — e essa decisão só
+    # existe DEPOIS da pesquisa. Cadastrar antes cria a pasta no L1 com o
+    # responsável do rodízio comum, e aí só resta a transferência manual pelo
+    # painel. Foi o que aconteceu com 2026/0127095-000 (SEVEN IMPORTAÇÃO):
+    # coletado 03/09 20:14 com o motor ainda quebrado, nasceu com o Gabriel, e o
+    # vínculo só apareceu no reprocessamento de 04/09 08:04 — pasta já criada.
+    #
+    # No fluxo normal a coleta já pesquisa ANTES de distribuir, então esta trava
+    # não segura nada (medido em 04/09: 196 de 196 processos do BB de 01→04/09
+    # com pesquisa feita). Ela existe pro caminho de exceção — o `except`
+    # best-effort de `_processar_notificacao`, que deixa o processo seguir o
+    # rodízio comum quando o portal do BB cai no meio da varredura.
+    #
+    # Quem fica retido continua no pool como NOVO e entra na próxima passagem,
+    # depois que a pesquisa rodar. A válvula de escape é a planilha manual por
+    # `processo_ids`: ali o operador escolheu processo a processo, e a escolha
+    # dele prevalece sobre a trava.
+    if processo_ids is None and settings.distribuidos_bb_vinculos_ativo:
+        retidos = [
+            p for p in processos
+            if p.cliente == CLIENTE_BB and p.vinculos_verificado_em is None
+        ]
+        if retidos:
+            processos = [p for p in processos if p not in retidos]
+            registrar_evento(
+                db,
+                secao=SECAO_PLANILHA,
+                nivel=NIVEL_AVISO,
+                acao="Sem identificação de vínculos — fora da planilha",
+                mensagem=(
+                    f"{len(retidos)} processo(s) do BB ficaram FORA da planilha porque a "
+                    "pesquisa de vínculos ainda não rodou neles. Cadastrar agora criaria a "
+                    "pasta com o responsável do rodízio comum, mesmo que a parte seja da "
+                    "carteira especializada. Eles seguem no pool e entram assim que a "
+                    "identificação rodar."
+                ),
+                dados={"quantidade": len(retidos), "processos": [p.id for p in retidos][:50]},
+            )
+            if not processos:
+                return None
 
     # TRAVA 2: não recadastrar CNJ que JÁ TEM pasta no L1 (do mesmo cliente).
     # As duas camadas anteriores (aba JÁ CADASTRADO / fingerprint local) só
