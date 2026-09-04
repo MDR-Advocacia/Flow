@@ -403,7 +403,9 @@ export default function AcompanhamentoVinculosTab() {
                                     Passar este processo para {item.responsavel_sugerido_nome.split(" ")[0]}
                                   </Button>
                                 )}
-                                {pendentes > 0 && item.responsavel_nome && (
+                                {/* Destino = quem o MOTOR sugere (a advogada da Equipe
+                                    Mista), nunca o responsável atual do processo novo. */}
+                                {pendentes > 0 && item.responsavel_sugerido_nome && (
                                   <Button
                                     size="sm"
                                     className="h-7 bg-indigo-600 hover:bg-indigo-700"
@@ -413,14 +415,14 @@ export default function AcompanhamentoVinculosTab() {
                                       transferir(
                                         `p:${item.processo_id}`,
                                         item.vinculos.filter((x) => x.transicao_pendente).map((x) => x.id),
-                                        item.responsavel_nome,
+                                        item.responsavel_sugerido_nome,
                                       );
                                     }}
                                   >
                                     {transferindo === `p:${item.processo_id}`
                                       ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
                                       : <ArrowRightLeft className="mr-1 h-3 w-3" />}
-                                    Transferir {pendentes} pasta(s) para {item.responsavel_nome.split(" ")[0]}
+                                    Transferir {pendentes} pasta(s) para {item.responsavel_sugerido_nome.split(" ")[0]}
                                   </Button>
                                 )}
                               </div>
@@ -473,13 +475,13 @@ export default function AcompanhamentoVinculosTab() {
                                               <Button
                                                 size="sm"
                                                 className="h-7 bg-indigo-600 hover:bg-indigo-700"
-                                                disabled={transferindo !== null || !item.responsavel_nome}
-                                                title={item.responsavel_nome
-                                                  ? `Troca o responsável desta pasta no Legal One para ${item.responsavel_nome}`
-                                                  : "O processo novo ainda não tem responsável definido"}
+                                                disabled={transferindo !== null || !item.responsavel_sugerido_nome}
+                                                title={item.responsavel_sugerido_nome
+                                                  ? `Troca o responsável desta pasta no Legal One para ${item.responsavel_sugerido_nome}`
+                                                  : "O motor de vínculos não tem sugestão de responsável pra este processo"}
                                                 onClick={(e) => {
                                                   e.stopPropagation();
-                                                  transferir(`v:${v.id}`, [v.id], item.responsavel_nome);
+                                                  transferir(`v:${v.id}`, [v.id], item.responsavel_sugerido_nome);
                                                 }}
                                               >
                                                 {transferindo === `v:${v.id}`

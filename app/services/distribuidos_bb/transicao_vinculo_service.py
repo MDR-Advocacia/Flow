@@ -195,6 +195,81 @@ def _post_troca(lawsuit_ids: list[int], external_id: int, nome_destino: str) -> 
         raise TransicaoErro(f"L1 recusou a troca: {str(corpo.get('Message'))[:200]}")
 
 
+def responsavel_sugerido(
+    db: Session, proc: BbProcesso, *, consumir_rodizio: bool = False
+) -> tuple[Optional[int], Optional[str]]:
+    """Pra quem o motor de vínculos diz que o processo NOVO deveria ir.
+
+    Cenário 2: o MESMO responsável que já conduz a parte (vem do vínculo
+    marcado `na_equipe_mista`) — é o ponto do módulo, não repartir a mesma
+    parte entre advogados. Determinístico: consultar dez vezes dá o mesmo nome.
+    Cenário 1: o próximo do rodízio da Equipe Mista.
+
+    `consumir_rodizio` decide o que fazer com a fila no cenário 1:
+      - False (default) — só ESPIA (`peek_responsavel_rr`). É o que o painel
+        usa pra mostrar o nome no botão. Espiar não pode mexer na fila, senão
+        cada refresh da tela rouba a vez de alguém;
+      - True — AVANÇA de verdade. Só no clique que executa a transferência.
+    Sem essa separação o painel prometia um nome e o POST mandava pra outro
+    (o rodízio andava entre a exibição e a execução).
+
+    Devolve (user_id, nome) ou (None, None) quando não há sugestão — processo
+    sem cenário, ou fila da equipe vazia.
+    """
+    from app.models.distribuidos_bb import EQUIPE_MISTA_NOME, VINCULO_CENARIO_2, BbEscritorio, BbResponsavel
+
+    if not proc.vinculo_cenario:
+        return None, None
+
+    if proc.vinculo_cenario == VINCULO_CENARIO_2:
+        vinc = (
+            db.query(BbVinculo)
+            .filter(
+                BbVinculo.processo_id == proc.id,
+                BbVinculo.na_equipe_mista.is_(True),
+                BbVinculo.responsavel_atual_user_id.isnot(None),
+            )
+            .first()
+        )
+        if vinc is None:
+            return None, None
+        u = db.get(LegalOneUser, vinc.responsavel_atual_user_id)
+        return vinc.responsavel_atual_user_id, (u.name if u else vinc.responsavel_atual_nome)
+
+    # Cenário 1: rodízio da fila especializada.
+    esc = (
+        db.query(BbEscritorio)
+        .filter(BbEscritorio.nome == EQUIPE_MISTA_NOME, BbEscritorio.ativo.is_(True))
+        .first()
+    )
+    if esc is None:
+        return None, None
+    from app.services.distribuidos_bb.distribuicao_service import (
+        _proximo_responsavel_rr,
+        peek_responsavel_rr,
+    )
+
+    uid = _proximo_responsavel_rr(db, esc) if consumir_rodizio else peek_responsavel_rr(db, esc)
+    if not uid:
+        return None, None
+    u = db.get(LegalOneUser, uid)
+    return uid, (u.name if u else None)
+
+
+def _destino_do_processo(
+    db: Session, proc: Optional[BbProcesso], cache: dict
+) -> tuple[Optional[int], Optional[str]]:
+    """Destino das pastas de UM processo, calculado uma única vez.
+
+    O rodízio do cenário 1 só pode avançar uma vez por processo, não por pasta.
+    """
+    if proc is None:
+        return None, None
+    if proc.id not in cache:
+        cache[proc.id] = responsavel_sugerido(db, proc, consumir_rodizio=True)
+    return cache[proc.id]
+
+
 def transferir_vinculos(
     db: Session,
     vinculo_ids: list[int],
@@ -218,15 +293,30 @@ def transferir_vinculos(
         db.query(BbVinculo).filter(BbVinculo.id.in_(list(dict.fromkeys(vinculo_ids)))).all()
     )
     agora = datetime.now(timezone.utc)
+    # Destino resolvido UMA vez por processo. Resolver por vínculo faria o
+    # rodízio andar a cada pasta e espalharia as pastas da MESMA parte entre
+    # advogadas diferentes — o oposto do que o módulo quer.
+    destinos: dict[int, tuple] = {}
 
     # Agrupa por destino: um POST por advogada, não um por pasta.
     por_destino: dict[int, list[BbVinculo]] = {}
     for v in vinculos:
         item: dict[str, Any] = {"vinculo_id": v.id, "npj": v.npj, "ok": False}
         proc = db.get(BbProcesso, v.processo_id)
-        destino_id = proc.responsavel_user_id if proc else None
+        # O destino é quem o MOTOR aponta (a advogada da Equipe Mista), não o
+        # responsável atual do processo novo. Enquanto o motor rodava dentro da
+        # coleta os dois coincidiam, porque o override já era aplicado na
+        # distribuição; num processo reprocessado depois, o responsável atual é
+        # o do rodízio normal — e mandar a pasta pra ele jogaria o trabalho pra
+        # fora da equipe, que é o oposto do que o módulo existe pra fazer.
+        # (Caso real: o painel oferecia "transferir para Gabriel/Beatriz", que
+        # não estão na fila da Equipe Mista.)
+        destino_id, destino_nome_sug = _destino_do_processo(db, proc, destinos)
         if not destino_id:
-            item["erro"] = "O processo novo ainda não tem responsável definido."
+            item["erro"] = (
+                "O motor de vínculos não tem sugestão de responsável pra este processo "
+                "(sem cenário, ou fila da Equipe Mista vazia)."
+            )
             v.transicao_erro = item["erro"]
             resultado["falhas"] += 1
             resultado["itens"].append(item)
@@ -355,54 +445,6 @@ def transferir_vinculos(
     return resultado
 
 
-def responsavel_sugerido(db: Session, proc: BbProcesso) -> tuple[Optional[int], Optional[str]]:
-    """Pra quem o motor de vínculos diz que o processo NOVO deveria ir.
-
-    Cenário 2: o MESMO responsável que já conduz a parte (vem do vínculo
-    marcado `na_equipe_mista`) — é o ponto do módulo, não repartir a mesma
-    parte entre advogados.
-    Cenário 1: o próximo do rodízio da Equipe Mista.
-
-    Devolve (user_id, nome) ou (None, None) quando não há sugestão — processo
-    sem cenário, ou fila da equipe vazia.
-    """
-    from app.models.distribuidos_bb import EQUIPE_MISTA_NOME, VINCULO_CENARIO_2, BbEscritorio, BbResponsavel
-
-    if not proc.vinculo_cenario:
-        return None, None
-
-    if proc.vinculo_cenario == VINCULO_CENARIO_2:
-        vinc = (
-            db.query(BbVinculo)
-            .filter(
-                BbVinculo.processo_id == proc.id,
-                BbVinculo.na_equipe_mista.is_(True),
-                BbVinculo.responsavel_atual_user_id.isnot(None),
-            )
-            .first()
-        )
-        if vinc is None:
-            return None, None
-        u = db.get(LegalOneUser, vinc.responsavel_atual_user_id)
-        return vinc.responsavel_atual_user_id, (u.name if u else vinc.responsavel_atual_nome)
-
-    # Cenário 1: rodízio da fila especializada.
-    esc = (
-        db.query(BbEscritorio)
-        .filter(BbEscritorio.nome == EQUIPE_MISTA_NOME, BbEscritorio.ativo.is_(True))
-        .first()
-    )
-    if esc is None:
-        return None, None
-    from app.services.distribuidos_bb.distribuicao_service import _proximo_responsavel_rr
-
-    uid = _proximo_responsavel_rr(db, esc)
-    if not uid:
-        return None, None
-    u = db.get(LegalOneUser, uid)
-    return uid, (u.name if u else None)
-
-
 def transferir_processo_novo(
     db: Session, processo_id: int, *, solicitante: Optional[str] = None
 ) -> dict[str, Any]:
@@ -418,7 +460,7 @@ def transferir_processo_novo(
     if proc is None:
         return {"ok": False, "erro": "Processo não encontrado."}
 
-    destino_id, destino_nome = responsavel_sugerido(db, proc)
+    destino_id, destino_nome = responsavel_sugerido(db, proc, consumir_rodizio=True)
     if not destino_id:
         return {"ok": False, "erro": "O motor de vínculos não tem sugestão de responsável pra este processo."}
     if proc.responsavel_user_id == destino_id:
