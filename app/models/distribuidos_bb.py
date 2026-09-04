@@ -400,6 +400,9 @@ class BbProcesso(Base):
     # Vínculos da parte (processos em comum com o MDR no portal BB)
     vinculo_cenario = Column(String(12), nullable=True, index=True)  # CENARIO_1 | CENARIO_2 | None
     vinculos_qtd = Column(Integer, nullable=False, server_default="0")
+    # Quando a pasta recebeu a etiqueta NERC no L1 (processo com vínculo é
+    # carteira NERC). Nulo = ainda não etiquetada; a rotina só pega esses.
+    nerc_etiquetado_em = Column(DateTime(timezone=True), nullable=True)
     vinculos_verificado_em = Column(DateTime(timezone=True), nullable=True)
 
     # Enriquecimento DataJud (Ativos): a planilha é a fonte primária; o DataJud
@@ -513,6 +516,8 @@ class BbVinculo(Base):
         Integer, ForeignKey("legal_one_users.id", ondelete="SET NULL"), nullable=True,
     )
     transicao_erro = Column(Text, nullable=True)
+    # Etiqueta NERC da pasta ANTIGA (o vinculado também é carteira NERC).
+    nerc_etiquetado_em = Column(DateTime(timezone=True), nullable=True)
 
     raw = Column(jsonb(), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

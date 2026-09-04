@@ -163,6 +163,19 @@ def verificar_pendentes(db, *, client=None, limite: int = 300) -> dict:
                     pl.subido_em = agora
         db.commit()
 
+    if confirmados:
+        # É aqui que a pasta do L1 ganha id — e só depois disso dá pra etiquetar
+        # o processo novo como NERC (na coleta ele ainda não tinha pasta).
+        # Best-effort: falha na etiqueta não pode atrapalhar a confirmação.
+        try:
+            from app.services.distribuidos_bb.etiqueta_nerc_service import etiquetar_nerc_pendentes
+
+            etiquetar_nerc_pendentes(db)
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            logger.warning("Etiqueta NERC: falha ao etiquetar após o cadastro (ignorado).", exc_info=True)
+
     logger.info(
         "Monitor cadastro L1: %s verificado(s), %s confirmado(s), %s sem "
         "identificador (%s do tombamento, cota %s).",

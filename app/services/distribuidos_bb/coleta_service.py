@@ -743,6 +743,15 @@ def executar_coleta(
             limpar_cache_l1()
         except Exception:  # noqa: BLE001
             logger.warning("Vínculos: falha ao fechar o navegador (ignorado).", exc_info=True)
+        try:
+            # Processo com vínculo é carteira NERC: etiqueta no L1 o que já tem
+            # pasta. Idempotente — o que ainda não foi cadastrado entra na
+            # próxima passagem (aqui ou no monitor de cadastro).
+            from app.services.distribuidos_bb.etiqueta_nerc_service import etiquetar_nerc_pendentes
+
+            etiquetar_nerc_pendentes(db)
+        except Exception:  # noqa: BLE001
+            logger.warning("Etiqueta NERC: falha ao etiquetar (ignorado).", exc_info=True)
         db.commit()
 
     return run
