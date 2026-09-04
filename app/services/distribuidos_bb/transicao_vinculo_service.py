@@ -118,19 +118,15 @@ def _confirmou_pela_web(lawsuit_id: int, nome_destino: str) -> bool:
     """
     import html as _html
 
-    from app.services.prazos_iniciais.legacy_task_http_cancellation_service import (
-        LegacyTaskHttpCancellationService,
-    )
+    from app.services.distribuidos_bb.l1_web import get_l1_web
 
-    svc = LegacyTaskHttpCancellationService()
-    resposta = svc._http.get(
-        f"{svc._web_base_url()}/processos/Processos/details/{lawsuit_id}",
-        cookies=svc._ensure_session(),
-        timeout=60,
-    )
-    if resposta.status_code != 200:
+    # Pelo helper: com a sessão morta esta leitura voltaria a página de LOGIN
+    # com HTTP 200, o nome não seria achado e a transferência seria reportada
+    # como "não confirmada" mesmo tendo funcionado.
+    pagina = get_l1_web(f"/processos/Processos/details/{lawsuit_id}", timeout=60)
+    if not pagina:
         return False
-    texto = _html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", resposta.text)))
+    texto = _html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", pagina)))
     achado = re.search(r"Respons[áa]vel principal:\s*(.{3,80}?)\s+(?:[ÓO]rg[ãa]o|A[çc][ãa]o|Status)", texto)
     return bool(achado) and _norm(achado.group(1)) == _norm(nome_destino)
 
@@ -144,11 +140,8 @@ def _norm(valor: Optional[str]) -> str:
 
 def _post_troca(lawsuit_ids: list[int], external_id: int, nome_destino: str) -> None:
     """O POST em lote. Levanta TransicaoErro quando o L1 não aceita."""
-    from app.services.prazos_iniciais.legacy_task_http_cancellation_service import (
-        LegacyTaskHttpCancellationService,
-    )
+    from app.services.distribuidos_bb.l1_web import post_l1_web
 
-    svc = LegacyTaskHttpCancellationService()
     payload = {
         "InvolvementStatusId": "",
         "InvolvementMainStatusId": "1",   # alvo é o envolvido principal
@@ -174,16 +167,14 @@ def _post_troca(lawsuit_ids: list[int], external_id: int, nome_destino: str) -> 
             "SearchModelSerialized": "{}",
         },
     }
-    resposta = svc._http.post(
-        f"{svc._web_base_url()}/processos/processos/ModalChangeInvolvedInBatch",
+    # Pelo helper: sessão morta volta 403 mudo ("You do not have permission"),
+    # e aí ele reloga e repete. Sem isso a correção em lote de 17 processos
+    # falhou INTEIRA em 04/09/2026, com uma sessão de 23 minutos.
+    resposta = post_l1_web(
+        "/processos/processos/ModalChangeInvolvedInBatch",
         json=payload,
-        cookies=svc._ensure_session(),
         timeout=180,
-        headers={
-            "X-Requested-With": "XMLHttpRequest",
-            "Content-Type": "application/json; charset=UTF-8",
-            "Accept": "*/*",
-        },
+        headers={"Content-Type": "application/json; charset=UTF-8"},
     )
     if resposta.status_code != 200:
         raise TransicaoErro(f"L1 respondeu HTTP {resposta.status_code} no POST da troca.")

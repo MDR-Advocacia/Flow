@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -57,11 +57,8 @@ LOTE = 100
 
 def _etiquetar_no_l1(lawsuit_ids: list[int]) -> None:
     """POST em lote da etiqueta. Levanta em caso de recusa do L1."""
-    from app.services.prazos_iniciais.legacy_task_http_cancellation_service import (
-        LegacyTaskHttpCancellationService,
-    )
+    from app.services.distribuidos_bb.l1_web import post_l1_web
 
-    svc = LegacyTaskHttpCancellationService()
     body = [
         ("RequirirNegociacaoDeHonorarioPreenchida", "False"),
         ("ShowJustificationModal", "False"),
@@ -77,12 +74,10 @@ def _etiquetar_no_l1(lawsuit_ids: list[int]) -> None:
         ("selectionViewModel[SearchModelSerialized]", "{}"),
     ] + [("selectionViewModel[SelectedIds][]", str(x)) for x in sorted(lawsuit_ids)]
 
-    resposta = svc._http.post(
-        f"{svc._web_base_url()}/processos/Processos/ModalAlterarEmLote",
-        data=body,
-        cookies=svc._ensure_session(),
-        timeout=180,
-        headers={"X-Requested-With": "XMLHttpRequest", "Accept": "*/*"},
+    # Mesmo helper da troca: a etiquetagem morreu com 403 no mesmo minuto em
+    # que a transferência morreu (04/09/2026) — é a sessão, não o endpoint.
+    resposta = post_l1_web(
+        "/processos/Processos/ModalAlterarEmLote", data=body, timeout=180,
     )
     if resposta.status_code != 200:
         raise RuntimeError(f"L1 respondeu HTTP {resposta.status_code} na etiquetagem.")
