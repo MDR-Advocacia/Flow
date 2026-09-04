@@ -349,9 +349,34 @@ def fechar_browser() -> None:
 # ── as 3 chamadas do PAJ ─────────────────────────────────────────────
 
 
+def normalizar_documento(doc: Optional[str]) -> Optional[str]:
+    """Repõe os zeros à esquerda que o portal come em CPF/CNPJ.
+
+    A capa do NPJ devolve documento como NÚMERO, então CPF que começa com
+    zero chega curto: `9695010210` (10) é `09695010210`, `996825401` (9) é
+    `00996825401`. Medido em 04/09/2026: 140 dos 676 documentos capturados
+    (21%) vinham assim, e como a pesquisa só aceita 11 ou 14 dígitos, essas
+    partes eram descartadas antes de qualquer consulta ao BB.
+
+    Regra por TAMANHO, nunca por valor: até 11 vira CPF, de 12 a 14 vira
+    CNPJ. Acima de 14 é lixo e devolve None (melhor não pesquisar do que
+    pesquisar errado).
+    """
+    digs = apenas_digitos(doc)
+    if not digs:
+        return None
+    if len(digs) <= 11:
+        return digs.zfill(11)
+    if len(digs) <= 14:
+        return digs.zfill(14)
+    return None
+
+
 def _resolver_numero_pessoa(browser: VinculosBrowser, doc: str) -> Optional[int]:
     """Passo 1: documento (CPF/CNPJ) → numeroPessoa do cadastro do BB."""
-    digs = apenas_digitos(doc)
+    digs = normalizar_documento(doc)
+    if not digs:
+        return None
     if len(digs) == 14:
         rota = f"cnpj-alfanumerico/{digs}"
     elif len(digs) == 11:
