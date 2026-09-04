@@ -919,6 +919,18 @@ def painel_vinculos(
             "doc_parte": v.doc_parte,
         }
 
+    # Sugestão de responsável por processo (cenário 2 = quem já conduz a parte;
+    # cenário 1 = próximo do rodízio da Equipe Mista).
+    from app.services.distribuidos_bb.transicao_vinculo_service import responsavel_sugerido
+
+    sugeridos: dict[int, tuple] = {}
+    for p in rows:
+        if p.vinculo_cenario:
+            try:
+                sugeridos[p.id] = responsavel_sugerido(db, p)
+            except Exception:  # noqa: BLE001
+                logger.warning("Não consegui sugerir responsável pro processo %s.", p.id, exc_info=True)
+
     itens = []
     for p in rows:
         itens.append({
@@ -935,6 +947,10 @@ def painel_vinculos(
             "escritorio_path": p.escritorio_path,
             "valor_causa": float(p.valor_causa) if p.valor_causa is not None else None,
             "cenario": p.vinculo_cenario,
+            # Pra quem o motor diz que ESTE processo deveria ir. É o que o
+            # botão de transferir do processo novo usa como destino.
+            "responsavel_sugerido_id": sugeridos.get(p.id, (None, None))[0],
+            "responsavel_sugerido_nome": sugeridos.get(p.id, (None, None))[1],
             "vinculos_qtd": p.vinculos_qtd,
             "verificado_em": p.vinculos_verificado_em.isoformat() if p.vinculos_verificado_em else None,
             "criado_em": p.created_at.isoformat() if p.created_at else None,
@@ -1021,6 +1037,34 @@ def executar_transicao_vinculos(
         "Transição de vínculos por %s: %s transferida(s), %s falha(s).",
         current_user.name, resultado["transferidos"], resultado["falhas"],
     )
+    return resultado
+
+
+@router.post(
+    "/vinculos/processo/{processo_id}/transferir",
+    summary="Transfere o PROCESSO NOVO pro responsável que o motor de vínculos sugeriu",
+)
+def transferir_processo_novo_endpoint(
+    processo_id: int,
+    db: Session = Depends(get_db),
+    current_user: LegalOneUser = Depends(auth.get_current_user),
+):
+    """Troca o responsável da pasta do processo recém-capturado.
+
+    Complemento do `/vinculos/transicao/executar`, que move as pastas antigas:
+    aqui move o processo novo. O destino não vem do payload — é o que o motor
+    decidiu (cenário 2: quem já conduz a parte; cenário 1: rodízio da equipe).
+    """
+    _require_gestao(current_user)
+    from app.services.distribuidos_bb.transicao_vinculo_service import transferir_processo_novo
+
+    resultado = transferir_processo_novo(db, processo_id, solicitante=current_user.name)
+    db.commit()
+    if not resultado.get("ok"):
+        logger.warning("Transferência do processo %s recusada: %s", processo_id, resultado.get("erro"))
+    else:
+        logger.info("Processo %s transferido de %s para %s por %s.",
+                    processo_id, resultado.get("de"), resultado.get("para"), current_user.name)
     return resultado
 
 

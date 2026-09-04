@@ -16,6 +16,7 @@ import {
   listarPainelVinculos,
   marcarTransicaoVinculo,
   executarTransicaoVinculos,
+  transferirProcessoNovo,
 } from "@/services/distribuidos-bb";
 
 const CENARIO_META: Record<string, { label: string; cls: string }> = {
@@ -198,6 +199,34 @@ export default function AcompanhamentoVinculosTab() {
     }
   };
 
+  /** Move o PROCESSO NOVO pro responsável que o motor apontou. */
+  const transferirNovo = async (item: PainelVinculoItem) => {
+    const chave = `n:${item.processo_id}`;
+    setTransferindo(chave);
+    try {
+      const r = await transferirProcessoNovo(item.processo_id);
+      if (r.ok) {
+        toast({
+          title: r.ja_estava ? "Já estava com o responsável certo" : "Processo transferido",
+          description: r.ja_estava
+            ? `O processo já é conduzido por ${r.para}.`
+            : `Responsável trocado no Legal One de ${r.de ?? "—"} para ${r.para}, e confirmado na releitura.`,
+        });
+      } else {
+        toast({
+          title: "Não foi possível transferir",
+          description: r.erro ?? "O Legal One recusou a troca.",
+          variant: "destructive",
+        });
+      }
+      load();
+    } catch (e) {
+      toast({ title: "Erro ao transferir", description: String((e as Error).message), variant: "destructive" });
+    } finally {
+      setTransferindo(null);
+    }
+  };
+
   const kpis = data?.kpis;
 
   return (
@@ -356,6 +385,24 @@ export default function AcompanhamentoVinculosTab() {
                                 <div className="text-xs font-semibold uppercase text-muted-foreground">
                                   Processos vinculados da parte {item.vinculos[0]?.nome_parte ? `— ${item.vinculos[0].nome_parte}` : ""}
                                 </div>
+                                {/* O processo NOVO precisa ir pra equipe? No cenário 2
+                                    é o movimento principal — as pastas antigas já
+                                    estão com quem conduz a parte. */}
+                                {item.responsavel_sugerido_nome
+                                  && item.responsavel_sugerido_nome !== item.responsavel_nome && (
+                                  <Button
+                                    size="sm"
+                                    className="h-7 bg-emerald-600 hover:bg-emerald-700"
+                                    disabled={transferindo !== null}
+                                    title={`Troca o responsável DESTE processo no Legal One para ${item.responsavel_sugerido_nome}`}
+                                    onClick={(e) => { e.stopPropagation(); transferirNovo(item); }}
+                                  >
+                                    {transferindo === `n:${item.processo_id}`
+                                      ? <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                                      : <ArrowRightLeft className="mr-1 h-3 w-3" />}
+                                    Passar este processo para {item.responsavel_sugerido_nome.split(" ")[0]}
+                                  </Button>
+                                )}
                                 {pendentes > 0 && item.responsavel_nome && (
                                   <Button
                                     size="sm"

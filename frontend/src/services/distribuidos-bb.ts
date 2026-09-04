@@ -110,6 +110,9 @@ export interface Processo {
   adverso_principal: string | null;
   responsavel_user_id: number | null;
   responsavel_nome: string | null;
+  /** Pra quem o motor de vínculos diz que este processo deveria ir. */
+  responsavel_sugerido_id: number | null;
+  responsavel_sugerido_nome: string | null;
   escritorio_id: number | null;
   escritorio_path: string | null;
   observacao: string | null;
@@ -1020,6 +1023,13 @@ export interface TransicaoResultado {
   falhas: number;
   itens: TransicaoResultadoItem[];
 }
+export interface TransferenciaProcessoResultado {
+  ok: boolean;
+  de?: string | null;
+  para?: string | null;
+  erro?: string | null;
+  ja_estava?: boolean;
+}
 export interface PainelVinculoItem {
   processo_id: number;
   cliente: string;
@@ -1066,6 +1076,14 @@ export async function marcarTransicaoVinculo(vinculoId: number, concluida: boole
 /** Executa no Legal One a troca de responsável das pastas residuais (cenário 1).
  *  O destino não vai no payload: é o responsável que o motor definiu pro
  *  processo novo. */
+/** Transfere o PROCESSO NOVO pro responsável que o motor sugeriu (o destino
+ *  não vai no payload — é decisão do motor, o clique só executa). */
+export async function transferirProcessoNovo(processoId: number): Promise<TransferenciaProcessoResultado> {
+  return json(
+    await apiFetch(`${BASE}/vinculos/processo/${processoId}/transferir`, { method: "POST" }),
+  );
+}
+
 export async function executarTransicaoVinculos(vinculoIds: number[]): Promise<TransicaoResultado> {
   return json(
     await apiFetch(`${BASE}/vinculos/transicao/executar`, {

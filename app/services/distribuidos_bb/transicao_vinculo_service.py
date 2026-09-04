@@ -353,3 +353,137 @@ def transferir_vinculos(
                 )
 
     return resultado
+
+
+def responsavel_sugerido(db: Session, proc: BbProcesso) -> tuple[Optional[int], Optional[str]]:
+    """Pra quem o motor de vínculos diz que o processo NOVO deveria ir.
+
+    Cenário 2: o MESMO responsável que já conduz a parte (vem do vínculo
+    marcado `na_equipe_mista`) — é o ponto do módulo, não repartir a mesma
+    parte entre advogados.
+    Cenário 1: o próximo do rodízio da Equipe Mista.
+
+    Devolve (user_id, nome) ou (None, None) quando não há sugestão — processo
+    sem cenário, ou fila da equipe vazia.
+    """
+    from app.models.distribuidos_bb import EQUIPE_MISTA_NOME, VINCULO_CENARIO_2, BbEscritorio, BbResponsavel
+
+    if not proc.vinculo_cenario:
+        return None, None
+
+    if proc.vinculo_cenario == VINCULO_CENARIO_2:
+        vinc = (
+            db.query(BbVinculo)
+            .filter(
+                BbVinculo.processo_id == proc.id,
+                BbVinculo.na_equipe_mista.is_(True),
+                BbVinculo.responsavel_atual_user_id.isnot(None),
+            )
+            .first()
+        )
+        if vinc is None:
+            return None, None
+        u = db.get(LegalOneUser, vinc.responsavel_atual_user_id)
+        return vinc.responsavel_atual_user_id, (u.name if u else vinc.responsavel_atual_nome)
+
+    # Cenário 1: rodízio da fila especializada.
+    esc = (
+        db.query(BbEscritorio)
+        .filter(BbEscritorio.nome == EQUIPE_MISTA_NOME, BbEscritorio.ativo.is_(True))
+        .first()
+    )
+    if esc is None:
+        return None, None
+    from app.services.distribuidos_bb.distribuicao_service import _proximo_responsavel_rr
+
+    uid = _proximo_responsavel_rr(db, esc)
+    if not uid:
+        return None, None
+    u = db.get(LegalOneUser, uid)
+    return uid, (u.name if u else None)
+
+
+def transferir_processo_novo(
+    db: Session, processo_id: int, *, solicitante: Optional[str] = None
+) -> dict[str, Any]:
+    """Troca no L1 o responsável da pasta do processo NOVO, pro que o motor sugeriu.
+
+    Complementa a transição das pastas residuais: aquela move o passado, esta
+    move o processo que acabou de entrar. Mesmo método
+    (`ModalChangeInvolvedInBatch`) e a mesma disciplina de confirmar relendo.
+
+    Devolve {"ok", "de", "para", "erro"}. Não commita.
+    """
+    proc = db.get(BbProcesso, processo_id)
+    if proc is None:
+        return {"ok": False, "erro": "Processo não encontrado."}
+
+    destino_id, destino_nome = responsavel_sugerido(db, proc)
+    if not destino_id:
+        return {"ok": False, "erro": "O motor de vínculos não tem sugestão de responsável pra este processo."}
+    if proc.responsavel_user_id == destino_id:
+        return {"ok": True, "ja_estava": True, "para": destino_nome,
+                "de": destino_nome, "erro": None}
+
+    lawsuit_id = proc.l1_lawsuit_id
+    if not lawsuit_id:
+        return {"ok": False, "erro": "O processo ainda não tem pasta no Legal One."}
+
+    external = _external_id(db, destino_id)
+    if not external:
+        return {"ok": False, "erro": f"'{destino_nome}' não tem external_id no cadastro do L1."}
+
+    anterior_id = proc.responsavel_user_id
+    u_ant = db.get(LegalOneUser, anterior_id) if anterior_id else None
+    anterior_nome = (u_ant.name if u_ant else None)
+
+    try:
+        _post_troca([int(lawsuit_id)], external, destino_nome)
+    except TransicaoErro as exc:
+        registrar_evento(
+            db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_ERRO,
+            acao="Transferência do processo novo falhou",
+            mensagem=f"O L1 recusou a troca da pasta {proc.l1_folder or lawsuit_id}: {exc}",
+            processo_id=proc.id,
+        )
+        return {"ok": False, "erro": str(exc)[:300], "de": anterior_nome, "para": destino_nome}
+
+    # Confirmação por releitura — a fila do L1 é assíncrona (§6.2 do doc).
+    confirmado = False
+    for espera in _ESPERAS_CONFIRMACAO:
+        time.sleep(espera)
+        atual, _nome, legivel = _responsavel_atual_no_l1(int(lawsuit_id))
+        if legivel and atual == external:
+            confirmado = True
+            break
+        if not legivel and _confirmou_pela_web(int(lawsuit_id), destino_nome):
+            confirmado = True
+            break
+
+    if not confirmado:
+        erro = ("O L1 aceitou o pedido mas a pasta ainda não refletiu a troca "
+                "(a fila do L1 pode demorar). Confira no L1 e tente de novo.")
+        registrar_evento(
+            db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_AVISO,
+            acao="Transferência do processo novo não confirmada",
+            mensagem=f"POST aceito para a pasta {proc.l1_folder or lawsuit_id} → {destino_nome}, "
+                     "mas a releitura ainda mostra o responsável antigo.",
+            processo_id=proc.id,
+        )
+        return {"ok": False, "erro": erro, "de": anterior_nome, "para": destino_nome}
+
+    proc.responsavel_user_id = destino_id
+    registrar_evento(
+        db, secao=SECAO_DISTRIBUICAO, nivel=NIVEL_SUCESSO,
+        acao="Processo novo transferido pra equipe especializada",
+        mensagem=(
+            f"Pasta {proc.l1_folder or lawsuit_id} transferida de "
+            f"{anterior_nome or '—'} para {destino_nome} "
+            f"({'mesma condutora da parte' if proc.vinculo_cenario == 'CENARIO_2' else 'rodízio da Equipe Mista'})"
+            + (f" por {solicitante}." if solicitante else ".")
+        ),
+        dados={"lawsuit_id": lawsuit_id, "de": anterior_id, "para": destino_id,
+               "cenario": proc.vinculo_cenario},
+        processo_id=proc.id,
+    )
+    return {"ok": True, "de": anterior_nome, "para": destino_nome, "erro": None}
