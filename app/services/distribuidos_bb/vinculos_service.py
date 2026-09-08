@@ -271,20 +271,59 @@ def pesquisar_e_decidir(db: Session, run: Any, proc: BbProcesso, portal: Any) ->
     if not sessao:
         return resultado
 
-    # Partes a pesquisar: envolvidos com documento, exceto o próprio BB.
+    # Partes a pesquisar: só os envolvidos do polo ADVERSO ao do BB.
+    #
+    # Pesquisar todo envolvido com documento (o que se fazia antes) casa o
+    # processo por LITISCONSORTE, não por parte adversa. Numa ação de
+    # superendividamento o autor processa vários credores de uma vez, e todos
+    # eles — Santander, Daycoval, Bemol, cooperativas de crédito — entram como
+    # envolvidos no MESMO polo do Banco do Brasil. Achar outra pasta onde a
+    # mesma cooperativa aparece não diz nada sobre a parte que nos interessa.
+    #
+    # Casos reais (08/09/2026, reportados pelo operador): o processo
+    # 0800603-04.2026.8.23.0005 foi marcado NERC por ter casado pela
+    # COOPERATIVA DE CRÉDITO DE RORAIMA com uma pasta de outro cliente
+    # (FERNANDO MACHADO RODRIGUES); e 2026/0277335-000 casou pelo próprio
+    # INSS — que vincularia qualquer previdenciário com qualquer outro.
+    #
+    # O polo sai de `BbEnvolvido.papel` (Ativo/Passivo/Interessado), que o
+    # portal do BB já entrega e nunca vem nulo (medido: 5.790 envolvidos, zero
+    # sem papel). "Interessado" fica de fora dos dois lados de propósito: é
+    # terceiro, não é quem litiga contra nós.
     envolvidos = (
         db.query(BbEnvolvido)
         .filter(BbEnvolvido.processo_id == proc.id, BbEnvolvido.cpf_cnpj.isnot(None))
         .all()
     )
+    # O polo do BB vem do papel do PRÓPRIO BB na lista — mais confiável que
+    # `proc.posicao`, que é derivado. `posicao` é só o fallback.
+    papel_bb = ""
+    for e in envolvidos:
+        if apenas_digitos(e.cpf_cnpj) == CNPJ_BB:
+            papel_bb = (e.papel or "").strip()
+            break
+    if papel_bb not in ("Ativo", "Passivo"):
+        papel_bb = "Ativo" if (proc.posicao or "").strip() == "Autor" else "Passivo"
+    polo_adverso = "Passivo" if papel_bb == "Ativo" else "Ativo"
+
     partes = []
     docs_vistos: set[str] = set()
+    descartados = 0
     for e in envolvidos:
         d = apenas_digitos(e.cpf_cnpj)
         if not d or d == CNPJ_BB or d in docs_vistos:
             continue
+        if (e.papel or "").strip() != polo_adverso:
+            descartados += 1
+            continue
         docs_vistos.add(d)
         partes.append(e)
+    if descartados:
+        logger.info(
+            "Vínculos (proc %s): %s parte(s) adversa(s) a pesquisar; %s envolvido(s) "
+            "fora do polo adverso descartado(s) (BB é %s).",
+            proc.id, len(partes), descartados, papel_bb,
+        )
     if not partes:
         proc.vinculos_qtd = 0
         proc.vinculos_verificado_em = datetime.now(timezone.utc)
