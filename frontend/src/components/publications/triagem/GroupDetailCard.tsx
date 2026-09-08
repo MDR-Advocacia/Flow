@@ -25,7 +25,7 @@ import {
   BANDS, bandIndex, classificacaoDoGrupo, fmtData, idadeDias, idadeDoGrupo,
   labelIdade, prazoDoGrupo, prazoInfo, statusDoGrupo, STATUS_LABEL,
 } from "./helpers";
-import type { AppUser, DraftTask, GroupedRecord, TarefaAbertaL1, TaskType } from "./types";
+import type { AppUser, DraftTask, GroupedRecord, PublicationRecord, TarefaAbertaL1, TaskType } from "./types";
 
 /** Mantido exportado: a tela clássica e a auditoria usam a mesma lista. */
 export const MOTIVOS_IGNORAR = IGNORE_REASONS;
@@ -60,7 +60,9 @@ interface Props {
   onIgnore: (motivo: string, nota: string) => void;
   onSkip?: () => void;
   onBack?: () => void;
-  onFeedback?: () => void;
+  /** Recebe a publicação da aba visível — o feedback é dela, não do grupo:
+   *  um grupo pode ter publicações com classificações diferentes. */
+  onFeedback?: (rec: PublicationRecord) => void;
   submitting?: boolean;
   showSkip?: boolean;
   kbdHints?: boolean;
@@ -256,7 +258,7 @@ export function GroupDetailCard({
                 <Badge variant="outline" className="text-[10px] uppercase">Polo {classificacao.polo}</Badge>
               )}
               {onFeedback && (
-                <Button variant="ghost" size="sm" className="h-7 text-muted-foreground" onClick={onFeedback} title="Reportar classificação errada">
+                <Button variant="ghost" size="sm" className="h-7 text-muted-foreground" onClick={() => rec && onFeedback(rec)} title="Reportar classificação errada">
                   <ThumbsDown className="h-3.5 w-3.5" />
                 </Button>
               )}

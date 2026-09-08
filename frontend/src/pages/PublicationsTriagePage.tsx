@@ -41,6 +41,7 @@ import EtiquetasL1 from "@/components/publications/triagem/EtiquetasL1";
 import ResponsavelPasta from "@/components/publications/triagem/ResponsavelPasta";
 import AuditoriaCard from "@/components/publications/triagem/AuditoriaCard";
 import DistribuicaoBar from "@/components/publications/triagem/DistribuicaoBar";
+import FeedbackClassificacao from "@/components/publications/triagem/FeedbackClassificacao";
 import ConfirmarAgendamentoDialog, {
   confirmacaoDispensadaHoje, dispensarConfirmacaoHoje,
 } from "@/components/publications/triagem/ConfirmarAgendamentoDialog";
@@ -166,6 +167,8 @@ export default function PublicationsTriagePage() {
   const [groups, setGroups] = useState<GroupedRecord[]>([]);
   const [filaLoading, setFilaLoading] = useState(false);
   const [taxonomy, setTaxonomy] = useState<Record<string, string[]>>({});
+  // Publicação sob feedback de classificação errada (null = diálogo fechado).
+  const [feedbackDe, setFeedbackDe] = useState<PublicationRecord | null>(null);
   const [taskTypes, setTaskTypes] = useState<TaskType[]>([]);
   const [users, setUsers] = useState<AppUser[]>([]);
   const [distribuicao, setDistribuicao] = useState<DistribuicaoItem[]>([]);
@@ -928,6 +931,7 @@ export default function PublicationsTriagePage() {
               }
               onConfirm={() => pedirAgendamento(atual)}
               onIgnore={(m, n) => void ignorar(atual, m, n)}
+              onFeedback={setFeedbackDe}
               onSkip={() => setCursor((c) => Math.min(fila.length - 1, c + 1))}
               onBack={cursor > 0 ? () => setCursor((c) => Math.max(0, c - 1)) : undefined}
               submitting={submitting}
@@ -1039,12 +1043,25 @@ export default function PublicationsTriagePage() {
               }
               onConfirm={() => pedirAgendamento(selecionado)}
               onIgnore={(m, n) => void ignorar(selecionado, m, n)}
+              onFeedback={setFeedbackDe}
               submitting={submitting}
               kbdHints
             />
           </div>
         </div>
       )}
+
+      {/* Feedback de classificação errada. A árvore que ele oferece é a mesma
+          que o filtro usa — ou seja, os 16 tipos do motor próprio quando se
+          está na fila SEM PASTA, e a taxonomia v2 do escritório na fila
+          comum. Recarrega a fila ao gravar, porque o endpoint também APLICA
+          a correção ao registro. */}
+      <FeedbackClassificacao
+        record={feedbackDe}
+        taxonomy={taxonomy}
+        onOpenChange={(v) => { if (!v) setFeedbackDe(null); }}
+        onRegistrado={() => { void carregarFila(); }}
+      />
 
       <ConfirmarAgendamentoDialog
         open={confirmarPara !== null}
