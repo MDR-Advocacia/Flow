@@ -33,6 +33,14 @@ from app.services.batch_utils import build_task_fingerprint, load_successful_fin
 from app.services.legal_one_client import LegalOneApiClient
 
 
+logger = logging.getLogger(__name__)
+
+# Quanto o worker espera as linhas de um lote aparecerem antes de desistir
+# dele. Inserir 2.756 linhas leva ~1,5s; um minuto e' folga larga e ainda
+# assim curto o bastante pra nao deixar lote morto ocupando a fila.
+_ESPERA_MAXIMA_LINHAS_S = 60
+
+
 class BatchTaskCreationService:
     def __init__(self, db: Session, client: LegalOneApiClient | None):
         self.db = db
@@ -213,9 +221,12 @@ class BatchTaskCreationService:
             total_items=len(rows),
             start_time=self._utcnow(),
         )
+        # flush (nao commit): atribui o id sem publicar a execucao pra
+        # ninguem de fora. O commit unico la embaixo faz a execucao e as
+        # linhas dela aparecerem JUNTAS — ver a nota da corrida no metodo
+        # irmao `create_interactive_execution`.
         self.db.add(execution_log)
-        self.db.commit()
-        self.db.refresh(execution_log)
+        self.db.flush()
 
         for row_data in rows:
             self.db.add(
@@ -227,6 +238,7 @@ class BatchTaskCreationService:
                 )
             )
         self.db.commit()
+        self.db.refresh(execution_log)
         return execution_log
 
     def create_interactive_execution(
@@ -243,9 +255,20 @@ class BatchTaskCreationService:
             total_items=len(request.tasks),
             start_time=self._utcnow(),
         )
+        # CORRIDA (medida em producao, lote 6019 de 08/09/2026): commitar a
+        # execucao aqui a publica com status PENDENTE, e o worker — que
+        # varre a fila de 5 em 5 segundos — pode reivindica-la ANTES de as
+        # linhas existirem. Ele entao encontra zero itens, conclui que nao ha
+        # nada a fazer e fecha o lote como CONCLUIDO. Foi o que aconteceu com
+        # 2.756 agendamentos: 1,5s de duracao, 0 processados, os 2.756 itens
+        # intactos em PENDENTE e um visto verde na tela dizendo que deu certo.
+        #
+        # A janela e' proporcional ao tamanho da planilha (o tempo de inserir
+        # as linhas), entao o defeito castiga justamente o lote grande — e
+        # some no lote pequeno do teste. Uma transacao so' elimina a janela:
+        # `flush` da o id sem publicar nada.
         self.db.add(execution_log)
-        self.db.commit()
-        self.db.refresh(execution_log)
+        self.db.flush()
 
         for task_data in request.tasks:
             self.db.add(
@@ -257,6 +280,7 @@ class BatchTaskCreationService:
                 )
             )
         self.db.commit()
+        self.db.refresh(execution_log)
         return execution_log
 
     def _claimable_execution_filter(self, now_utc: datetime):
@@ -446,6 +470,56 @@ class BatchTaskCreationService:
                 .all()
             )
         ]
+
+        # TRAVA DE SANIDADE. A transacao acima fecha a corrida na origem,
+        # mas quem conclui o lote e' este laco — e concluir "sem nada a
+        # fazer" um lote que DECLARA ter 2.756 linhas e' sempre mentira,
+        # venha a divergencia de onde vier. Aqui ele solta a garra e deixa o
+        # lote voltar pra fila em vez de carimbar CONCLUIDO por cima de
+        # trabalho que ninguem fez.
+        if not item_ids:
+            execucao = (
+                self.db.query(BatchExecution)
+                .filter(BatchExecution.id == execution_id)
+                .first()
+            )
+            if execucao and (execucao.total_items or 0) > 0:
+                gravadas = (
+                    self.db.query(BatchExecutionItem)
+                    .filter(BatchExecutionItem.execution_id == execution_id)
+                    .count()
+                )
+                if gravadas == 0:
+                    # start_time pode voltar NAIVE (SQLite na suite, e
+                    # qualquer driver que perca o fuso): comparar direto
+                    # levanta TypeError e mata o laco inteiro — a trava
+                    # derrubaria justamente o worker que ela protege.
+                    nascido = execucao.start_time
+                    if nascido.tzinfo is None:
+                        nascido = nascido.replace(tzinfo=timezone.utc)
+                    idade = (self._utcnow() - nascido).total_seconds()
+                    if idade < _ESPERA_MAXIMA_LINHAS_S:
+                        # Ainda pode ser a gravacao em andamento: devolve pra
+                        # fila e tenta de novo no proximo giro.
+                        logger.warning(
+                            "Lote %s reivindicado sem nenhuma das %s linhas "
+                            "gravadas (%.1fs de vida) — devolvido pra fila.",
+                            execution_id, execucao.total_items, idade,
+                        )
+                        execucao.status = BATCH_STATUS_PENDING
+                        self._clear_execution_claim(execucao)
+                        self.db.commit()
+                        return
+                    # Passou da espera: as linhas nao vem mais. Nao concluir
+                    # calado — o operador precisa saber que o lote morreu.
+                    logger.error(
+                        "Lote %s declara %s linhas e nao gravou NENHUMA em "
+                        "%.0fs. Encerrando como cancelado para nao registrar "
+                        "sucesso falso.",
+                        execution_id, execucao.total_items, idade,
+                    )
+                    self._finalize_execution(execucao, cancelled=True)
+                    return
 
         for item_id in item_ids:
             signal = self._get_control_signal(execution_id, worker_id)
