@@ -1,3 +1,4 @@
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -12,6 +13,28 @@ from app.models.publication_search import (
 )
 from app.models.task_template import TaskTemplate
 from app.services.publication_search_service import PublicationSearchService
+
+
+@pytest.fixture(autouse=True)
+def _taxonomia_nao_interfere(monkeypatch):
+    """Isola estes testes do reparo de taxonomia.
+
+    `_build_task_proposals` passa a categoria por `repair_classification`
+    antes de casar o template, e esse reparo lê a taxonomia v2 do banco da
+    APLICAÇÃO — não do SQLite em memória que estes testes montam. Resultado:
+    as categorias fictícias daqui ("Categoria A", "Sem User"…) viravam
+    "Para Análise — …", nenhum template casava e três testes falhavam por
+    motivo que nada tem a ver com o que eles medem — a resolução do
+    RESPONSÁVEL. Pior: o resultado passava a depender do conteúdo do banco
+    local de quem roda a suíte.
+
+    Aqui a categoria é dada como já válida, que é a pré-condição desses
+    testes. O reparo em si é coberto por `test_classifier_taxonomy_repair`.
+    """
+    monkeypatch.setattr(
+        "app.services.classifier.taxonomy.repair_classification",
+        lambda cat, sub, **kwargs: (cat, sub),
+    )
 
 
 def _make_session():

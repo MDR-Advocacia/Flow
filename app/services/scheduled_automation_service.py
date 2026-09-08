@@ -464,8 +464,11 @@ class ScheduledAutomationService:
                                     "status": "failed" if r_sp.get("erro_fatal") else "success",
                                     **{
                                         k: r_sp.get(k, 0)
+                                        # "agendados" e' o numero que o operador procura
+                                        # de manha: quantas tarefas nasceram sozinhas.
                                         for k in ("total_alvo", "processados", "pautas",
-                                                  "classificados", "fichas", "erros")
+                                                  "classificados", "fichas", "agendados",
+                                                  "erros")
                                     },
                                 })
                         except Exception as exc:  # noqa: BLE001
