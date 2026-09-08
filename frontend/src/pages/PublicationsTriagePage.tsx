@@ -568,6 +568,15 @@ export default function PublicationsTriagePage() {
         if (rodando && !rodandoSemPasta) setRodandoSemPasta(true);
         if (!rodando && rodandoSemPasta) {
           setRodandoSemPasta(false);
+          // Rodada que não pegou a trava: outra já estava correndo. Dizer
+          // "identificada" aqui seria mentira — e o operador clicaria de novo.
+          if (r?.status === "skipped") {
+            toast({
+              title: "Já havia uma rodada em andamento",
+              description: "Esta não rodou, para não classificar (nem agendar) a mesma publicação duas vezes. Acompanhe a que está correndo.",
+            });
+            return;
+          }
           toast({
             title: "Fila sem pasta identificada",
             description:

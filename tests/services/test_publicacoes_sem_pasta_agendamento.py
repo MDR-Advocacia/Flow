@@ -223,3 +223,30 @@ def test_escritorio_do_tipo_vence_o_default_global(monkeypatch):
     assert compartilhado.office_l1_para_tarefa("EMBARGOS A EXECUCAO") == BB_AUTOR
     assert compartilhado.office_l1_para_tarefa("Obrigação de Fazer / Astreintes") == 1
     assert compartilhado.office_l1_para_tarefa(None) == 1
+
+
+# ── uma rodada por vez ───────────────────────────────────────────────
+def test_rodada_simultanea_nao_reprocessa_nem_reagenda(monkeypatch):
+    """Duas rodadas ao mesmo tempo criariam DUAS tarefas para o mesmo embargo.
+
+    Antes do agendamento automático isso era só desperdício (a última
+    classificação gravava por cima). Agora as duas agendariam, e o operador
+    acharia a tarefa em dobro no Legal One. A trava é advisory lock do
+    Postgres — banco, não memória — porque uma das portas da corrida é dois
+    workers/containers com scheduler próprio, que `max_instances` não cobre.
+    """
+    db = _sessao()
+    l1 = _montar(monkeypatch, ligado=True)
+    rec = _registro(db, _seed(db))
+    # A trava está com outra rodada.
+    monkeypatch.setattr(motor, "_tomar_trava", lambda: (None, False))
+
+    r = motor.executar(db, requested_by="teste")
+
+    assert r["pulada"] is True
+    assert l1.payloads == [], "agendou mesmo sem a trava"
+    assert rec.status == RECORD_STATUS_CLASSIFIED, "mexeu na publicação sem a trava"
+    from app.models.publication_sem_pasta import PublicacaoSemPastaRun
+    run = db.query(PublicacaoSemPastaRun).filter_by(id=r["run_id"]).first()
+    assert run.status == "skipped" and run.finished_at is not None
+

@@ -901,6 +901,71 @@ async def classificar_registro(db: Session, ai: Any, rec: Any) -> str:
 
 
 # ═══════════════════════════════ execução ════════════════════════════════
+# Advisory lock: namespace proprio, para nunca colidir com o 4242 que as
+# automacoes usam (la a chave e' o automation_id).
+_TRAVA_NS = 4243
+_TRAVA_CHAVE = 1
+
+
+def _tomar_trava() -> tuple[Any, bool]:
+    """Garante UMA rodada do motor por vez, em todo o cluster.
+
+    Antes do agendamento automático, duas rodadas simultâneas eram só
+    desperdício: as duas classificavam as mesmas publicações e a última
+    gravava por cima. Agora não — as duas AGENDARIAM, e o operador acharia
+    duas tarefas no Legal One para o mesmo embargo.
+
+    A corrida é real e tem três portas: dois cliques no botão da triagem, o
+    botão junto com a rodada noturna, e — a que `max_instances` do APScheduler
+    não cobre — dois workers/containers com scheduler próprio. Por isso a
+    trava é do BANCO, como a das automações, e não um flag em memória.
+
+    Advisory lock morre junto com a conexão, então rodada que estourar não
+    deixa a fila trancada. Devolve (conexão, conseguiu) — a conexão precisa
+    ser fechada por quem chamou.
+    """
+    from sqlalchemy import text as _sql_text
+
+    from app.db.session import engine as _engine
+
+    if _engine.dialect.name != "postgresql":
+        # SQLite (suíte de testes) não tem advisory lock; lá não há concorrência.
+        return None, True
+    conn = _engine.connect()
+    try:
+        got = conn.execute(
+            _sql_text("SELECT pg_try_advisory_lock(:k1, :k2)"),
+            {"k1": _TRAVA_NS, "k2": _TRAVA_CHAVE},
+        ).scalar()
+    except Exception:  # noqa: BLE001
+        conn.close()
+        logger.exception("Sem pasta: não consegui pedir a trava; sigo sem ela.")
+        return None, True
+    if not got:
+        conn.close()
+        return None, False
+    return conn, True
+
+
+def _soltar_trava(conn: Any) -> None:
+    if conn is None:
+        return
+    from sqlalchemy import text as _sql_text
+
+    try:
+        conn.execute(
+            _sql_text("SELECT pg_advisory_unlock(:k1, :k2)"),
+            {"k1": _TRAVA_NS, "k2": _TRAVA_CHAVE},
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Sem pasta: falha ao liberar a trava (a conexão fecha a seguir).")
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _coletar_pendentes(db: Session, limite: int) -> list[Any]:
     from app.models.publication_search import PublicationRecord
     from app.services.publication_search_service import RECORD_STATUS_NEW
@@ -964,6 +1029,21 @@ def executar(
     else:
         run.total_alvo = len(registros)
         db.commit()
+
+    # UMA rodada por vez no cluster inteiro. Se outra já está correndo, esta
+    # sai sem tocar em publicação nenhuma — o que sobrou continua NOVO e a
+    # rodada de quem tem a trava (ou a próxima) leva.
+    trava, tem_a_trava = _tomar_trava()
+    if not tem_a_trava:
+        logger.info("Sem pasta: outra rodada já está em andamento — esta não vai rodar.")
+        run.status = "skipped"
+        run.ultimo_erro = "Outra rodada do motor já estava em andamento."
+        run.finished_at = datetime.now(timezone.utc)
+        try:
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+        return {"run_id": run.id, "pulada": True, "total_alvo": len(registros)}
 
     contadores = {
         "total_alvo": len(registros), "processados": 0, "pautas": 0,
@@ -1037,6 +1117,8 @@ def executar(
         run.status = "failed"
         run.ultimo_erro = str(exc)[:2000]
         contadores["erro_fatal"] = str(exc)
+    finally:
+        _soltar_trava(trava)
     run.finished_at = datetime.now(timezone.utc)
     _atualizar_run(db, run, contadores)
     logger.info(

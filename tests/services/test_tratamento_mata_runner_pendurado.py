@@ -40,7 +40,9 @@ class _Run:
 @pytest.fixture
 def espiao(monkeypatch):
     """Troca os syscalls por um diário do que foi chamado."""
-    diario = {"kill": [], "killpg": [], "vivo": True, "lider": True}
+    # `comm` e' quem esta com o PID agora, lido de /proc. "node" e' o runner
+    # de verdade; qualquer outro nome conhecido significa PID reciclado.
+    diario = {"kill": [], "killpg": [], "vivo": True, "lider": True, "comm": "node"}
 
     def _kill(pid, sig):
         if not diario["vivo"]:
@@ -60,6 +62,7 @@ def espiao(monkeypatch):
         raising=False,
     )
     monkeypatch.setattr(os, "name", "posix", raising=False)
+    monkeypatch.setattr(S, "_comm_do_pid", staticmethod(lambda pid: diario["comm"]))
     # Windows nao tem SIGKILL; producao e' Linux, onde ele e' 9.
     monkeypatch.setattr(signal, "SIGKILL", 9, raising=False)
     return diario
@@ -105,3 +108,45 @@ def test_run_anterior_ao_pub015_diz_isso_em_vez_de_fingir(espiao):
 
     assert espiao["killpg"] == [] and espiao["kill"] == []
     assert "sem PID registrado" in desfecho
+
+
+def test_pid_reciclado_nao_leva_kill(espiao):
+    """A trava que faltava: PID gravado não identifica processo pra sempre.
+
+    Morto o runner, o kernel pode entregar o mesmo número a outra coisa — e
+    como o `os.kill(pid, 0)` só pergunta "existe?", o reaper acharia que o
+    runner segue vivo. Mataria um inocente, e com `killpg` levaria o grupo
+    dele junto. Conferir o nome em /proc é o que separa um caso do outro.
+    """
+    espiao["comm"] = "postgres"
+
+    desfecho = S._encerrar_runner(_Run(pid=4242))
+
+    assert espiao["killpg"] == [] and espiao["kill"] == [], "matou processo alheio"
+    assert "reciclado" in desfecho and "postgres" in desfecho
+
+
+def test_comm_ilegivel_ainda_mata(espiao):
+    """Sem conseguir ler /proc, mata assim mesmo — e é de propósito.
+
+    A alternativa seria o reaper calar diante do runner pendurado, que é
+    exatamente o vazamento de PID que derrubou a API em 08/09. Entre um risco
+    raro e um dano já observado, o benefício da dúvida vai pro dano observado.
+    """
+    espiao["comm"] = None
+
+    desfecho = S._encerrar_runner(_Run(pid=4242))
+
+    assert espiao["killpg"] == [(4242, 9)]
+    assert "encerrado" in desfecho
+
+
+def test_arvore_de_chrome_conta_como_runner(espiao):
+    """O PID gravado é o Node, mas a lista aceita a árvore que ele cria: se o
+    número cair num Chrome do próprio runner, ainda é lixo nosso pra matar."""
+    espiao["comm"] = "chrome"
+
+    desfecho = S._encerrar_runner(_Run(pid=4242))
+
+    assert espiao["killpg"] == [(4242, 9)]
+    assert "encerrado" in desfecho

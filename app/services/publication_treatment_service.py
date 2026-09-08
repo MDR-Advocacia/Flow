@@ -995,6 +995,24 @@ class PublicationTreatmentService:
             )
         return info
 
+    # Nomes de processo que o PID gravado pode legitimamente ter. O runner e'
+    # spawnado como `[node_binary, runner_script, ...]`, entao na pratica e'
+    # sempre "node"; chrome/chromedriver/Xvfb entram porque sao a arvore que
+    # ele cria e o vocabulario e' o mesmo do rpa_pid_watchdog — ha UMA ideia de
+    # "isso e' RPA" no sistema, nao duas. `python` esta FORA de proposito: e' o
+    # uvicorn.
+    _COMM_DE_RUNNER = ("node", "chrome", "chromium", "chromedriver", "xvfb")
+
+    @staticmethod
+    def _comm_do_pid(pid: int) -> Optional[str]:
+        """Nome do processo que ESTA com esse PID agora, ou None se nao der
+        pra ler. Fonte e' /proc, nunca `ps`: o `ps` precisa forkar justamente
+        quando o container esta sem PID pra forkar."""
+        try:
+            return Path(f"/proc/{pid}/comm").read_text().strip()
+        except OSError:
+            return None
+
     @staticmethod
     def _encerrar_runner(run) -> str:
         """Mata o processo do runner e toda a árvore de Chrome dele.
@@ -1010,6 +1028,10 @@ class PublicationTreatmentService:
         killpg subiria pro uvicorn, então quando o grupo não confere o código
         cai pro PID sozinho — pior, mas nunca perigoso.
 
+        Antes de matar, confere em /proc quem está com o PID: número gravado
+        só identifica processo enquanto aquele processo vive, e um PID
+        reciclado levaria um inocente (com o grupo dele) junto.
+
         Devolve um rótulo curto pro texto do evento/erro.
         """
         pid = getattr(run, "runner_pid", None)
@@ -1023,6 +1045,36 @@ class PublicationTreatmentService:
             return f"PID {pid} já estava morto"
         except OSError:
             return f"PID {pid} inacessível"
+
+        # REUSO DE PID. O número gravado identifica um processo só enquanto
+        # aquele processo existe; morto ele, o kernel pode entregar o mesmo
+        # número a outra coisa. Aí o reaper acharia "vivo" (o os.kill(pid, 0)
+        # acima passa) e mataria um inocente — e como o runner nasce líder de
+        # grupo, o inocente levaria o GRUPO dele junto.
+        #
+        # Confere quem está com o PID agora. Nome conhecido e fora da lista é
+        # prova de reciclagem: não mata, e diz isso no texto do evento (a run
+        # continua sendo marcada como falha por quem chamou — o objetivo de
+        # liberar a fila não depende do kill).
+        #
+        # Nome ILEGÍVEL segue matando, de propósito: a alternativa é o reaper
+        # calar diante do runner pendurado e devolver o vazamento de PID que
+        # derrubou a API em 08/09. Entre um risco raro e um dano já observado,
+        # o benefício da dúvida vai pro dano observado — com aviso no log.
+        comm = PublicationTreatmentService._comm_do_pid(pid)
+        if comm is not None:
+            if not comm.lower().startswith(PublicationTreatmentService._COMM_DE_RUNNER):
+                logger.warning(
+                    "tratamento: PID %s do run #%s foi reciclado (agora é %r) — "
+                    "NÃO encerrado.", pid, getattr(run, "id", "?"), comm,
+                )
+                return f"PID {pid} foi reciclado (hoje é '{comm}') — não encerrado"
+        else:
+            logger.warning(
+                "tratamento: não consegui ler /proc/%s/comm do run #%s; "
+                "encerrando assim mesmo para não represar PID.",
+                pid, getattr(run, "id", "?"),
+            )
 
         alvo, modo = pid, "grupo"
         try:
