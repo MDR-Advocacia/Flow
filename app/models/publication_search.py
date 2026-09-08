@@ -122,6 +122,13 @@ class PublicationRecord(Base):
     # Ex.: "SP", "RJ", "TRT7", "TRF1", "TRE-SP". Populada automaticamente
     # ao criar o registro e pela data migration perf002.
     uf = Column(String(10), nullable=True, index=True)
+    # RITO do processo (pub016): comum | juizado | trabalhista. Campo, e nao
+    # categoria — muda a providencia (recurso inominado x apelacao, custas,
+    # prazo em dobro que o juizado nao tem) mas e ortogonal a classificacao.
+    # Preenchido pelo TEXTO no nascimento da publicacao, de graca; o DataJud
+    # completa depois, em lote, cacheado por CNJ em `processo_rito`.
+    rito = Column(String(16), nullable=True, index=True)
+    rito_fonte = Column(String(16), nullable=True)
 
     # Vencimento ESTIMADO do prazo da publicação (pub012), calculado dos
     # defaults da taxonomia (default_prazo_dias/tipo da categoria ou

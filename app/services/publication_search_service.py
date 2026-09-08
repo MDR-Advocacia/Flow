@@ -45,6 +45,7 @@ from app.models.publication_search import (
 )
 from app.services.legal_one_client import LegalOneApiClient
 
+from app.services.publication_rito import rito_pelo_texto
 from app.services.publication_sem_pasta import (
     SEM_PASTA_OFFICE_ID,
     e_escritorio_ficticio,
@@ -704,6 +705,14 @@ class PublicationSearchService:
                             "CNJ extraído do texto (publicação #%s): %s",
                             update_id, cnj,
                         )
+                # RITO (pub016): pelo TEXTO, aqui mesmo, do mesmo jeito que
+                # o `uf` — sem banco e sem rede, entao nao custa nada na
+                # captura da madrugada. O que o texto nao resolve (~37%)
+                # fica NULL e o passo em lote completa pelo DataJud depois,
+                # cacheado por CNJ. Rito e' campo, nao categoria: muda a
+                # providencia (recurso inominado x apelacao, custas, prazo
+                # em dobro que o juizado nao tem) mas nao substitui ela.
+                _rito, _rito_fonte = rito_pelo_texto(pub.get("description"))
                 record = PublicationRecord(
                     search_id=search.id,
                     legal_one_update_id=update_id,
@@ -720,6 +729,8 @@ class PublicationSearchService:
                     status=record_status,
                     is_duplicate=is_lawsuit_date_duplicate,
                     uf=uf_from_cnj(cnj),
+                    rito=_rito,
+                    rito_fonte=_rito_fonte,
                 )
                 self.db.add(record)
                 existing_ids.add(update_id)
@@ -2528,6 +2539,7 @@ class PublicationSearchService:
         date_to: Optional[str] = None,
         category: Optional[str] = None,
         uf: Optional[str] = None,
+        rito: Optional[str] = None,
         vinculo: Optional[str] = None,
         natureza: Optional[str] = None,
         polo: Optional[str] = None,
@@ -2675,6 +2687,20 @@ class PublicationSearchService:
                 query = query.filter(PublicationRecord.uf == uf_list[0])
             else:
                 query = query.filter(PublicationRecord.uf.in_(uf_list))
+        # RITO (pub016): comum | juizado | trabalhista, CSV como a UF.
+        # "nao_identificado" e' opcao de proposito: a fila do que o texto nao
+        # resolveu e o DataJud ainda nao completou e' justamente onde o
+        # operador precisa olhar com os proprios olhos.
+        rito_list = [r.strip().lower() for r in _parse_csv_strs(rito)]
+        if rito_list:
+            conds_rito = []
+            concretos = [r for r in rito_list if r != "nao_identificado"]
+            if concretos:
+                conds_rito.append(PublicationRecord.rito.in_(concretos))
+            if "nao_identificado" in rito_list:
+                conds_rito.append(PublicationRecord.rito.is_(None))
+            if conds_rito:
+                query = query.filter(or_(*conds_rito))
         # Vínculo: com_processo / sem_processo. Se ambos vierem juntos
         # equivale a nenhum filtro (todos os registros cabem).
         vinculo_list = _parse_csv_strs(vinculo)
@@ -2851,6 +2877,7 @@ class PublicationSearchService:
         responsavel_pasta: Optional[str] = None,
         separar_sem_pasta: bool = False,
         uf: Optional[str] = None,
+        rito: Optional[str] = None,
         vinculo: Optional[str] = None,
         natureza: Optional[str] = None,
         polo: Optional[str] = None,
@@ -2878,7 +2905,7 @@ class PublicationSearchService:
             category=category, subcategory=subcategory,
             distribuido_para=distribuido_para,
             responsavel_pasta=responsavel_pasta,
-            separar_sem_pasta=separar_sem_pasta, uf=uf,
+            separar_sem_pasta=separar_sem_pasta, uf=uf, rito=rito,
             vinculo=vinculo, natureza=natureza,
             polo=polo, cnj_search=cnj_search,
             scheduled_by_user_id=scheduled_by_user_id,
@@ -2939,6 +2966,7 @@ class PublicationSearchService:
             date_from=date_from, date_to=date_to,
             category=category,
             uf=None,  # ignora o filtro de UF aqui — é o que queremos descobrir
+            rito=rito,  # mas o rito continua valendo: é filtro de outra dimensão
             vinculo=vinculo, natureza=natureza,
             polo=polo, cnj_search=cnj_search,
             scheduled_by_user_id=scheduled_by_user_id,
@@ -2968,7 +2996,7 @@ class PublicationSearchService:
             category=category, subcategory=subcategory,
             distribuido_para=distribuido_para,
             responsavel_pasta=responsavel_pasta,
-            separar_sem_pasta=separar_sem_pasta, uf=uf,
+            separar_sem_pasta=separar_sem_pasta, uf=uf, rito=rito,
             vinculo=vinculo, natureza=natureza,
             polo=polo, cnj_search=cnj_search,
             scheduled_by_user_id=None,  # ignora pra descobrir todos
@@ -3086,7 +3114,7 @@ class PublicationSearchService:
             category=category, subcategory=subcategory,
             distribuido_para=distribuido_para,
             responsavel_pasta=responsavel_pasta,
-            separar_sem_pasta=separar_sem_pasta, uf=uf,
+            separar_sem_pasta=separar_sem_pasta, uf=uf, rito=rito,
             vinculo=vinculo, natureza=natureza,
             polo=polo, cnj_search=cnj_search,
             scheduled_by_user_id=scheduled_by_user_id,
@@ -5339,6 +5367,8 @@ class PublicationSearchService:
             "quem_pratica_ato": record.quem_pratica_ato,
             "exige_providencia_nossa": record.exige_providencia_nossa,
             "uf": record.uf,
+            "rito": record.rito,
+            "rito_fonte": record.rito_fonte,
             "natureza_processo": record.natureza_processo,
             # Fila sem pasta (pub014): o que a regra/IA descobriu — CNJs
             # citados, quais sao nossos, origem. None fora dessa fila.

@@ -151,6 +151,9 @@ export default function PublicationsTriagePage() {
   const [filtroEtiqueta, setFiltroEtiqueta] = useState<string>("");
   const [etiquetasDisponiveis, setEtiquetasDisponiveis] = useState<string[]>([]);
   const [filtroUf, setFiltroUf] = useState<string>("");
+  // Rito (pub016). Vocabulário FIXO — não vem de available_*, porque as
+  // opções existem mesmo quando a fila filtrada não tem nenhuma delas.
+  const [filtroRito, setFiltroRito] = useState<string>("");
   const [ufsDisponiveis, setUfsDisponiveis] = useState<string[]>([]);
   const [filtroRespPasta, setFiltroRespPasta] = useState<number | null>(null);
   const [respPastaDisponiveis, setRespPastaDisponiveis] = useState<
@@ -207,6 +210,7 @@ export default function PublicationsTriagePage() {
       if (filtroLeitor.length) qs.set("distribuido_para", filtroLeitor.join(","));
       if (filtroEtiqueta) qs.set("etiqueta", filtroEtiqueta);
       if (filtroUf) qs.set("uf", filtroUf);
+      if (filtroRito) qs.set("rito", filtroRito);
       if (filtroRespPasta) qs.set("responsavel_pasta", String(filtroRespPasta));
       if (banda != null) {
         qs.set("idade_min_dias", String(BANDS[banda].min));
@@ -217,7 +221,7 @@ export default function PublicationsTriagePage() {
       });
       return qs;
     },
-    [category, subcategory, cnjBusca, banda, filtroLeitor, filtroEtiqueta, filtroRespPasta, filtroUf],
+    [category, subcategory, cnjBusca, banda, filtroLeitor, filtroEtiqueta, filtroRespPasta, filtroUf, filtroRito],
   );
 
   /* ─── carregamentos ─── */
@@ -862,6 +866,8 @@ export default function PublicationsTriagePage() {
         onResponsavel={setFiltroRespPasta}
         ufs={ufsDisponiveis}
         uf={filtroUf}
+        rito={filtroRito}
+        onRito={setFiltroRito}
         onUf={setFiltroUf}
       />
 
@@ -1085,7 +1091,7 @@ function FiltroClassificacao({
   cnj, onCnj, onRefresh, loading, banda, onBanda,
   etiquetas, etiqueta, onEtiqueta,
   responsaveis, responsavel, onResponsavel,
-  ufs, uf, onUf,
+  ufs, uf, onUf, rito, onRito,
 }: {
   taxonomy: Record<string, string[]>;
   category: string;
@@ -1107,6 +1113,8 @@ function FiltroClassificacao({
   ufs?: string[];
   uf?: string;
   onUf?: (v: string) => void;
+  rito?: string;
+  onRito?: (v: string) => void;
 }) {
   const categorias = useMemo(() => Object.keys(taxonomy).sort(), [taxonomy]);
   const subcategorias = useMemo(
@@ -1249,6 +1257,27 @@ function FiltroClassificacao({
             {ufs.map((u) => (
               <SelectItem key={u} value={u}>{u}</SelectItem>
             ))}
+          </SelectContent>
+        </Select>
+      )}
+
+      {/* Rito (pub016). Vocabulário FIXO, não derivado da fila: as quatro
+          opções existem mesmo quando o recorte atual não tem nenhuma delas,
+          e sumir com a opção esconderia justamente a resposta "não tem
+          nenhum juizado aqui", que é informação. "Não identificado" é opção
+          de primeira classe: é a fila que o texto não resolveu e o DataJud
+          ainda não completou — onde o operador precisa olhar. */}
+      {onRito && (
+        <Select value={rito || "__todos__"} onValueChange={(v) => onRito(v === "__todos__" ? "" : v)}>
+          <SelectTrigger className="h-9 w-[185px] text-sm">
+            <SelectValue placeholder="Qualquer rito" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__todos__">Qualquer rito</SelectItem>
+            <SelectItem value="comum">Justiça Comum</SelectItem>
+            <SelectItem value="juizado">Juizado Especial</SelectItem>
+            <SelectItem value="trabalhista">Justiça do Trabalho</SelectItem>
+            <SelectItem value="nao_identificado">Rito não identificado</SelectItem>
           </SelectContent>
         </Select>
       )}

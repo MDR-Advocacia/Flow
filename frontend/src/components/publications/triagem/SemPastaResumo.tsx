@@ -13,6 +13,7 @@ import { useState } from "react";
 import { CalendarCheck, ChevronDown, ChevronUp, ExternalLink, FolderOpen, ListOrdered, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { urlPasta } from "./l1";
+import RitoBadge from "./RitoBadge";
 import type { SemPastaInfo } from "./types";
 
 function pathCurto(p?: string | null): string {
@@ -116,20 +117,12 @@ export function SemPastaResumo({ info }: { info?: SemPastaInfo | null }) {
         )}
         {/* Rito: muda a providência (recurso inominado x apelação, custas,
             prazos), então fica na primeira linha, junto do resto da identidade. */}
-        {info.rito?.rito && (
-          <span
-            title={info.rito.evidencia || undefined}
-            className={cn(
-              "rounded-full border px-2 py-0.5 text-[10.5px] font-semibold",
-              info.rito.rito === "juizado" && "border-violet-300 bg-violet-50 text-violet-800",
-              info.rito.rito === "comum" && "border-sky-300 bg-sky-50 text-sky-800",
-              info.rito.rito === "trabalhista" && "border-teal-300 bg-teal-50 text-teal-800",
-            )}
-          >
-            {info.rito.rotulo || info.rito.rito}
-            {info.rito.fonte === "datajud" && " · DataJud"}
-          </span>
-        )}
+        {/* Mesmo componente do card (pub016): uma definição visual só. */}
+        <RitoBadge
+          rito={info.rito?.rito}
+          fonte={info.rito?.fonte}
+          evidencia={info.rito?.evidencia}
+        />
       </div>
 
       {info.cliente_info && <ClienteRepresentado info={info.cliente_info} />}

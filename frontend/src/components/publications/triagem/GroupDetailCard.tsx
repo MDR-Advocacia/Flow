@@ -19,6 +19,7 @@ import TextoPublicacao from "./TextoPublicacao";
 import EtiquetasL1 from "./EtiquetasL1";
 import ResponsavelPasta from "./ResponsavelPasta";
 import SemPastaResumo from "./SemPastaResumo";
+import RitoBadge from "./RitoBadge";
 import { IGNORE_REASONS, LABEL_CONSULTOU_AUTOS } from "./motivos";
 import { urlPasta, urlPublicacao } from "./l1";
 import {
@@ -247,6 +248,19 @@ export function GroupDetailCard({
 
         <div>
           <SecaoTitulo>Classificação</SecaoTitulo>
+          {/* Rito ANTES da classificação, e fora do ramo "está classificada":
+              ele é fato do PROCESSO, não da leitura da IA, e vale mesmo na
+              publicação ainda não classificada — é o que decide recurso
+              inominado × apelação e o prazo em dobro que o juizado não tem. */}
+          {rec?.rito && (
+            <div className="mb-2">
+              <RitoBadge
+                rito={rec.rito}
+                fonte={rec.rito_fonte}
+                evidencia={rec?.sem_pasta?.rito?.evidencia}
+              />
+            </div>
+          )}
           {classificacao ? (
             <div className="flex flex-wrap items-center gap-2">
               <span className="inline-flex items-center gap-2 rounded-xl border border-primary/25 bg-primary/5 px-3 py-2 text-[15px] font-bold text-primary">

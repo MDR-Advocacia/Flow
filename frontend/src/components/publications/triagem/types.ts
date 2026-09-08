@@ -18,6 +18,11 @@ export interface Classification {
 
 export interface PublicationRecord {
   id: number;
+  /** Rito do processo (pub016): comum | juizado | trabalhista. Campo, não
+   *  categoria — muda a providência mas é ortogonal à classificação. */
+  rito?: "comum" | "juizado" | "trabalhista" | null;
+  /** "texto" (regex na publicação) | "datajud" | "nao_resolvido". */
+  rito_fonte?: string | null;
   search_id: number;
   legal_one_update_id: number;
   origin_type: string | null;

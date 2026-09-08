@@ -878,6 +878,11 @@ async def classificar_registro(db: Session, ai: Any, rec: Any) -> str:
     rito_info = avaliar_rito(rec.description, ctx.get("cnjs"))
     if rito_info["rito"]:
         rito_info["rotulo"] = ROTULO_RITO.get(rito_info["rito"], rito_info["rito"])
+    # pub016: o rito passou a ser CAMPO da publicacao (filtro e coluna na
+    # tela, para as duas filas). O dict detalhado continua no contexto —
+    # ele carrega a EVIDENCIA, que a coluna nao guarda.
+    rec.rito = rito_info["rito"]
+    rec.rito_fonte = rito_info["fonte"]
     _gravar_sem_pasta(
         rec, motor="ia", tipo=tipo,
         cliente=cliente_info["cliente"], cliente_info=cliente_info,

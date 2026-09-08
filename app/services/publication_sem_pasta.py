@@ -179,7 +179,12 @@ _RE_JUIZADO = (
     r"juizado especial|turma recursal|\bJEC\b|recurso inominado|juizado c[ií]vel|"
     r"lei\s*9\.?099|justi[çc]a\s*4\.0|colégio recursal|colegio recursal"
 )
-_RE_TRABALHISTA = r"vara do trabalho|justi[çc]a do trabalho|\bTRT\b|\bATOrd\b|reclama[çc][ãa]o trabalhista"
+# "tribunal regional do trabalho" por extenso entrou em 08/09/2026: o
+# cabecalho da publicacao escreve assim ("TRIBUNAL REGIONAL DO TRABALHO DA
+# 21a REGIAO") e so a sigla TRT estava listada, entao a publicacao de 2o
+# grau trabalhista nao era reconhecida — caia em "nao resolveu" ou, pior,
+# em comum se o texto citasse "camara" adiante.
+_RE_TRABALHISTA = r"vara do trabalho|justi[çc]a do trabalho|tribunal regional do trabalho|\bTRT\b|\bATOrd\b|reclama[çc][ãa]o trabalhista"
 _RE_COMUM = (
     r"vara c[ií]vel|vara [úu]nica|vara empresarial|vara de fam[ íi]|vara da fazenda|"
     r"c[âa]mara c[ií]vel|vara federal|vara de execu|vara cumulativa|"
