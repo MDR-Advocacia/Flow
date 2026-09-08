@@ -471,6 +471,17 @@ async def submit_classify_batch(
 
     Aceita filtro por escritório e limite de registros.
     """
+    if payload.only_unlinked:
+        # Publicacao sem pasta tem MOTOR PROPRIO (pub014): este lote e do
+        # motor de publicacoes, que nao a toca mais.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Publicações sem pasta são classificadas pelo motor próprio da "
+                "fila sem pasta: use POST /publications/sem-pasta/classificar "
+                "(ou o botão na Triagem, card 'Publicações sem pasta')."
+            ),
+        )
     records = classifier.collect_pending_records(
         linked_office_id=payload.linked_office_id,
         limit=payload.limit,
@@ -820,6 +831,10 @@ def list_records_grouped(
     date_from: Optional[str] = Query(None, description="Data início (YYYY-MM-DD). Filtra por creation_date (data do Ajus)."),
     date_to: Optional[str] = Query(None, description="Data fim (YYYY-MM-DD). Filtra por creation_date (data do Ajus)."),
     category: Optional[str] = Query(None, description="Filtra por categoria de classificação."),
+    subcategory: Optional[str] = Query(None, description="CSV de subcategorias. Sem categoria junto, casa as duas árvores de polo."),
+    distribuido_para: Optional[str] = Query(None, description="CSV de user_ids da tag de leitura; 'sem_tag' traz as não distribuídas."),
+    responsavel_pasta: Optional[str] = Query(None, description="CSV de contact_ids do responsável da pasta no L1."),
+    separar_sem_pasta: bool = Query(False, description="Publicação sem pasta pertence à fila própria (-1) e sai da fila do escritório real. A Triagem manda true; a visualização clássica, não."),
     uf: Optional[str] = Query(None, description="UF/região derivada do CNJ (ex.: SP, RJ, TRT7, TRF1)."),
     vinculo: Optional[str] = Query(None, description="Filtro de vínculo: com_processo, sem_processo."),
     natureza: Optional[str] = Query(None, description="Filtra por natureza do processo (ex.: Embargos à Execução)."),
@@ -843,6 +858,10 @@ def list_records_grouped(
         date_from=date_from,
         date_to=date_to,
         category=category,
+        subcategory=subcategory,
+        distribuido_para=distribuido_para,
+        responsavel_pasta=responsavel_pasta,
+        separar_sem_pasta=separar_sem_pasta,
         uf=uf,
         vinculo=vinculo,
         natureza=natureza,
@@ -865,6 +884,136 @@ def records_aging_summary(
 ):
     """Contadores de envelhecimento do backlog pendente (régua/banner da tela)."""
     return service.aging_summary()
+
+
+@router.get("/records/office-summary")
+def records_office_summary(
+    status: Optional[str] = Query(None, description="CSV de status. Default: os pendentes (NOVO, CLASSIFICADO, ERRO)."),
+    linked_office_id: Optional[str] = Query(None, description="CSV de escritórios. Restringe quais entram — o agrupamento continua por escritório."),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    category: Optional[str] = Query(None, description="CSV de categorias de classificação."),
+    subcategory: Optional[str] = Query(None, description="CSV de subcategorias."),
+    distribuido_para: Optional[str] = Query(None, description="CSV de user_ids da tag de leitura; 'sem_tag' traz as não distribuídas."),
+    responsavel_pasta: Optional[str] = Query(None, description="CSV de contact_ids do responsável da pasta no L1."),
+    uf: Optional[str] = Query(None),
+    vinculo: Optional[str] = Query(None),
+    natureza: Optional[str] = Query(None),
+    polo: Optional[str] = Query(None),
+    cnj_search: Optional[str] = Query(None),
+    etiqueta: Optional[str] = Query(None),
+    estado_prazo: Optional[str] = Query(None),
+    idade_min_dias: Optional[int] = Query(None, ge=0),
+    idade_max_dias: Optional[int] = Query(None, ge=0),
+    service: PublicationSearchService = Depends(_get_service),
+):
+    """Backlog pendente agregado por escritório responsável (hub da triagem)."""
+    return service.office_summary(
+        status=status,
+        linked_office_id=linked_office_id,
+        date_from=date_from,
+        date_to=date_to,
+        category=category,
+        subcategory=subcategory,
+        distribuido_para=distribuido_para,
+        responsavel_pasta=responsavel_pasta,
+        uf=uf,
+        vinculo=vinculo,
+        natureza=natureza,
+        polo=polo,
+        cnj_search=cnj_search,
+        etiqueta=etiqueta,
+        estado_prazo=estado_prazo,
+        idade_min_dias=idade_min_dias,
+        idade_max_dias=idade_max_dias,
+    )
+
+
+class DistribuirLeituraRequest(BaseModel):
+    """Escopo + leitores de uma rodada de distribuição da fila de leitura."""
+
+    user_ids: list[int] = []
+    sobrescrever: bool = False
+    linked_office_id: Optional[str] = None
+    status: Optional[str] = None
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
+    uf: Optional[str] = None
+    polo: Optional[str] = None
+    estado_prazo: Optional[str] = None
+    idade_min_dias: Optional[int] = None
+    idade_max_dias: Optional[int] = None
+    cnj_search: Optional[str] = None
+
+
+def _escopo_da_distribuicao(body: DistribuirLeituraRequest) -> dict:
+    """Só os filtros de escopo — user_ids/sobrescrever não filtram nada."""
+    dados = body.model_dump(exclude={"user_ids", "sobrescrever"})
+    return {k: v for k, v in dados.items() if v is not None}
+
+
+@router.post("/records/distribuir-leitura")
+def distribuir_leitura(
+    body: DistribuirLeituraRequest,
+    service: PublicationSearchService = Depends(_get_service),
+):
+    """Reparte as publicações pendentes do escopo entre os leitores (pub013)."""
+    try:
+        return service.distribuir_leitura(
+            user_ids=body.user_ids,
+            sobrescrever=body.sobrescrever,
+            **_escopo_da_distribuicao(body),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/records/limpar-distribuicao")
+def limpar_distribuicao(
+    body: DistribuirLeituraRequest,
+    service: PublicationSearchService = Depends(_get_service),
+):
+    """Remove a tag de leitura de todo o escopo."""
+    return service.limpar_distribuicao(**_escopo_da_distribuicao(body))
+
+
+@router.get("/records/distribuicao-summary")
+def distribuicao_summary(
+    linked_office_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    subcategory: Optional[str] = Query(None),
+    uf: Optional[str] = Query(None),
+    polo: Optional[str] = Query(None),
+    estado_prazo: Optional[str] = Query(None),
+    idade_min_dias: Optional[int] = Query(None, ge=0),
+    idade_max_dias: Optional[int] = Query(None, ge=0),
+    cnj_search: Optional[str] = Query(None),
+    service: PublicationSearchService = Depends(_get_service),
+):
+    """Quantas publicações do escopo estão com cada leitor (chips do filtro)."""
+    return service.resumo_distribuicao(
+        linked_office_id=linked_office_id,
+        status=status,
+        category=category,
+        subcategory=subcategory,
+        uf=uf,
+        polo=polo,
+        estado_prazo=estado_prazo,
+        idade_min_dias=idade_min_dias,
+        idade_max_dias=idade_max_dias,
+        cnj_search=cnj_search,
+    )
+
+
+@router.get("/records/tratadas-recentes")
+def tratadas_recentes(
+    linked_office_id: Optional[str] = Query(None, description="CSV de escritórios."),
+    limit: int = Query(20, ge=1, le=100),
+    service: PublicationSearchService = Depends(_get_service),
+):
+    """Últimas publicações tratadas (agendadas/ignoradas) — mini auditoria."""
+    return service.tratadas_recentes(linked_office_id=linked_office_id, limit=limit)
 
 
 @router.get("/records/grouped/export")
@@ -911,6 +1060,37 @@ def export_records_grouped(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ─── Fila SEM PASTA: motor proprio (pub014) ──────────────────────────────
+class SemPastaClassificarRequest(BaseModel):
+    limite: int = 500
+
+
+@router.post("/sem-pasta/classificar")
+def sem_pasta_classificar(
+    body: SemPastaClassificarRequest,
+    current_user=Depends(auth_security.get_current_user),
+):
+    """Dispara o MOTOR da fila sem pasta sobre as publicacoes NOVAS sem
+    processo vinculado (regra de pauta + identificacao + ficha). Roda em
+    background; acompanhe por GET /sem-pasta/runs."""
+    from app.services.publication_sem_pasta_motor import iniciar_em_background
+
+    email = getattr(current_user, "email", None) or "manual"
+    return iniciar_em_background(requested_by=email, limite=max(1, min(int(body.limite), 2000)))
+
+
+@router.get("/sem-pasta/runs")
+def sem_pasta_runs(
+    limit: int = Query(5, ge=1, le=50),
+    db: Session = Depends(get_db),
+    _=Depends(auth_security.get_current_user),
+):
+    """Ultimas execucoes do motor da fila sem pasta (progresso e trilha)."""
+    from app.services.publication_sem_pasta_motor import listar_runs
+
+    return {"runs": listar_runs(db, limit)}
 
 
 @router.get("/lookup-by-cnj")
@@ -1889,6 +2069,18 @@ def get_classification_taxonomy(
     # as opcoes e confundindo o operador. Com taxonomy_version explicito,
     # so volta a arvore da versao vigente (v2 quando seedada).
     active_v = get_active_taxonomy_version() or "v1"
+
+    # Escritorio FICTICIO da fila sem pasta (-1, pub014): arvore PLANA propria,
+    # isolada de ativo/passivo. Sem este ramo o filtro de Classificacao da
+    # Triagem mostraria a arvore normal — que nao tem nenhuma das categorias
+    # com que essas publicacoes sao classificadas, e filtrar devolveria zero.
+    from app.services.publication_sem_pasta import SEM_PASTA_OFFICE_ID
+
+    if office_external_id == SEM_PASTA_OFFICE_ID:
+        from app.services.publication_sem_pasta_motor import arvore_para_ui
+
+        return {"office_external_id": office_external_id, "taxonomy": arvore_para_ui()}
+
     tree_raw = _get_active_tree(
         taxonomy_version=active_v,
         office_external_id=office_external_id,

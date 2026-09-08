@@ -135,7 +135,7 @@ export default function Layout({ children }: PropsWithChildren) {
       items: [
         { to: "/publications/dashboard", icon: LayoutDashboard, label: "Dashboard", requirePermission: 'canUsePublications' },
         { to: "/automations", icon: Clock, label: "Agendamentos", requirePermission: 'canUsePublications' },
-        { to: "/publications", icon: Newspaper, label: "Publicações Legal One", requirePermission: 'canUsePublications' },
+        { to: "/publications", icon: Newspaper, label: "Publicações", requirePermission: 'canUsePublications' },
         { to: "/publications/onenotify-bb", icon: Inbox, label: "Notificações BB", requirePermission: 'canUsePublications' },
         { to: "/publications/treatment", icon: ListChecks, label: "Tratamento Web", requirePermission: 'canUsePublications' },
         { to: "/publications/citacoes-bm", icon: Gavel, label: "Citações BM", requirePermission: 'canUsePublications' },

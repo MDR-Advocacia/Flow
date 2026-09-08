@@ -175,6 +175,16 @@ class PublicationRecord(Base):
     # o sinal ficaria só do lado do agendamento.
     consultou_autos = Column(Boolean, nullable=True)
 
+    # pub013 — tag de distribuicao de leitura. A equipe se intercala entre
+    # escritorios e, sem marcacao, duas pessoas abrem a MESMA publicacao ao
+    # mesmo tempo. A tag e o combinado do turno ("essas sao minhas, aquelas
+    # sao do Ricardo"), sempre OPCIONAL: publicacao sem tag continua visivel
+    # pra todo mundo. Nome desnormalizado junto do id porque a listagem e o
+    # filtro exibem a tag e nao devem depender de join.
+    distribuido_para_user_id = Column(Integer, nullable=True, index=True)
+    distribuido_para_nome = Column(String(160), nullable=True)
+    distribuido_em = Column(DateTime(timezone=True), nullable=True)
+
     # pub010 — de quem é o ato e se ele exige providência nossa, emitidos pela
     # IA na mesma chamada da classificação. Existem porque a medição do shadow
     # mostrou que 83% dos erros do `r5_default` são compreensão de texto

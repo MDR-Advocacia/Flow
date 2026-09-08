@@ -70,6 +70,14 @@ class PublicationTreatmentRun(Base):
     log_file_path = Column(String, nullable=True)
     error_log_file_path = Column(String, nullable=True)
 
+    # PID do processo Node do runner (pub015). Sem ele o reaper de zumbi
+    # marcava a execucao como FALHA e ia embora, deixando o runner VIVO e
+    # travado segurando a arvore de Chrome — foi assim que o container ficou
+    # sem PIDs em 08/09/2026. O processo nasce em sessao propria
+    # (start_new_session), entao este pid tambem e o PGID: matar o grupo leva
+    # o Node e todos os Chrome de uma vez, sem risco de encostar na API.
+    runner_pid = Column(Integer, nullable=True)
+
     total_items = Column(Integer, nullable=False, default=0)
     processed_items = Column(Integer, nullable=False, default=0)
     success_count = Column(Integer, nullable=False, default=0)

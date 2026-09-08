@@ -202,3 +202,77 @@ def test_confirmation_helper_fills_only_payloads_missing_responsible():
     assert client.calls == [123]
     assert payloads[0]["participants"][0]["contact"]["id"] == 888
     assert payloads[1]["participants"][0]["contact"]["id"] == 10
+
+
+def test_busca_de_responsavel_que_cai_nao_sobrescreve_proposta_boa(monkeypatch):
+    """Pane de infraestrutura não pode virar proposta sem responsável.
+
+    Em 08/09/2026 o container da API ficou sem PID (vazamento de Chrome do
+    Tratamento Web). O `prefetch_lawsuit_responsibles_cache` roda num
+    ThreadPoolExecutor, então ele morreu com "can't start new thread" — e o
+    `except Exception` da época só logava um warning e seguia. Resultado: 650
+    propostas foram GRAVADAS com `participants: []`, e o operador viu
+    "Selecione um usuário" num modal que devia vir pronto.
+
+    O estrago não foi a falha em si (passageira), foi ela ter sido
+    PERSISTIDA: na tela o sintoma é idêntico ao de um template mal
+    configurado, então o diagnóstico natural do operador aponta pro lugar
+    errado — foi exatamente o que aconteceu.
+
+    Regra: se a busca caiu por inteiro, quem dependia dela fica como estava.
+    Proposta velha o operador reconhece; proposta manca ele confunde.
+    """
+    engine, db = _make_session()
+
+    class ClienteQueCai:
+        def prefetch_lawsuit_responsibles_cache(self, lawsuit_ids):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(
+        "app.services.legal_one_client.LegalOneApiClient", ClienteQueCai
+    )
+
+    try:
+        search = _seed_refs(db)
+        # depende da busca (template sem responsável nominal)
+        dependente = _record(search, update_id=4, lawsuit_id=504, category="Sem User")
+        # não depende (template com responsável nominal) — tem que ser refeito
+        autonomo = _record(search, update_id=5, lawsuit_id=505, category="Com User")
+
+        anterior = {"_proposed_task": {"payload": {
+            "participants": [{"contact": {"id": 42}, "isResponsible": True}],
+            "description": "proposta boa de ontem",
+        }}}
+        dependente.raw_relationships = dict(anterior)
+
+        db.add_all([
+            dependente,
+            autonomo,
+            TaskTemplate(
+                name="Sem user", category="Sem User", office_external_id=61,
+                task_subtype_external_id=100, responsible_user_external_id=None,
+                priority="Normal", due_business_days=3,
+            ),
+            TaskTemplate(
+                name="Com user", category="Com User", office_external_id=61,
+                task_subtype_external_id=100, responsible_user_external_id=10,
+                priority="Normal", due_business_days=3,
+            ),
+        ])
+        db.commit()
+
+        PublicationSearchService(db=db, client=object())._build_task_proposals(
+            [dependente, autonomo]
+        )
+
+        # a proposta boa sobreviveu
+        preservada = dependente.raw_relationships["_proposed_task"]["payload"]
+        assert preservada["description"] == "proposta boa de ontem"
+        assert preservada["participants"][0]["contact"]["id"] == 42
+
+        # quem não dependia da busca foi montado normalmente
+        novo = autonomo.raw_relationships["_proposed_task"]["payload"]
+        assert novo["participants"][0]["contact"]["id"] == 10
+    finally:
+        db.close()
+        engine.dispose()

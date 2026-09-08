@@ -315,19 +315,32 @@ def get_office_coverage(
     #
     # Se a v2 ainda nao esta seedada (DB sem cats v2), cai em v1 — ai
     # nao tem como mostrar diferente mesmo.
-    polo_filter = polo if polo in ("ativo", "passivo") else None
-    tree_dict = _get_active_tree(
-        polo_scope=polo_filter,
-        taxonomy_version="v2",
-    )
-    used_version = "v2"
-    if not tree_dict:
-        # v2 nao seedada — fallback pra v1.
+    # Escritorio FICTICIO da fila sem pasta (-1, pub014): a arvore e a do
+    # MOTOR PROPRIO — 16 tipos, plana, em codigo. Nao passa pela taxonomia
+    # v2 nem por polo: sao mundos separados (dois motores). Sem este ramo a
+    # cobertura mostraria as cats dos escritorios reais, com que essa fila
+    # nunca e classificada — o operador configuraria template que nao casa.
+    from app.services.publication_sem_pasta import SEM_PASTA_OFFICE_ID
+
+    if office_external_id == SEM_PASTA_OFFICE_ID:
+        from app.services.publication_sem_pasta_motor import arvore_para_ui
+
+        tree_dict = arvore_para_ui()
+        used_version = "sem_pasta"
+    else:
+        polo_filter = polo if polo in ("ativo", "passivo") else None
         tree_dict = _get_active_tree(
             polo_scope=polo_filter,
-            taxonomy_version="v1",
+            taxonomy_version="v2",
         )
-        used_version = "v1"
+        used_version = "v2"
+        if not tree_dict:
+            # v2 nao seedada — fallback pra v1.
+            tree_dict = _get_active_tree(
+                polo_scope=polo_filter,
+                taxonomy_version="v1",
+            )
+            used_version = "v1"
 
     # Carrega todos os templates do escritorio (ativos + pendentes,
     # globais incluidos) com 1 query e mapeia por (cat, sub).
@@ -743,6 +756,23 @@ def list_categories(
       explicito, usa o polo do proprio escritorio (regra "arvore do polo do
       escritorio responsavel" — fluxo principal da v2).
     """
+    # Escritorio FICTICIO da fila sem pasta (-1, pub014): a taxonomia e a do
+    # MOTOR PROPRIO, em codigo — nao passa pela arvore v2 nem por overrides.
+    try:
+        from app.services.publication_sem_pasta import SEM_PASTA_OFFICE_ID
+        from app.services.publication_sem_pasta_motor import arvore_para_ui
+
+        if office_external_id == SEM_PASTA_OFFICE_ID:
+            return {
+                "categories": [
+                    {"category": cat, "subcategories": []} for cat in arvore_para_ui()
+                ],
+                "polo_scope_applied": "sem_pasta",
+                "taxonomy_version_applied": None,
+            }
+    except Exception:
+        pass
+
     try:
         from app.services.classifier.taxonomy import _get_active_tree  # noqa: WPS433
     except Exception:

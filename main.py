@@ -324,6 +324,18 @@ async def lifespan(_: FastAPI):
     except Exception:
         logger.exception("Falha ao registrar reaper periódico de automations.")
 
+    # Vigia de PIDs: mata RPA pendurado antes que ele esgote o cgroup.
+    # Em 08/09/2026 tres runners do L1 pendurados havia dias (cada um com uma
+    # arvore de Chrome viva) ocuparam as 300 PIDs do container: a API parou de
+    # criar thread, o healthcheck nao forkava e o modulo de publicacoes
+    # aparecia "lento e com erro" pros operadores. Ver rpa_pid_watchdog.
+    try:
+        from app.services.rpa_pid_watchdog import register_rpa_pid_watchdog_job
+
+        register_rpa_pid_watchdog_job(scheduler)
+    except Exception:
+        logger.exception("Falha ao registrar o vigia de PIDs/RPA.")
+
     # Motor dormente do Classificador — agrupa PDFs do robo em batches.
     try:
         from app.services.classificador.pending_worker import (

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -34,12 +34,32 @@ class OfficePoloScopePayload(BaseModel):
 
 
 @router.get("/offices", response_model=List[OfficeResponse], summary="Listar todos os escritórios ativos", tags=["Offices"])
-def get_all_offices(db: Session = Depends(get_db)):
+def get_all_offices(
+    include_virtual: bool = Query(
+        False,
+        description=(
+            "Inclui escritórios VIRTUAIS da casa (external_id negativo, ex.: -1 "
+            "'Publicações sem pasta'). Default false: eles não existem no Legal "
+            "One e não podem ir num payload de tarefa nem numa automação."
+        ),
+    ),
+    db: Session = Depends(get_db),
+):
     """
-    Retorna uma lista de todos os escritórios (Offices) que estão marcados como ativos no sistema.
+    Retorna os escritórios ativos.
+
+    Escritórios VIRTUAIS (external_id < 0) ficam de FORA por padrão. Eles são
+    da casa, não do Legal One: existem só para dar área de templates e card de
+    fila a publicações sem processo vinculado (pub014). Esta lista alimenta
+    ~10 telas, entre elas Automações e criação de tarefa — mandar um id que o
+    L1 não conhece viraria erro na hora de agendar ou uma automação varrendo
+    um escritório inexistente. Quem precisa deles (a UI de Templates) pede
+    explicitamente com `include_virtual=true`.
     """
-    offices = db.query(LegalOneOffice).filter(LegalOneOffice.is_active == True).order_by(LegalOneOffice.path).all()
-    return offices
+    query = db.query(LegalOneOffice).filter(LegalOneOffice.is_active == True)  # noqa: E712
+    if not include_virtual:
+        query = query.filter(LegalOneOffice.external_id >= 0)
+    return query.order_by(LegalOneOffice.path).all()
 
 
 @router.patch(

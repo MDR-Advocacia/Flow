@@ -110,3 +110,6 @@ auditoria-*/
 # e faz `git add -A` falhar com "Function not implemented". A regra
 # node_modules/ acima nao pega porque isto e um symlink, nao um diretorio.
 app/runners/legalone/node_modules
+
+# token de dev local (nunca versionar)
+frontend/public/dev-token.txt

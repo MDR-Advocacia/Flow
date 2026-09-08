@@ -148,6 +148,13 @@ class Settings(BaseSettings):
     # existe. Sobrescrevível por PUBLICATION_ALERT_EMAIL no Coolify.
     publication_alert_email: str | None = "ti@mdradvocacia.com,jonilsonvilela@mdradvocacia.com"
 
+    # Vigia de PIDs do container (rpa_pid_watchdog). Ligado por padrao: o
+    # incidente de 08/09/2026 (300/300 PIDs, API sem conseguir criar thread)
+    # nao teve aviso nenhum ate o operador reclamar. Ajustaveis por env:
+    # RPA_WATCHDOG_IDADE_MAX_MIN (120), RPA_WATCHDOG_ALERTA_PCT (70),
+    # RPA_WATCHDOG_INTERVALO_MIN (10).
+    rpa_pid_watchdog_enabled: bool = True
+
     # ── Terceira contingência: DJEN/Comunica ──────────────────────────
     # Última rede da captura, acionada só depois que a API do L1 E o relatório
     # do L1 Web falharam. Fica DESLIGADA por padrão: é contingência oculta, e

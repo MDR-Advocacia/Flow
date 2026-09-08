@@ -75,6 +75,12 @@ def _registro(db, texto="Intime-se o autor para manifestar em 15 dias."):
         description=texto,
         status=RECORD_STATUS_NEW,
         is_duplicate=False,
+        # COM pasta de proposito: publicacao sem pasta tem motor proprio
+        # (pub014) e este lote a ignora — sem isto o registro e' descartado
+        # antes de montar requisicao e o teste morre em "nenhum registro com
+        # texto util", falando de cache sem nunca ter chegado no cache.
+        linked_lawsuit_id=70000 + _seq[0],
+        linked_office_id=61,
     )
     db.add(rec)
     db.commit()

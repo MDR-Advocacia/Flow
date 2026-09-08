@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -744,7 +745,18 @@ class PublicationTreatmentService:
                 stdout=stdout,
                 stderr=stderr,
                 creationflags=creation_flags,
+                # Sessão própria = grupo de processos próprio (pub015). É o que
+                # permite matar o runner junto com TODA a árvore de Chrome num
+                # golpe só, sem risco de o sinal subir pro uvicorn — o Chromium
+                # do Playwright não morre junto com o Node, e cada vazamento
+                # deixa ~7 processos vivos.
+                start_new_session=(os.name != "nt"),
             )
+
+        # Guarda o PID ANTES de qualquer outra coisa: se o processo pendurar,
+        # este número é a única forma de encontrá-lo depois.
+        run.runner_pid = proc.pid
+        self.db.commit()
 
         logger.info(
             "tratamento: runner iniciado run=%s pid=%s batch=%s items=%s",
@@ -983,6 +995,56 @@ class PublicationTreatmentService:
             )
         return info
 
+    @staticmethod
+    def _encerrar_runner(run) -> str:
+        """Mata o processo do runner e toda a árvore de Chrome dele.
+
+        A premissa antiga do reaper era que o runner já estava morto
+        ("OOM/restart/deploy"). Em 08/09/2026 provou-se falsa da pior forma:
+        três runners VIVOS e travados havia dias seguravam 266 dos 300 PIDs do
+        container, a API parou de criar thread e o módulo de publicações caiu
+        junto. Marcar FALHA no banco não encosta em processo — matar, sim.
+
+        Mata o GRUPO (o runner nasce com `start_new_session`, então PID = PGID):
+        um `killpg` leva o Node e os ~6 Chrome de uma vez. Sem grupo próprio um
+        killpg subiria pro uvicorn, então quando o grupo não confere o código
+        cai pro PID sozinho — pior, mas nunca perigoso.
+
+        Devolve um rótulo curto pro texto do evento/erro.
+        """
+        pid = getattr(run, "runner_pid", None)
+        if not pid:
+            return "sem PID registrado (execução anterior ao pub015)"
+        if os.name == "nt":  # pragma: no cover - produção é Linux
+            return f"PID {pid} (kill de grupo indisponível no Windows)"
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return f"PID {pid} já estava morto"
+        except OSError:
+            return f"PID {pid} inacessível"
+
+        alvo, modo = pid, "grupo"
+        try:
+            if os.getpgid(pid) != pid:
+                # Não é líder de grupo: matar o grupo atingiria quem não deve.
+                modo = "processo"
+        except OSError:
+            modo = "processo"
+        try:
+            if modo == "grupo":
+                os.killpg(alvo, signal.SIGKILL)
+            else:
+                os.kill(alvo, signal.SIGKILL)
+        except OSError as exc:
+            logger.warning("tratamento: falha ao matar o runner %s: %s", pid, exc)
+            return f"PID {pid} não pôde ser encerrado ({exc})"
+        logger.warning(
+            "tratamento: runner pendurado do run #%s encerrado (%s %s).",
+            run.id, modo, pid,
+        )
+        return f"{modo} {pid} encerrado à força"
+
     def recover_stale_runs(
         self,
         *,
@@ -1031,13 +1093,17 @@ class PublicationTreatmentService:
             if last_sign_of_life >= cutoff:
                 continue
 
+            # MATA ANTES de marcar: se o runner ainda estiver vivo (travado, que
+            # é o caso comum e o que derrubou o container em 08/09/2026), deixar
+            # pra trás significa Chrome comendo PID até o próximo deploy.
+            desfecho = self._encerrar_runner(run)
+
             run.status = RUN_STATUS_FAILED
             run.finished_at = now
             run.error_message = (
                 f"Execucao zumbi detectada ({reason}): sem heartbeat do runner ha mais de "
-                f"{threshold} min. O processo Playwright provavelmente morreu "
-                "(OOM/restart/deploy) sem gravar estado final. Itens em PROCESSANDO "
-                "voltaram pra fila e serao tratados no proximo ciclo."
+                f"{threshold} min. Encerramento do processo: {desfecho}. Itens em "
+                "PROCESSANDO voltaram pra fila e serao tratados no proximo ciclo."
             )
             stuck_items = (
                 self.db.query(PublicationTreatmentItem)

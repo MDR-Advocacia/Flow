@@ -78,7 +78,7 @@ export function OfficeTemplatesView() {
 
   // Carrega escritorios (uma vez)
   useEffect(() => {
-    apiFetch("/api/v1/offices")
+    apiFetch("/api/v1/offices?include_virtual=true")
       .then((r) => (r.ok ? r.json() : []))
       .then((rows: Office[]) => {
         const sorted = [...(rows || [])].sort((a, b) =>

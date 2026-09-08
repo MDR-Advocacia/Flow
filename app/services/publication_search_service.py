@@ -45,6 +45,12 @@ from app.models.publication_search import (
 )
 from app.services.legal_one_client import LegalOneApiClient
 
+from app.services.publication_sem_pasta import (
+    SEM_PASTA_OFFICE_ID,
+    e_escritorio_ficticio,
+    office_l1_para_tarefa,
+)
+
 logger = logging.getLogger(__name__)
 
 _METRICS_TZ = ZoneInfo("America/Fortaleza")
@@ -96,6 +102,16 @@ _DUPLICATE_CACHE_TTL_SECONDS = 15.0
 # _DUPLICATE_CACHE no fim de get_recent_tasks_for_lawsuit.
 _RECENT_TASKS_CACHE: dict[int, tuple[float, list]] = {}
 _RECENT_TASKS_CACHE_TTL_SECONDS = 15.0
+# Fila PENDENTE: o que ainda espera decisao humana. E' o universo da regua
+# de envelhecimento — tanto dos numeros (aging_summary) quanto dos filtros
+# que a regua dispara. Fora daqui o registro JA foi tratado (AGENDADO,
+# IGNORADO) ou descartado, e envelhecer nao quer dizer nada.
+_STATUS_PENDENTES = (
+    RECORD_STATUS_NEW,
+    RECORD_STATUS_CLASSIFIED,
+    RECORD_STATUS_ERROR,
+)
+
 _WITHOUT_PROVIDENCE_STATUSES = (
     RECORD_STATUS_IGNORED,
     RECORD_STATUS_DISCARDED_DUPLICATE,
@@ -377,6 +393,12 @@ class PublicationSearchService:
         if responsible_office_id:
             _office_ids.append(int(responsible_office_id))
         _office_ids = list(dict.fromkeys(_office_ids))  # unique preserva ordem
+        # Escritorio FICTICIO da fila sem pasta (-1, pub014): "buscar nele" e
+        # buscar so o que NAO tem processo vinculado. Assim o seletor de
+        # escritorio da tela de busca funciona sem caixa especial.
+        if SEM_PASTA_OFFICE_ID in _office_ids:
+            _office_ids = [o for o in _office_ids if o != SEM_PASTA_OFFICE_ID]
+            only_unlinked = True
         _office_ids_set: set[int] = set(_office_ids)
 
         search = PublicationSearch(
@@ -959,9 +981,12 @@ class PublicationSearchService:
             return
 
         # Classifica apenas NOVO com texto — pula duplicatas/já classificados
+        # Publicacao SEM pasta pertence ao motor proprio da fila sem pasta
+        # (publication_sem_pasta_motor) — este motor nao a toca (pub014).
         to_classify = [
             r for r in records
             if r.status == RECORD_STATUS_NEW and (r.description or "").strip()
+            and r.linked_lawsuit_id is not None
         ]
         if not to_classify:
             logger.info("Nenhum registro novo com texto para classificar.")
@@ -1292,14 +1317,20 @@ class PublicationSearchService:
                     self._resolve_office_polo(rec.linked_office_id)
                     or getattr(rec, "polo", None)
                 )
-                try:
-                    repaired_cat, repaired_sub = repair_classification(
-                        raw_cat, raw_sub,
-                        polo_scope=match_polo,
-                        taxonomy_version="v2",
-                    )
-                except Exception:
-                    repaired_cat, repaired_sub = raw_cat, raw_sub
+                if rec.linked_lawsuit_id is None:
+                    # Fila SEM PASTA (pub014): a categoria vem do MOTOR PROPRIO,
+                    # ja canonica e fora da taxonomia v2 — nao passa pelo repair
+                    # (que a empurraria pra "Para Analise" por nao conhece-la).
+                    repaired_cat, repaired_sub = raw_cat, "-"
+                else:
+                    try:
+                        repaired_cat, repaired_sub = repair_classification(
+                            raw_cat, raw_sub,
+                            polo_scope=match_polo,
+                            taxonomy_version="v2",
+                        )
+                    except Exception:
+                        repaired_cat, repaired_sub = raw_cat, raw_sub
                 # Sub: aceita TANTO a raw quanto a repaired. Motivo: o
                 # repair forca a sub pra "Para Análise" quando a sub raw
                 # nao existe na taxonomia v2 (ex.: pub veio com sub
@@ -1314,14 +1345,21 @@ class PublicationSearchService:
                 # Busca templates correspondentes:
                 #   - Se o registro tem escritório: busca templates do escritório OU templates globais (office IS NULL)
                 #   - Se o registro não tem escritório (sem processo): busca APENAS templates globais (office IS NULL)
-                office_filter = (
-                    (
+                if rec.linked_lawsuit_id is None:
+                    # Fila SEM PASTA: templates do escritorio FICTICIO (-1),
+                    # a area "Publicacoes sem pasta" da UI de templates. O
+                    # global (NULL) segue valendo como fallback, como sempre.
+                    office_filter = (
+                        (TaskTemplate.office_external_id == SEM_PASTA_OFFICE_ID)
+                        | (TaskTemplate.office_external_id.is_(None))
+                    )
+                elif rec.linked_office_id:
+                    office_filter = (
                         (TaskTemplate.office_external_id == rec.linked_office_id)
                         | (TaskTemplate.office_external_id.is_(None))
                     )
-                    if rec.linked_office_id
-                    else TaskTemplate.office_external_id.is_(None)
-                )
+                else:
+                    office_filter = TaskTemplate.office_external_id.is_(None)
                 # Taxonomy v2 (tax003/tax007): pula templates pendentes de
                 # revisao. Legacy v1 ficam dormentes ate o operador
                 # re-apontar pra cat/sub da v2 via POST
@@ -1450,6 +1488,7 @@ class PublicationSearchService:
         # chamada L1 sincrona paralela (max_workers=2) e ja cacheia pra
         # proximas confirmacoes (TTL 24h).
         lawsuit_responsibles: dict = {}
+        busca_de_responsavel_caiu = False
         if lawsuit_ids_needing_responsible:
             try:
                 from app.services.legal_one_client import LegalOneApiClient
@@ -1461,10 +1500,37 @@ class PublicationSearchService:
                     len(lawsuit_responsibles), len(lawsuit_ids),
                 )
             except Exception as exc:
-                logger.warning("Falha ao resolver responsaveis de pasta: %s", exc)
+                # NAO e' "essa pasta nao tem responsavel" — e' a busca inteira
+                # que caiu. A diferenca importa: sem ela, uma pane de
+                # infraestrutura vira 650 propostas silenciosamente mancas.
+                busca_de_responsavel_caiu = True
+                logger.error(
+                    "Responsavel de pasta: a busca FALHOU para %d processo(s) "
+                    "(%s). As propostas desses registros NAO serao "
+                    "sobrescritas — a anterior, ainda que velha, e' melhor "
+                    "que uma nova sem responsavel.",
+                    len(lawsuit_ids_needing_responsible), exc,
+                )
 
         for rec in records:
             if not rec.category:
+                continue
+
+            # 08/09/2026: o container ficou sem PID, o ThreadPoolExecutor do
+            # prefetch nao conseguiu criar thread ("can't start new thread"),
+            # o except engoliu e 650 propostas foram GRAVADAS com
+            # participants: []. Na tela isso aparece como "Selecione um
+            # usuario" num modal que deveria vir pronto — e nada, em lugar
+            # nenhum, dizia que tinha havido uma falha.
+            #
+            # Regra: quando a busca caiu por inteiro, o registro que DEPENDIA
+            # dela fica como estava. Proposta velha o operador reconhece;
+            # proposta nova e manca ele confunde com configuracao errada do
+            # template (foi exatamente o que aconteceu).
+            if (
+                busca_de_responsavel_caiu
+                and rec.linked_lawsuit_id in lawsuit_ids_needing_responsible
+            ):
                 continue
 
             lawsuit_resp = lawsuit_responsibles.get(rec.linked_lawsuit_id) if rec.linked_lawsuit_id else None
@@ -2307,6 +2373,10 @@ class PublicationSearchService:
             office.external_id if office
             else rec.linked_office_id  # pode ainda ser None
         )
+        # Escritorio FICTICIO (fila sem pasta) nao existe no L1: a tarefa de
+        # saneamento sai no escritorio REAL configurado (default: raiz MDR).
+        if e_escritorio_ficticio(effective_office_id):
+            effective_office_id = office_l1_para_tarefa()
 
         participants = []
         if user:
@@ -2415,10 +2485,19 @@ class PublicationSearchService:
                 query = query.filter(PublicationRecord.status.in_(status_list))
         office_ids = _parse_csv_ints(linked_office_id)
         if office_ids:
-            if len(office_ids) == 1:
-                query = query.filter(PublicationRecord.linked_office_id == office_ids[0])
-            else:
-                query = query.filter(PublicationRecord.linked_office_id.in_(office_ids))
+            # -1 = escritorio FICTICIO da fila sem pasta (pub014). Nao e valor
+            # da coluna: e a ausencia de processo vinculado.
+            reais = [o for o in office_ids if o != SEM_PASTA_OFFICE_ID]
+            conds = []
+            if reais:
+                conds.append(
+                    PublicationRecord.linked_office_id == reais[0]
+                    if len(reais) == 1
+                    else PublicationRecord.linked_office_id.in_(reais)
+                )
+            if SEM_PASTA_OFFICE_ID in office_ids:
+                conds.append(PublicationRecord.linked_lawsuit_id.is_(None))
+            query = query.filter(or_(*conds) if len(conds) > 1 else conds[0])
 
         total = query.count()
         records = (
@@ -2456,8 +2535,21 @@ class PublicationSearchService:
         estado_prazo: Optional[str] = None,
         idade_min_dias: Optional[int] = None,
         idade_max_dias: Optional[int] = None,
+        subcategory: Optional[str] = None,
+        distribuido_para: Optional[str] = None,
+        responsavel_pasta: Optional[str] = None,
+        separar_sem_pasta: bool = False,
     ):
-        """Query base reutilizada por list_records_grouped e contagens."""
+        """Query base reutilizada por list_records_grouped e contagens.
+
+        `separar_sem_pasta` (pub014) faz a publicação SEM pasta pertencer à
+        fila própria (escritório fictício -1) e sair da fila do escritório
+        real. Sem isso, hub e fila discordam: o hub já joga essas publicações
+        no card -1, mas o filtro por escritório continua casando pela coluna
+        `linked_office_id` — o card do BB/Autor dizia 13 e a fila abria com
+        44. É OPT-IN porque a visualização CLÁSSICA depende do comportamento
+        antigo (lá o escritório mostra tudo o que tem o id dele).
+        """
         query = self.db.query(PublicationRecord).filter(PublicationRecord.is_duplicate == False)  # noqa: E712
         if search_id is not None:
             query = query.filter(PublicationRecord.search_id == search_id)
@@ -2468,16 +2560,46 @@ class PublicationSearchService:
                 query = query.filter(PublicationRecord.status == status_list[0])
             else:
                 query = query.filter(PublicationRecord.status.in_(status_list))
+        elif (
+            estado_prazo is not None
+            or idade_min_dias is not None
+            or idade_max_dias is not None
+        ):
+            # A REGUA IMPLICA PENDENTE. Reportado em 08/09/2026: o chip
+            # "+30d - 9" abria uma lista de 48.874 publicacoes, a esmagadora
+            # maioria ja IGNORADA ou AGENDADA — porque o numero do chip vem do
+            # aging_summary (que conta so' pendente) e o clique mandava apenas
+            # o corte de idade, com o STATUS em "Todos". Numero e lista falavam
+            # de universos diferentes, e o alarme virava mentira.
+            #
+            # Aqui a regra vale pro backend inteiro, entao vale pra tela
+            # classica de hoje e pra Triagem nova sem depender de nenhuma das
+            # duas mandar o parametro certo. Status EXPLICITO continua
+            # mandando: quem quiser auditar "o que ficou velho e acabou
+            # ignorado" pede status=IGNORADO e recebe exatamente isso.
+            query = query.filter(PublicationRecord.status.in_(_STATUS_PENDENTES))
         else:
             # Sem filtro explícito, esconde obsoletas (não poluem a listagem principal).
             query = query.filter(PublicationRecord.status != RECORD_STATUS_OBSOLETE)
         # linked_office_id aceita int, CSV ("61,62") ou lista.
         office_ids = _parse_csv_ints(linked_office_id)
         if office_ids:
-            if len(office_ids) == 1:
-                query = query.filter(PublicationRecord.linked_office_id == office_ids[0])
-            else:
-                query = query.filter(PublicationRecord.linked_office_id.in_(office_ids))
+            # -1 = escritorio FICTICIO da fila sem pasta (pub014). Nao e valor
+            # da coluna: e a ausencia de processo vinculado.
+            reais = [o for o in office_ids if o != SEM_PASTA_OFFICE_ID]
+            conds = []
+            if reais:
+                conds.append(
+                    PublicationRecord.linked_office_id == reais[0]
+                    if len(reais) == 1
+                    else PublicationRecord.linked_office_id.in_(reais)
+                )
+            if SEM_PASTA_OFFICE_ID in office_ids:
+                conds.append(PublicationRecord.linked_lawsuit_id.is_(None))
+            query = query.filter(or_(*conds) if len(conds) > 1 else conds[0])
+            # Escritório real na Triagem: o que não tem pasta é da fila -1.
+            if separar_sem_pasta and reais and SEM_PASTA_OFFICE_ID not in office_ids:
+                query = query.filter(PublicationRecord.linked_lawsuit_id.isnot(None))
         if date_from:
             query = query.filter(PublicationRecord.creation_date >= date_from)
         if date_to:
@@ -2520,6 +2642,31 @@ class PublicationSearchService:
                 query = query.filter(PublicationRecord.category == category_list[0])
             else:
                 query = query.filter(PublicationRecord.category.in_(category_list))
+        # Subcategoria: mesmo contrato CSV da categoria. A mesma subcategoria
+        # pode existir em categorias diferentes (ex.: "Apelacao" vive em
+        # Recursos no ativo e em Recursos e Julgamentos em 2o Grau no passivo),
+        # entao filtrar so por subcategoria casa as duas arvores; quem quer o
+        # ramo exato manda categoria + subcategoria juntas.
+        subcategory_list = _parse_csv_strs(subcategory)
+        if subcategory_list:
+            if len(subcategory_list) == 1:
+                query = query.filter(PublicationRecord.subcategory == subcategory_list[0])
+            else:
+                query = query.filter(PublicationRecord.subcategory.in_(subcategory_list))
+        # Tag de distribuicao de leitura (pub013). CSV de user_ids; o literal
+        # "sem_tag" traz o que ainda nao foi distribuido — e o par natural do
+        # filtro, porque no meio do turno sempre sobra fila sem dono.
+        distrib_raw = _parse_csv_strs(distribuido_para)
+        if distrib_raw:
+            quer_sem_tag = "sem_tag" in distrib_raw
+            ids = [int(v) for v in distrib_raw if v.strip().lstrip("-").isdigit()]
+            conds = []
+            if ids:
+                conds.append(PublicationRecord.distribuido_para_user_id.in_(ids))
+            if quer_sem_tag:
+                conds.append(PublicationRecord.distribuido_para_user_id.is_(None))
+            if conds:
+                query = query.filter(or_(*conds))
         uf_list = [u.strip().upper() for u in _parse_csv_strs(uf)]
         if uf_list:
             if len(uf_list) == 1:
@@ -2592,6 +2739,23 @@ class PublicationSearchService:
                     "WHERE c.lawsuit_id = publicacao_registros.linked_lawsuit_id "
                     "AND e->>'name' = ANY(:etq_nomes))"
                 ).bindparams(etq_nomes=etiquetas),
+            )
+        # Responsável da pasta. Mesma natureza da etiqueta — não é coluna de
+        # publicacao_registros, vem do `lawsuit_cache` (JSON `responsibleUser`),
+        # daí o EXISTS. E mesma ressalva: filtrar por responsável esconde
+        # publicação sem pasta e pasta que o cache ainda não visitou.
+        responsaveis = [
+            int(x) for x in _parse_csv_strs(responsavel_pasta) if str(x).strip().isdigit()
+        ]
+        if responsaveis:
+            query = query.filter(
+                PublicationRecord.linked_lawsuit_id.isnot(None),
+                sa.text(
+                    "EXISTS (SELECT 1 FROM lawsuit_cache lc "
+                    "WHERE lc.lawsuit_id = publicacao_registros.linked_lawsuit_id "
+                    "AND CAST(CAST(lc.payload AS jsonb)->'responsibleUser'->>'id' AS integer) "
+                    "= ANY(:resp_pasta_ids))"
+                ).bindparams(resp_pasta_ids=responsaveis),
             )
         return query
 
@@ -2680,6 +2844,10 @@ class PublicationSearchService:
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
         category: Optional[str] = None,
+        subcategory: Optional[str] = None,
+        distribuido_para: Optional[str] = None,
+        responsavel_pasta: Optional[str] = None,
+        separar_sem_pasta: bool = False,
         uf: Optional[str] = None,
         vinculo: Optional[str] = None,
         natureza: Optional[str] = None,
@@ -2705,7 +2873,10 @@ class PublicationSearchService:
             search_id=search_id, status=status,
             linked_office_id=linked_office_id,
             date_from=date_from, date_to=date_to,
-            category=category, uf=uf,
+            category=category, subcategory=subcategory,
+            distribuido_para=distribuido_para,
+            responsavel_pasta=responsavel_pasta,
+            separar_sem_pasta=separar_sem_pasta, uf=uf,
             vinculo=vinculo, natureza=natureza,
             polo=polo, cnj_search=cnj_search,
             scheduled_by_user_id=scheduled_by_user_id,
@@ -2792,7 +2963,10 @@ class PublicationSearchService:
             search_id=search_id, status=status,
             linked_office_id=linked_office_id,
             date_from=date_from, date_to=date_to,
-            category=category, uf=uf,
+            category=category, subcategory=subcategory,
+            distribuido_para=distribuido_para,
+            responsavel_pasta=responsavel_pasta,
+            separar_sem_pasta=separar_sem_pasta, uf=uf,
             vinculo=vinculo, natureza=natureza,
             polo=polo, cnj_search=cnj_search,
             scheduled_by_user_id=None,  # ignora pra descobrir todos
@@ -2846,6 +3020,15 @@ class PublicationSearchService:
             logger.exception("Falha ao listar etiquetas pro filtro (ignorado).")
             available_etiquetas = []
 
+        # Donos de pasta com publicação parada na fila — alimenta o filtro.
+        try:
+            from app.services.publication_responsavel_pasta import responsaveis_distintos
+
+            available_responsaveis = responsaveis_distintos(self.db)
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao listar responsáveis de pasta pro filtro (ignorado).")
+            available_responsaveis = []
+
         # Busca as group_keys da página atual. Ordem padrão = URGÊNCIA:
         # menor prazo estimado primeiro (sem prazo vai pro fim), depois a
         # publicação mais antiga. A ordem antiga ("grupo", por group_key =
@@ -2881,6 +3064,7 @@ class PublicationSearchService:
                 "available_ufs": available_ufs,
                 "available_scheduled_by": available_scheduled_by,
                 "available_etiquetas": available_etiquetas,
+                "available_responsaveis": available_responsaveis,
             }
 
         # ─── Etapa 2: carrega records só dos grupos da página ───────
@@ -2897,7 +3081,10 @@ class PublicationSearchService:
             search_id=search_id, status=status,
             linked_office_id=linked_office_id,
             date_from=date_from, date_to=date_to,
-            category=category, uf=uf,
+            category=category, subcategory=subcategory,
+            distribuido_para=distribuido_para,
+            responsavel_pasta=responsavel_pasta,
+            separar_sem_pasta=separar_sem_pasta, uf=uf,
             vinculo=vinculo, natureza=natureza,
             polo=polo, cnj_search=cnj_search,
             scheduled_by_user_id=scheduled_by_user_id,
@@ -2964,6 +3151,24 @@ class PublicationSearchService:
         except Exception:  # noqa: BLE001
             logger.exception("Falha ao anexar etiquetas L1 nos grupos (ignorado).")
 
+        # Responsável nominal da pasta (cache local, 1 query pra página). É a
+        # outra metade da identidade do processo, ao lado da etiqueta: a
+        # etiqueta diz COMO tratar, o responsável diz DE QUEM é a pasta.
+        # Ausente = ainda não consultado (≠ "sem responsável") — a tela
+        # diferencia os dois casos.
+        try:
+            from app.services.publication_responsavel_pasta import responsaveis_por_lawsuit
+
+            resp_map = responsaveis_por_lawsuit(
+                self.db,
+                [g["lawsuit_id"] for g in grouped_list if g.get("lawsuit_id")],
+            )
+            for g in grouped_list:
+                lid = g.get("lawsuit_id")
+                g["responsavel_pasta"] = resp_map.get(int(lid)) if lid else None
+        except Exception:  # noqa: BLE001
+            logger.exception("Falha ao anexar responsável da pasta nos grupos (ignorado).")
+
         return {
             "total_groups": total_groups,
             "total_records": total_records,
@@ -2973,6 +3178,7 @@ class PublicationSearchService:
             "available_ufs": available_ufs,
             "available_scheduled_by": available_scheduled_by,
             "available_etiquetas": available_etiquetas,
+            "available_responsaveis": available_responsaveis,
         }
 
     def get_record(self, record_id: int) -> dict[str, Any]:
@@ -2997,9 +3203,7 @@ class PublicationSearchService:
         def _pend():
             return self.db.query(PublicationRecord).filter(
                 PublicationRecord.is_duplicate == False,  # noqa: E712
-                PublicationRecord.status.in_(
-                    [RECORD_STATUS_NEW, RECORD_STATUS_CLASSIFIED, RECORD_STATUS_ERROR]
-                ),
+                PublicationRecord.status.in_(_STATUS_PENDENTES),
             )
 
         total = _pend().count()
@@ -3052,6 +3256,357 @@ class PublicationSearchService:
             },
             "mais_antiga": mais_antiga,
         }
+
+    def office_summary(self, **filtros) -> dict[str, Any]:
+        """Backlog pendente agregado POR ESCRITORIO responsavel.
+
+        Alimenta o hub da tela de triagem, onde o operador escolhe por qual
+        escritorio comecar. Uma unica varredura da query base com contagens
+        condicionais (FILTER (WHERE ...)) em vez de uma query por faixa —
+        aging_summary faz 12 round-trips pro backlog inteiro, e aqui isso
+        seria multiplicado pelo numero de escritorios.
+
+        Aceita os mesmos filtros da listagem (inclusive categoria e
+        subcategoria), pra regua e cards concordarem com o que o operador
+        filtrou. `linked_office_id` continua valendo: filtra QUAIS escritorios
+        entram no resultado, sem deixar de agrupar.
+        """
+        from app.models.legal_one import LegalOneOffice
+
+        agora = datetime.now(timezone.utc)
+        hoje = hoje_brt()
+        # Descarta os None ANTES do setdefault: o endpoint passa todos os
+        # filtros explicitamente, entao `status=None` criava a chave e o
+        # setdefault virava no-op — o hub contava a tabela inteira (agendadas
+        # e ignoradas juntas) em vez do backlog pendente. So nao aparecia
+        # porque a tela sempre manda status; quem omitia via 3.046 no lugar
+        # de 201.
+        filtros = {k: v for k, v in filtros.items() if v is not None}
+        filtros.setdefault(
+            "status",
+            ",".join([RECORD_STATUS_NEW, RECORD_STATUS_CLASSIFIED, RECORD_STATUS_ERROR]),
+        )
+        base = self._base_publication_query(**filtros)
+        sub = base.with_entities(PublicationRecord.id).subquery()
+        q = self.db.query(PublicationRecord).filter(PublicationRecord.id.in_(sa.select(sub.c.id)))
+
+        def _idade(dias: int):
+            """Registro com PELO MENOS `dias` de fila (corte por created_at)."""
+            return PublicationRecord.created_at <= agora - timedelta(days=dias)
+
+        # Faixas em cascata, como aging_summary: cada FILTER conta "pelo menos
+        # N dias" e a subtracao no Python devolve a faixa fechada.
+        # Publicacao sem processo entra como o escritorio FICTICIO "-1" (fila
+        # sem pasta, pub014): ganha card e nome como qualquer escritorio.
+        chave_office = case(
+            (PublicationRecord.linked_lawsuit_id.is_(None), SEM_PASTA_OFFICE_ID),
+            else_=PublicationRecord.linked_office_id,
+        )
+        linhas = (
+            q.with_entities(
+                chave_office.label("office_id"),
+                sa_func.count().label("total"),
+                sa_func.min(PublicationRecord.created_at).label("mais_antiga_em"),
+                sa_func.count().filter(_idade(31)).label("d31"),
+                sa_func.count().filter(_idade(16)).label("d16"),
+                sa_func.count().filter(_idade(8)).label("d8"),
+                sa_func.count().filter(_idade(3)).label("d3"),
+                sa_func.count().filter(PublicationRecord.prazo_estimado < hoje).label("vencidas"),
+                sa_func.count().filter(PublicationRecord.prazo_estimado == hoje).label("vence_hoje"),
+                sa_func.count()
+                .filter(PublicationRecord.status == RECORD_STATUS_NEW)
+                .label("novos"),
+                sa_func.count()
+                .filter(PublicationRecord.status == RECORD_STATUS_CLASSIFIED)
+                .label("classificados"),
+                sa_func.count()
+                .filter(PublicationRecord.status == RECORD_STATUS_ERROR)
+                .label("erros"),
+            )
+            .group_by(chave_office)
+            .all()
+        )
+
+        # Nome/caminho vem de legal_one_offices por external_id (a publicacao
+        # so guarda o id). Escritorio sem cadastro aparece com rotulo generico
+        # em vez de sumir — publicacao sem escritorio ja e um problema
+        # conhecido da casa e some da tela quando filtrada por escritorio.
+        offices = {
+            o.external_id: o
+            for o in self.db.query(LegalOneOffice)
+            .filter(LegalOneOffice.external_id.isnot(None))
+            .all()
+        }
+
+        itens: list[dict[str, Any]] = []
+        for ln in linhas:
+            d31 = ln.d31 or 0
+            d16_30 = (ln.d16 or 0) - d31
+            d8_15 = (ln.d8 or 0) - d31 - d16_30
+            d3_7 = (ln.d3 or 0) - d31 - d16_30 - d8_15
+            d0_2 = (ln.total or 0) - d31 - d16_30 - d8_15 - d3_7
+            criada = ln.mais_antiga_em
+            dias_mais_antiga = 0
+            if criada is not None:
+                ref = criada if criada.tzinfo else criada.replace(tzinfo=timezone.utc)
+                dias_mais_antiga = max((agora - ref).days, 0)
+            off = offices.get(ln.office_id)
+            itens.append(
+                {
+                    "office_id": ln.office_id,
+                    "office_name": (off.name if off else None)
+                    or (
+                        "Publicações sem pasta" if ln.office_id == SEM_PASTA_OFFICE_ID
+                        else f"Escritorio {ln.office_id}" if ln.office_id else "Sem escritorio"
+                    ),
+                    "office_path": (off.path if off else None),
+                    "polo_scope": (off.polo_scope if off else None),
+                    "total": ln.total or 0,
+                    "novos": ln.novos or 0,
+                    "classificados": ln.classificados or 0,
+                    "erros": ln.erros or 0,
+                    "vencidas": ln.vencidas or 0,
+                    "vence_hoje": ln.vence_hoje or 0,
+                    "dias_mais_antiga": dias_mais_antiga,
+                    "mais_antiga_em": criada.isoformat() if criada is not None else None,
+                    "faixas": {
+                        "d0_2": d0_2,
+                        "d3_7": d3_7,
+                        "d8_15": d8_15,
+                        "d16_30": d16_30,
+                        "d31_mais": d31,
+                    },
+                }
+            )
+
+        # Mais critico primeiro: quem espera ha mais tempo, desempatando pelo
+        # tamanho da fila. E a mesma ordem que a listagem usa por urgencia.
+        itens.sort(key=lambda i: (-i["dias_mais_antiga"], -i["total"]))
+        return {
+            "hoje": hoje.isoformat(),
+            "total_pendentes": sum(i["total"] for i in itens),
+            "offices": itens,
+        }
+
+    # --- Distribuicao de leitura (pub013) --------------------------------
+
+    def distribuir_leitura(self, user_ids, sobrescrever=False, **filtros):
+        """Reparte as publicacoes pendentes do escopo entre os leitores.
+
+        O reparto e igualitario e ESTAVEL: ordena por id e distribui em
+        round-robin. Nao sorteia porque duas chamadas seguidas com o mesmo
+        escopo devolveriam divisoes diferentes, e quem redistribui depois de
+        ajustar um filtro espera reencontrar a mesma divisao. O que evita dar
+        sempre as mesmas pastas pra mesma pessoa e o proprio id, que ja e
+        arbitrario em relacao a escritorio, classe e cliente.
+
+        `sobrescrever=False` respeita quem ja tem dono e so distribui o que
+        esta sem tag — o caso comum de "chegou fila nova no meio do turno".
+        """
+        from app.models.legal_one import LegalOneUser
+
+        if not user_ids:
+            raise ValueError("Informe ao menos um leitor para distribuir.")
+
+        filtros.setdefault(
+            "status",
+            ",".join([RECORD_STATUS_NEW, RECORD_STATUS_CLASSIFIED, RECORD_STATUS_ERROR]),
+        )
+        query = self._base_publication_query(**filtros)
+        if not sobrescrever:
+            query = query.filter(PublicationRecord.distribuido_para_user_id.is_(None))
+        registros = query.order_by(PublicationRecord.id.asc()).all()
+
+        nomes = {}
+        for u in (
+            self.db.query(LegalOneUser)
+            .filter(LegalOneUser.external_id.in_(user_ids))
+            .all()
+        ):
+            nomes[u.external_id] = u.name
+
+        agora = datetime.now(timezone.utc)
+        por_pessoa = {uid: 0 for uid in user_ids}
+        for i, rec in enumerate(registros):
+            uid = user_ids[i % len(user_ids)]
+            rec.distribuido_para_user_id = uid
+            rec.distribuido_para_nome = nomes.get(uid) or ("Usuario %s" % uid)
+            rec.distribuido_em = agora
+            por_pessoa[uid] += 1
+        self.db.commit()
+
+        return {
+            "distribuidas": len(registros),
+            "sobrescreveu": sobrescrever,
+            "por_pessoa": [
+                {
+                    "user_id": uid,
+                    "nome": nomes.get(uid) or ("Usuario %s" % uid),
+                    "quantidade": qtd,
+                }
+                for uid, qtd in por_pessoa.items()
+            ],
+        }
+
+    def limpar_distribuicao(self, **filtros):
+        """Remove a tag de leitura de todo o escopo (fim do turno / recomeco)."""
+        filtros.setdefault(
+            "status",
+            ",".join([RECORD_STATUS_NEW, RECORD_STATUS_CLASSIFIED, RECORD_STATUS_ERROR]),
+        )
+        registros = (
+            self._base_publication_query(**filtros)
+            .filter(PublicationRecord.distribuido_para_user_id.isnot(None))
+            .all()
+        )
+        for rec in registros:
+            rec.distribuido_para_user_id = None
+            rec.distribuido_para_nome = None
+            rec.distribuido_em = None
+        self.db.commit()
+        return {"limpas": len(registros)}
+
+    def resumo_distribuicao(self, **filtros):
+        """Quem esta com quantas publicacoes no escopo — alimenta os chips."""
+        filtros.setdefault(
+            "status",
+            ",".join([RECORD_STATUS_NEW, RECORD_STATUS_CLASSIFIED, RECORD_STATUS_ERROR]),
+        )
+        base = self._base_publication_query(**filtros)
+        sub = base.with_entities(PublicationRecord.id).subquery()
+        linhas = (
+            self.db.query(
+                PublicationRecord.distribuido_para_user_id.label("user_id"),
+                PublicationRecord.distribuido_para_nome.label("nome"),
+                sa_func.count().label("total"),
+            )
+            .filter(PublicationRecord.id.in_(sa.select(sub.c.id)))
+            .group_by(
+                PublicationRecord.distribuido_para_user_id,
+                PublicationRecord.distribuido_para_nome,
+            )
+            .all()
+        )
+        itens = []
+        for ln in linhas:
+            nome = ln.nome
+            if not nome:
+                nome = "Sem tag" if ln.user_id is None else ("Usuario %s" % ln.user_id)
+            itens.append({"user_id": ln.user_id, "nome": nome, "total": ln.total or 0})
+        itens.sort(key=lambda i: (i["user_id"] is None, -i["total"]))
+        return {"itens": itens}
+
+    # --- Auditoria de tratamento por escritorio ---------------------------
+
+    def tratadas_recentes(self, linked_office_id=None, limit=20):
+        """Ultimas publicacoes TRATADAS do escritorio — agendadas e ignoradas.
+
+        Existe pro operador conferir o que a equipe acabou de fazer sem sair
+        da fila: quem tratou, quando, e o que virou tarefa. Le a autoria que
+        ja e gravada no proprio registro (scheduled_by_* / ignored_by_*) e
+        complementa com as tarefas criadas, quando o audit as tiver.
+        """
+        query = self.db.query(PublicationRecord).filter(
+            PublicationRecord.is_duplicate == False,  # noqa: E712
+            PublicationRecord.status.in_([RECORD_STATUS_SCHEDULED, RECORD_STATUS_IGNORED]),
+        )
+        office_ids = _parse_csv_ints(linked_office_id)
+        if office_ids:
+            reais = [o for o in office_ids if o != SEM_PASTA_OFFICE_ID]
+            conds = []
+            if reais:
+                conds.append(PublicationRecord.linked_office_id.in_(reais))
+            if SEM_PASTA_OFFICE_ID in office_ids:
+                conds.append(PublicationRecord.linked_lawsuit_id.is_(None))
+            query = query.filter(or_(*conds) if len(conds) > 1 else conds[0])
+
+        tratado_em = sa_func.coalesce(
+            PublicationRecord.scheduled_at, PublicationRecord.ignored_at
+        )
+        registros = (
+            query.order_by(tratado_em.desc().nullslast())
+            .limit(max(1, min(int(limit or 20), 100)))
+            .all()
+        )
+
+        # Tarefas criadas + os motivos que o operador registrou no agendamento
+        # (pub007/pub008). A descricao nao tem coluna propria: sai do payload
+        # que foi realmente enviado ao L1.
+        tarefas_por_record = {}
+        motivos_por_record = {}
+        try:
+            from app.models.publication_task_audit import PublicationTaskAudit
+
+            ids = [r.id for r in registros]
+            if ids:
+                for a in (
+                    self.db.query(PublicationTaskAudit)
+                    .filter(PublicationTaskAudit.publication_record_id.in_(ids))
+                    .order_by(PublicationTaskAudit.id.asc())
+                    .all()
+                ):
+                    enviado = a.sent_payload if isinstance(a.sent_payload, dict) else {}
+                    tarefas_por_record.setdefault(a.publication_record_id, []).append(
+                        {
+                            "task_id": a.created_task_id,
+                            "descricao": enviado.get("description"),
+                            "subtipo_id": a.subtype_id,
+                            "prazo": enviado.get("endDateTime"),
+                        }
+                    )
+                    # Um registro pode ter varias tarefas; os motivos sao da
+                    # DECISAO, entao o primeiro audit que os tiver ja serve.
+                    atuais = motivos_por_record.setdefault(
+                        a.publication_record_id,
+                        {
+                            "subtipo_troca_motivo": None,
+                            "data_troca_motivo": None,
+                            "data_delta_dias": None,
+                            "agendou_com_tarefa_aberta_motivo": None,
+                            "tarefa_removida_motivo": None,
+                            "override_detected": False,
+                        },
+                    )
+                    for campo in (
+                        "subtipo_troca_motivo",
+                        "data_troca_motivo",
+                        "data_delta_dias",
+                        "agendou_com_tarefa_aberta_motivo",
+                        "tarefa_removida_motivo",
+                    ):
+                        if atuais.get(campo) is None:
+                            atuais[campo] = getattr(a, campo, None)
+                    if a.override_detected:
+                        atuais["override_detected"] = True
+        except Exception:
+            # Auditoria de tarefa e complemento: a linha do tempo vale sem ela.
+            pass
+
+        itens = []
+        for r in registros:
+            agendado = r.status == RECORD_STATUS_SCHEDULED
+            quando = r.scheduled_at if agendado else r.ignored_at
+            itens.append(
+                {
+                    "record_id": r.id,
+                    "acao": "agendada" if agendado else "ignorada",
+                    "quando": quando.isoformat() if quando else None,
+                    "por_nome": (r.scheduled_by_name if agendado else r.ignored_by_name),
+                    "por_email": (r.scheduled_by_email if agendado else r.ignored_by_email),
+                    "lawsuit_id": r.linked_lawsuit_id,
+                    "cnj": r.linked_lawsuit_cnj,
+                    "office_id": r.linked_office_id,
+                    "categoria": r.category,
+                    "subcategoria": r.subcategory,
+                    "motivo": r.ignore_reason,
+                    "motivo_nota": r.ignore_reason_note,
+                    "consultou_autos": r.consultou_autos,
+                    "publication_date": r.publication_date,
+                    "tarefas": tarefas_por_record.get(r.id, []),
+                    "motivos": motivos_por_record.get(r.id),
+                }
+            )
+        return {"total": len(itens), "itens": itens}
 
     def _attach_onenotify_bb_links(self, records: list[PublicationRecord]) -> None:
         """Anexa contexto OneNotify BB às publicações já carregadas."""
@@ -3565,6 +4120,11 @@ class PublicationSearchService:
     IGNORE_REASONS = {
         "ja_agendado", "parte_adversa", "informativa",
         "classificacao_incorreta", "outro",
+        # Gravado pelo MOTOR da fila sem pasta (pub014), não escolhido por
+        # pessoa: pauta coletiva sai por regra. Entra aqui para ser valor
+        # legal se o registro voltar pela API; fica FORA do dropdown do
+        # operador (a lista da tela é outra, em motivos.ts).
+        "pauta_coletiva",
     }
 
     def update_record_status(
@@ -4770,8 +5330,20 @@ class PublicationSearchService:
             "audiencia_hora": record.audiencia_hora,
             "audiencia_link": record.audiencia_link,
             "classifications": record.classifications,
+            # pub010 — de quem e o ato e se ele exige providencia nossa. A
+            # tela usa pra oferecer o descarte rapido: quando a IA diz que o
+            # ato e da parte adversa e nao exige nada de nos, "ignorar" e a
+            # decisao provavel e merece o mesmo peso do "agendar".
+            "quem_pratica_ato": record.quem_pratica_ato,
+            "exige_providencia_nossa": record.exige_providencia_nossa,
             "uf": record.uf,
             "natureza_processo": record.natureza_processo,
+            # Fila sem pasta (pub014): o que a regra/IA descobriu — CNJs
+            # citados, quais sao nossos, origem. None fora dessa fila.
+            "sem_pasta": (
+                record.raw_relationships.get("_sem_pasta")
+                if isinstance(record.raw_relationships, dict) else None
+            ),
             "prazo_estimado": (
                 record.prazo_estimado.isoformat() if record.prazo_estimado else None
             ),

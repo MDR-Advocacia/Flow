@@ -76,6 +76,12 @@ class MetadataSyncService:
 
                 active_external_ids = {office["id"] for office in offices_data if office.get("id")}
                 for external_id, office in existing_offices.items():
+                    # Id negativo = escritorio FICTICIO da casa (ex.: -1,
+                    # "Publicacoes sem pasta"). O L1 nao o conhece, entao
+                    # nunca vem em offices_data — desativa-lo aqui apagaria
+                    # a area de templates da fila sem pasta a cada sync.
+                    if external_id is not None and int(external_id) < 0:
+                        continue
                     if external_id not in active_external_ids:
                         office.is_active = False
 

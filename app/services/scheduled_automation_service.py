@@ -411,6 +411,68 @@ class ScheduledAutomationService:
                                 "records_classified": result.get("records_classified", 0),
                                 **({"error": erro_classify} if erro_classify else {}),
                             })
+                        # ── Fila SEM PASTA (pub014): MOTOR SEPARADO ──────
+                        # Execucao propria, depois do classify e independente
+                        # dele: erro aqui nao derruba o classify nem o inverso.
+                        # Mesmo setting da captura noturna — sem captura nao ha
+                        # o que classificar.
+                        try:
+                            from app.services.publication_sem_pasta import captura_noturna_ativa
+
+                            if captura_noturna_ativa():
+                                from app.services import publication_sem_pasta_motor as _motor
+
+                                if run_id is not None:
+                                    self._update_progress(
+                                        run_id,
+                                        phase="sem_pasta",
+                                        current=0,
+                                        total=None,
+                                        message="Fila sem pasta: identificando o que é cada publicação",
+                                    )
+                                # Sessão PRÓPRIA: o motor faz commit/rollback
+                                # por publicação, e um rollback dele não pode
+                                # desfazer o que a automação já montou.
+                                from app.db.session import SessionLocal as _Session
+
+                                def _sino(feitos: int, total: int) -> None:
+                                    # Heartbeat da automação: o reaper marca
+                                    # como órfã (e RETOMA) qualquer run sem
+                                    # sinal há 15 min. Uma fila grande desta
+                                    # etapa passa disso fácil.
+                                    if run_id is not None:
+                                        self._update_progress(
+                                            run_id,
+                                            phase="sem_pasta",
+                                            current=feitos,
+                                            total=total,
+                                            message=f"Fila sem pasta: {feitos}/{total} identificadas",
+                                        )
+
+                                _sess_sp = _Session()
+                                try:
+                                    r_sp = _motor.executar(
+                                        _sess_sp,
+                                        requested_by="scheduler",
+                                        automation_run_id=run_id,
+                                        on_progress=_sino,
+                                    )
+                                finally:
+                                    _sess_sp.close()
+                                steps_executed.append({
+                                    "step": "sem_pasta",
+                                    "status": "failed" if r_sp.get("erro_fatal") else "success",
+                                    **{
+                                        k: r_sp.get(k, 0)
+                                        for k in ("total_alvo", "processados", "pautas",
+                                                  "classificados", "fichas", "erros")
+                                    },
+                                })
+                        except Exception as exc:  # noqa: BLE001
+                            logger.exception("Fila sem pasta: motor falhou (rodada segue).")
+                            steps_executed.append({
+                                "step": "sem_pasta", "status": "failed", "error": str(exc),
+                            })
                     elif step == "treat_publications":
                         self._update_progress(
                             run_id,
@@ -856,8 +918,49 @@ class ScheduledAutomationService:
                             message=f"Escritório {idx}/{total_active}: falhou",
                         )
 
+            # ── Fila SEM PASTA (pub014) ───────────────────────────────
+            # As publicacoes sem processo vinculado eram DESCARTADAS aqui:
+            # cada office filtra `_responsible_office_id in {seu id}` e quem
+            # nao tem processo nao tem escritorio. Uma passada a mais, sobre
+            # a MESMA lista ja baixada (zero chamada extra ao L1), com
+            # only_unlinked=True persiste so essas. Desligada por padrao.
+            records_sem_pasta = 0
+            try:
+                from app.services.publication_sem_pasta import captura_noturna_ativa
+
+                if captura_noturna_ativa():
+                    if run_id is not None:
+                        self._update_progress(
+                            run_id,
+                            phase="pull_publications",
+                            current=total_active,
+                            total=total_active,
+                            message="Guardando publicações sem pasta vinculada...",
+                        )
+                    r_sp = search_service.create_and_run_search(
+                        date_from=union_from.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        date_to=union_to.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        only_unlinked=True,
+                        auto_classify=False,
+                        requested_by="scheduler:sem-pasta",
+                        prefetched_publications=publications,
+                    )
+                    records_sem_pasta = int(
+                        r_sp.get("total_new", 0) or r_sp.get("total_found", 0) or 0
+                    )
+                    total_found += records_sem_pasta
+                    logger.info(
+                        "Fila sem pasta: %s publicações guardadas nesta rodada.",
+                        records_sem_pasta,
+                    )
+            except Exception:  # noqa: BLE001
+                # Best-effort: a captura dos escritorios ja esta salva; a fila
+                # sem pasta nao pode derrubar a rodada.
+                logger.exception("Captura das publicações sem pasta falhou (rodada segue).")
+
             return {
                 "records_found": total_found,
+                "records_sem_pasta": records_sem_pasta,
                 "offices_ok": ok,
                 "offices_failed": failed,
                 "offices_skipped": skipped,

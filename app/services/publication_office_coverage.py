@@ -81,6 +81,9 @@ def verificar_cobertura(
             ext = getattr(office, "external_id", None)
             if ext is None or int(ext) in varridos or int(ext) == ESCRITORIO_RAIZ_ID:
                 continue
+            # Escritorio ficticio da casa (id negativo) nao existe no L1.
+            if int(ext) < 0:
+                continue
             n = _contar_pastas_ativas(client, int(ext))
             if n:
                 resultado["fora"].append({

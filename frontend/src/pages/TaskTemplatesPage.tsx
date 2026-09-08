@@ -149,6 +149,13 @@ interface CategoryEntry {
   subcategories: string[];
 }
 
+/**
+ * Escritório FICTÍCIO "Publicações sem pasta". Não existe no Legal One: é a
+ * área de templates da fila sem pasta, cuja taxonomia vem do motor próprio
+ * (16 tipos, plana) e não da árvore v2 dos escritórios reais.
+ */
+const OFFICE_SEM_PASTA = -1;
+
 interface ClassificationOverride {
   id: number;
   office_external_id: number;
@@ -281,6 +288,10 @@ const TaskTemplatesPageLegacy = () => {
   const [users, setUsers] = useState<AppUser[]>([]);
   const [supportSquads, setSupportSquads] = useState<SupportSquadOption[]>([]);
   const [categories, setCategories] = useState<CategoryEntry[]>([]);
+  // Escritório fictício "Publicações sem pasta" (-1): taxonomia PRÓPRIA do
+  // motor da fila sem pasta, plana. Carregada à parte e trocada no
+  // formulário quando esse escritório é o selecionado.
+  const [categoriesSemPasta, setCategoriesSemPasta] = useState<CategoryEntry[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -362,13 +373,14 @@ const TaskTemplatesPageLegacy = () => {
     setLoading(true);
     setError(null);
     try {
-      const [tplRes, offRes, ttRes, usrRes, catRes, sqRes] = await Promise.all([
+      const [tplRes, offRes, ttRes, usrRes, catRes, sqRes, catSpRes] = await Promise.all([
         apiFetch(`${API}/`),
-        apiFetch("/api/v1/offices"),
+        apiFetch("/api/v1/offices?include_virtual=true"),
         apiFetch(`${API}/meta/task-types`),
         apiFetch(`${API}/meta/users`),
         apiFetch(`${API}/meta/categories`),
         apiFetch("/api/v1/squads?kind=support"),
+        apiFetch(`${API}/meta/categories?office_external_id=${OFFICE_SEM_PASTA}`),
       ]);
 
       if (!tplRes.ok || !offRes.ok || !ttRes.ok || !usrRes.ok || !catRes.ok) {
@@ -381,6 +393,10 @@ const TaskTemplatesPageLegacy = () => {
       setUsers(await usrRes.json());
       const catData = await catRes.json();
       setCategories(catData.categories || []);
+      if (catSpRes.ok) {
+        const catSp = await catSpRes.json();
+        setCategoriesSemPasta(catSp.categories || []);
+      }
       // Squads de suporte (kind='support') — opcional no template pra rotear
       // tarefa pra equipe especifica em vez do responsavel/assistente padrao.
       if (sqRes.ok) {
@@ -418,6 +434,10 @@ const TaskTemplatesPageLegacy = () => {
     }
     autoInitDoneRef.current = true;
     const officesNeedingManual = offices.filter((o) => {
+      // O escritório fictício da fila sem pasta não tem taxonomia base para
+      // "migrar": a dele já é a do motor, fechada. Ligar regime manual aqui
+      // só criaria um override órfão.
+      if (o.external_id === OFFICE_SEM_PASTA) return false;
       const hasTemplate = templates.some(
         (t) => t.office_external_id === o.external_id && t.is_active,
       );
@@ -523,11 +543,18 @@ const TaskTemplatesPageLegacy = () => {
     return used;
   };
 
+  // Categorias oferecidas no formulário: as do motor sem pasta quando o
+  // escritório escolhido é o fictício -1; as da taxonomia v2 nos demais.
+  const categoriasDoForm = useMemo(
+    () => (form.office_external_ids[0] === String(OFFICE_SEM_PASTA) ? categoriesSemPasta : categories),
+    [form.office_external_ids, categories, categoriesSemPasta],
+  );
+
   const categorySubcategories = useMemo(() => {
     if (!form.category) return [];
-    const entry = categories.find((c) => c.category === form.category);
+    const entry = categoriasDoForm.find((c) => c.category === form.category);
     return entry?.subcategories ?? [];
-  }, [form.category, categories]);
+  }, [form.category, categoriasDoForm]);
 
   const overrideCategorySubcategories = useMemo(() => {
     if (!overrideForm.category) return [];
@@ -559,6 +586,12 @@ const TaskTemplatesPageLegacy = () => {
     );
 
   const getEffectiveCategoriesForOffice = (officeId: number): CategoryEntry[] => {
+    // Escritório fictício "Publicações sem pasta" (-1): a taxonomia é a do
+    // MOTOR PRÓPRIO da fila sem pasta — plana, em código, sem overrides. Sem
+    // este atalho a coverage view mostraria a árvore v2 dos escritórios
+    // reais, que não tem nenhum dos tipos com que essa fila é classificada.
+    if (officeId === OFFICE_SEM_PASTA) return categoriesSemPasta;
+
     const relevant = overrides.filter(
       (o) => o.office_external_id === officeId && o.is_active
     );
@@ -2644,7 +2677,7 @@ const TaskTemplatesPageLegacy = () => {
                       <SelectValue placeholder="Selecione..." />
                     </SelectTrigger>
                     <SelectContent>
-                      {categories.map((c) => (
+                      {categoriasDoForm.map((c) => (
                         <SelectItem key={c.category} value={c.category}>
                           {c.category}
                         </SelectItem>
@@ -2702,7 +2735,7 @@ const TaskTemplatesPageLegacy = () => {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="_global">
-                      ✦ Publicações sem processo (template global)
+                      ✦ Global — vale como fallback para qualquer escritório
                     </SelectItem>
                     {offices.map((o) => (
                       <SelectItem key={o.external_id} value={String(o.external_id)}>
@@ -2714,7 +2747,7 @@ const TaskTemplatesPageLegacy = () => {
               ) : (
                 <MultiSelect
                   options={[
-                    { value: "_global", label: "✦ Publicações sem processo (template global)" },
+                    { value: "_global", label: "✦ Global — vale como fallback para qualquer escritório" },
                     ...offices.map((o) => ({
                       value: String(o.external_id),
                       label: o.path || o.name,
@@ -2730,7 +2763,7 @@ const TaskTemplatesPageLegacy = () => {
               )}
               {form.office_external_ids.includes("_global") && (
                 <p className="text-xs text-amber-600">
-                  Template global incluído: será usado para publicações sem processo/escritório vinculado.
+                  Template global incluído: entra como fallback quando o escritório da publicação não tem template próprio. Para publicações SEM pasta, use o escritório "Publicações sem pasta".
                 </p>
               )}
               {!editingId && form.office_external_ids.length > 1 && (

@@ -428,6 +428,10 @@ class PublicationBatchClassifier:
             text = (rec.description or "").strip()
             if not text:
                 continue
+            # Publicacao SEM pasta pertence ao motor proprio da fila sem pasta
+            # (publication_sem_pasta_motor) — este lote nao a toca (pub014).
+            if rec.linked_lawsuit_id is None:
+                continue
             # Trunca textos muito longos para economizar tokens e não
             # estourar o context window da Haiku
             if len(text) > MAX_PUBLICATION_TEXT_CHARS:
