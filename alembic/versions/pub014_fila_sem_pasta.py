@@ -15,8 +15,10 @@ Tres seeds, idempotentes:
      as publicacoes sem pasta uma area de templates e um card no hub. Id
      negativo de proposito: o sync de escritorios pula negativos.
   2. app_settings: captura noturna (default DESLIGADA), escritorio real do
-     L1 que recebe a tarefa de saneamento, e descarte de pauta (default
-     LIGADO, por decisao do operador).
+     L1 que recebe a tarefa de saneamento, descarte de pauta (default
+     LIGADO, por decisao do operador) e o agendamento automatico —
+     interruptor DESLIGADO + mapa de tipo -> escritorio (Embargos a
+     Execucao em BB Autor, decisao de 08/09/2026).
   3. publicacao_sem_pasta_runs: uma linha por execucao do motor (progresso
      e trilha).
 
@@ -55,6 +57,11 @@ depends_on = None
 
 TABELA_RUNS = "publicacao_sem_pasta_runs"
 SETTING_DESCARTAR_PAUTA = "publicacoes_sem_pasta_descartar_pauta"
+SETTING_AGENDAR_AUTO = "publicacoes_sem_pasta_agendar_auto"
+SETTING_AGENDAMENTO_AUTO = "publicacoes_sem_pasta_agendamento"
+# Embargos a Execucao -> escritorio 22 (Banco do Brasil / Autor), onde o
+# subtipo "Verificar novo Embargo - BB Autor" foi criado pelo operador.
+AGENDAMENTO_AUTO_DEFAULT = '{"Embargos à Execução": {"office_l1": 22}}'
 
 
 def upgrade() -> None:
@@ -115,6 +122,21 @@ def upgrade() -> None:
             "Publicacoes sem pasta: pauta coletiva (21+ CNJs) e descartada por "
             "regra (IGNORADO), sem IA. Decisao do operador em 03/09/2026.",
         ),
+        (
+            SETTING_AGENDAR_AUTO,
+            "false",
+            "Publicacoes sem pasta: agendar a tarefa de saneamento sem passar "
+            "pela mesa do operador. DESLIGADO ate o template da area estar "
+            "configurado. Interruptor geral do mapa abaixo.",
+        ),
+        (
+            SETTING_AGENDAMENTO_AUTO,
+            AGENDAMENTO_AUTO_DEFAULT,
+            "Publicacoes sem pasta: quais tipos saem sozinhos e em que "
+            "escritorio REAL do L1 a tarefa nasce. JSON "
+            '{"<tipo>": {"office_l1": <external_id>}}. Decisao do operador '
+            "em 08/09/2026: comecar por Embargos a Execucao em BB Autor (22).",
+        ),
     ):
         if conn.execute(sa.select(settings.c.key).where(settings.c.key == chave)).first() is None:
             conn.execute(settings.insert().values(key=chave, value=valor, description=desc))
@@ -135,10 +157,22 @@ def upgrade() -> None:
             sa.Column("pautas", sa.Integer, nullable=False, server_default="0"),
             sa.Column("classificados", sa.Integer, nullable=False, server_default="0"),
             sa.Column("fichas", sa.Integer, nullable=False, server_default="0"),
+            sa.Column("agendados", sa.Integer, nullable=False, server_default="0"),
             sa.Column("erros", sa.Integer, nullable=False, server_default="0"),
             sa.Column("ultimo_erro", sa.Text, nullable=True),
         )
         op.create_index(f"ix_{TABELA_RUNS}_automation_run", TABELA_RUNS, ["automation_run_id"])
+    else:
+        # A tabela pode ja existir de um ambiente que rodou uma versao
+        # anterior desta mesma migration (ela ainda nao foi para producao,
+        # entao seguiu mudando). O create_table acima e guardado, logo a
+        # coluna nova nunca chegaria la — este ramo fecha o buraco.
+        colunas = {c["name"] for c in insp.get_columns(TABELA_RUNS)}
+        if "agendados" not in colunas:
+            op.add_column(
+                TABELA_RUNS,
+                sa.Column("agendados", sa.Integer, nullable=False, server_default="0"),
+            )
 
 
 def downgrade() -> None:
@@ -152,6 +186,7 @@ def downgrade() -> None:
         settings.delete().where(
             settings.c.key.in_([
                 SETTING_CAPTURA_NOTURNA, SETTING_OFFICE_L1_TAREFA, SETTING_DESCARTAR_PAUTA,
+                SETTING_AGENDAR_AUTO, SETTING_AGENDAMENTO_AUTO,
             ])
         )
     )

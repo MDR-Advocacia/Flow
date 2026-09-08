@@ -43,11 +43,13 @@ from app.services.publication_sem_pasta import (
     CATEGORIA_RESIDUAL,
     CLIENTES_CARTEIRA,
     ROTULO_RITO,
+    agendamento_auto_ativo,
     anexar_contexto,
     cliente_do_caminho,
     detectar_clientes,
     detectar_rito,
     rito_do_orgao,
+    tipo_sai_sozinho,
 )
 
 logger = logging.getLogger(__name__)
@@ -765,6 +767,75 @@ def _enfileirar_ciencia(db: Session, rec: Any) -> None:
         )
 
 
+class _AgendadorAutomatico:
+    """Quem assina a tarefa criada sem operador.
+
+    `schedule_records` grava quem agendou (id/email/nome) na trilha da
+    publicação e na auditoria. Um objeto anônimo com id/email nulos deixa a
+    linha dizendo a verdade — ninguém clicou — em vez de emprestar o nome de
+    alguém que não estava lá."""
+
+    id = None
+    email = None
+    name = "Motor sem pasta (agendamento automático)"
+
+
+def agendar_automatico(db: Session, rec: Any) -> Optional[int]:
+    """Cria a tarefa de saneamento sem passar pela mesa do operador.
+
+    Só roda para os tipos configurados no mapa (hoje: Embargos à Execução).
+    A tarefa nasce AVULSA, sem pasta — e é o certo: ela existe justamente
+    para a equipe CADASTRAR a pasta, e a partir daí a publicação seguinte
+    cai na fila comum. Por isso o caminho é `schedule_records` (o fluxo
+    "sem processo vinculado"), não `schedule_group`.
+
+    Devolve o id da tarefa criada, ou None quando não se aplica. Erro aqui
+    NUNCA desfaz a classificação: a publicação já está identificada e fica
+    CLASSIFICADA para o operador agendar na mão — deixar de agendar devolve
+    trabalho, agendar errado cria tarefa no L1."""
+    if not agendamento_auto_ativo() or not tipo_sai_sozinho(rec.category):
+        return None
+
+    from app.services.legal_one_client import LegalOneApiClient
+    from app.services.publication_search_service import PublicationSearchService
+
+    servico = PublicationSearchService(db, LegalOneApiClient())
+    # A proposta é montada pelo motor de templates de sempre: casa o
+    # template da área fictícia (-1) com a categoria que ESTE motor gravou,
+    # resolve subtipo/responsável/prazo e troca o escritório fictício pelo
+    # real. Sem template configurado não há proposta — e aí não se agenda.
+    servico._build_task_proposals([rec], skip_responsible_lookup=True)
+    db.commit()
+
+    raw = rec.raw_relationships if isinstance(rec.raw_relationships, dict) else {}
+    tem_proposta = bool(raw.get("_proposed_tasks") or raw.get("_proposed_task"))
+    if not tem_proposta:
+        logger.info(
+            "Sem pasta #%s: tipo %r sai sozinho, mas não há template na área "
+            "'Publicações sem pasta' — fica para o operador.",
+            rec.id, rec.category,
+        )
+        return None
+
+    resultado = servico.schedule_records(
+        record_ids=[rec.id], scheduled_by=_AgendadorAutomatico(),
+    )
+    task_id = resultado.get("created_task_id")
+    _gravar_sem_pasta(
+        rec, agendamento_automatico={
+            "task_id": task_id,
+            "em": datetime.now(timezone.utc).isoformat(),
+            "tipo": rec.category,
+        },
+    )
+    db.commit()
+    logger.info(
+        "Sem pasta #%s: tarefa %s criada automaticamente (%s).",
+        rec.id, task_id, rec.category,
+    )
+    return task_id
+
+
 async def classificar_registro(db: Session, ai: Any, rec: Any) -> str:
     """Um registro: regra → identificação → ficha (tipos críticos).
 
@@ -896,7 +967,7 @@ def executar(
 
     contadores = {
         "total_alvo": len(registros), "processados": 0, "pautas": 0,
-        "classificados": 0, "fichas": 0, "erros": 0,
+        "classificados": 0, "fichas": 0, "agendados": 0, "erros": 0,
     }
     inicio = time.monotonic()
     ultimo_sinal = inicio
@@ -929,6 +1000,20 @@ def executar(
                     contadores["classificados"] += 1
                     if resultado == "ficha":
                         contadores["fichas"] += 1
+                    # Agendamento automático: transação SEPARADA, depois do
+                    # commit da classificação. Se o L1 recusar a tarefa, a
+                    # identificação já está salva e a publicação só volta
+                    # para a mesa do operador — não se perde a rodada.
+                    try:
+                        if agendar_automatico(db, rec):
+                            contadores["agendados"] += 1
+                    except Exception as exc:  # noqa: BLE001
+                        db.rollback()
+                        run.ultimo_erro = f"#{rec.id} (agendamento): {exc}"[:2000]
+                        logger.warning(
+                            "Sem pasta #%s: agendamento automático falhou (%s) — "
+                            "fica CLASSIFICADA para o operador.", rec.id, exc,
+                        )
                     await asyncio.sleep(pausa_s)
             except Exception as exc:  # noqa: BLE001
                 db.rollback()
@@ -955,9 +1040,11 @@ def executar(
     run.finished_at = datetime.now(timezone.utc)
     _atualizar_run(db, run, contadores)
     logger.info(
-        "Sem pasta: rodada %s — %s alvo, %s pautas, %s classificadas (%s com ficha), %s erros.",
+        "Sem pasta: rodada %s — %s alvo, %s pautas, %s classificadas (%s com "
+        "ficha), %s agendadas automaticamente, %s erros.",
         run.id, contadores["total_alvo"], contadores["pautas"],
-        contadores["classificados"], contadores["fichas"], contadores["erros"],
+        contadores["classificados"], contadores["fichas"],
+        contadores["agendados"], contadores["erros"],
     )
     return {"run_id": run.id, **contadores}
 
@@ -967,6 +1054,7 @@ def _atualizar_run(db: Session, run: Any, c: dict[str, Any]) -> None:
     run.pautas = c["pautas"]
     run.classificados = c["classificados"]
     run.fichas = c["fichas"]
+    run.agendados = c.get("agendados", 0)
     run.erros = c["erros"]
     try:
         db.commit()
@@ -1024,6 +1112,7 @@ def listar_runs(db: Session, limite: int = 5) -> list[dict[str, Any]]:
             "pautas": r.pautas,
             "classificados": r.classificados,
             "fichas": r.fichas,
+            "agendados": r.agendados,
             "erros": r.erros,
             "ultimo_erro": r.ultimo_erro,
         }

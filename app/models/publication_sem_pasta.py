@@ -30,5 +30,8 @@ class PublicacaoSemPastaRun(Base):
     pautas = Column(Integer, nullable=False, default=0, server_default="0")
     classificados = Column(Integer, nullable=False, default=0, server_default="0")
     fichas = Column(Integer, nullable=False, default=0, server_default="0")
+    # Tarefas criadas no L1 sem passar pela mesa (tipos do mapa de
+    # agendamento automático — hoje só Embargos à Execução).
+    agendados = Column(Integer, nullable=False, default=0, server_default="0")
     erros = Column(Integer, nullable=False, default=0, server_default="0")
     ultimo_erro = Column(Text, nullable=True)

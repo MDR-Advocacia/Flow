@@ -56,6 +56,22 @@ SETTING_CAPTURA_NOTURNA = "publicacoes_capturar_sem_pasta"
 SETTING_OFFICE_L1_TAREFA = "publicacoes_sem_pasta_office_l1"
 OFFICE_L1_TAREFA_DEFAULT = 1
 
+# ── agendamento automático (1º motor: Embargos à Execução) ───────────
+# Decisão do operador (08/09/2026): identificar não basta para os tipos
+# críticos — a tarefa de saneamento nasce sozinha, sem passar pela mesa.
+# Dois settings de propósito:
+#   • o interruptor (`SETTING_AGENDAR_AUTO`) é decisão de OPERAÇÃO: liga e
+#     desliga a coisa inteira numa linha, sem deploy;
+#   • o mapa (`SETTING_AGENDAMENTO_AUTO`) é CONFIGURAÇÃO: quais tipos saem
+#     sozinhos e em que escritório REAL do L1 a tarefa nasce. Hoje só
+#     embargos (BB Autor, 22); amanhã agravo/obrigação entram aqui, sem
+#     tocar em código.
+# A tarefa nasce AVULSA (sem pasta) — e isso é o certo: ela existe
+# justamente para a pasta ser criada. Chave do mapa casa sem acento/caixa.
+SETTING_AGENDAR_AUTO = "publicacoes_sem_pasta_agendar_auto"
+SETTING_AGENDAMENTO_AUTO = "publicacoes_sem_pasta_agendamento"
+AGENDAMENTO_AUTO_DEFAULT = '{"Embargos à Execução": {"office_l1": 22}}'
+
 # Lista com 21+ CNJs é pauta de sessão, não publicação de um processo.
 # Corte do estudo: 1.193 das 1.602 sem pasta tinham 21+ (todas pautas).
 LIMIAR_PAUTA_COLETIVA = 21
@@ -385,9 +401,83 @@ def captura_noturna_ativa() -> bool:
     return v in ("1", "true", "sim", "on", "yes")
 
 
-def office_l1_para_tarefa() -> int:
-    """Escritório REAL do L1 que recebe a tarefa de saneamento."""
+def _chave_tipo(nome: Optional[str]) -> str:
+    """Forma comparável de um tipo: sem acento, minúsculo, espaço colapsado.
+
+    Existe aqui (e não no motor) para o mapa de agendamento poder ser lido
+    sem importar o motor — este módulo é o compartilhado, e a importação ao
+    contrário fecharia o ciclo."""
+    import unicodedata
+
+    s = unicodedata.normalize("NFD", nome or "")
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def config_agendamento_auto() -> dict[str, dict[str, Any]]:
+    """Mapa {tipo normalizado: {"office_l1": int}} do setting.
+
+    Setting malformado NÃO derruba a rodada: vira mapa vazio (ninguém sai
+    sozinho) e o erro fica no log. É o lado seguro — deixar de agendar
+    devolve o trabalho ao operador, agendar errado cria tarefa no L1."""
     from app.services.app_settings import get_setting
+
+    raw = get_setting(SETTING_AGENDAMENTO_AUTO)
+    if raw is None:
+        raw = AGENDAMENTO_AUTO_DEFAULT
+    try:
+        import json
+
+        bruto = json.loads(raw)
+        if not isinstance(bruto, dict):
+            raise ValueError("esperava objeto JSON")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Sem pasta: setting %s inválido (%s) — nenhum tipo sai sozinho.",
+            SETTING_AGENDAMENTO_AUTO, exc,
+        )
+        return {}
+
+    saida: dict[str, dict[str, Any]] = {}
+    for nome, cfg in bruto.items():
+        if not isinstance(cfg, dict):
+            cfg = {}
+        saida[_chave_tipo(nome)] = cfg
+    return saida
+
+
+def agendamento_auto_ativo() -> bool:
+    """Interruptor geral do agendamento automático (default DESLIGADO)."""
+    from app.services.app_settings import get_setting
+
+    v = (get_setting(SETTING_AGENDAR_AUTO) or "false").strip().lower()
+    return v in ("1", "true", "sim", "on", "yes")
+
+
+def tipo_sai_sozinho(tipo: Optional[str]) -> bool:
+    """Este tipo está configurado para agendar sem passar pela mesa?"""
+    if not tipo:
+        return False
+    return _chave_tipo(tipo) in config_agendamento_auto()
+
+
+def office_l1_para_tarefa(tipo: Optional[str] = None) -> int:
+    """Escritório REAL do L1 que recebe a tarefa de saneamento.
+
+    O fictício (-1) não existe no L1, então a tarefa precisa nascer em um
+    escritório de verdade. Quando o tipo tem escritório próprio no mapa de
+    agendamento (embargos → BB Autor), ele vence; senão vale o default
+    global do setting (raiz MDR), que é o comportamento de sempre."""
+    from app.services.app_settings import get_setting
+
+    if tipo:
+        cfg = config_agendamento_auto().get(_chave_tipo(tipo)) or {}
+        try:
+            por_tipo = int(cfg.get("office_l1") or 0)
+        except (TypeError, ValueError):
+            por_tipo = 0
+        if por_tipo > 0:
+            return por_tipo
 
     raw = get_setting(SETTING_OFFICE_L1_TAREFA)
     try:

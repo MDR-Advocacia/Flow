@@ -570,7 +570,12 @@ export default function PublicationsTriagePage() {
           setRodandoSemPasta(false);
           toast({
             title: "Fila sem pasta identificada",
-            description: `${r?.classificados ?? 0} classificada(s), ${r?.fichas ?? 0} com ficha, ${r?.pautas ?? 0} pauta(s) por regra, ${r?.erros ?? 0} erro(s).`,
+            description:
+              `${r?.classificados ?? 0} classificada(s), ${r?.fichas ?? 0} com ficha, ` +
+              `${r?.pautas ?? 0} pauta(s) por regra, ${r?.erros ?? 0} erro(s).` +
+              // Só aparece quando houve agendamento automático: com o motor
+              // desligado (o default) essa contagem seria ruído.
+              (r?.agendados ? ` ${r.agendados} tarefa(s) já agendada(s) automaticamente.` : ""),
           });
           void carregarFila();
           void carregarHub();

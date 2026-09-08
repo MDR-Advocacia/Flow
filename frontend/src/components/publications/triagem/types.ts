@@ -89,6 +89,12 @@ export interface SemPastaInfo {
   } | null;
   /** Ficha de cadastro do caso (tipos críticos): campo → valor extraído. */
   ficha?: Record<string, string | null> | null;
+  /**
+   * Tarefa criada pelo motor SEM passar pela mesa (tipos do mapa de
+   * agendamento automático). Fica registrado porque o operador precisa
+   * saber que a tarefa já existe — senão agenda uma segunda na mão.
+   */
+  agendamento_automatico?: { task_id: number | null; em: string; tipo: string } | null;
 }
 
 export interface SuggestedResponsible {

@@ -2374,9 +2374,11 @@ class PublicationSearchService:
             else rec.linked_office_id  # pode ainda ser None
         )
         # Escritorio FICTICIO (fila sem pasta) nao existe no L1: a tarefa de
-        # saneamento sai no escritorio REAL configurado (default: raiz MDR).
+        # saneamento sai no escritorio REAL configurado. O tipo manda quando
+        # tem escritorio proprio no mapa de agendamento (embargos -> BB
+        # Autor); sem isso vale o default global (raiz MDR).
         if e_escritorio_ficticio(effective_office_id):
-            effective_office_id = office_l1_para_tarefa()
+            effective_office_id = office_l1_para_tarefa(rec.category)
 
         participants = []
         if user:

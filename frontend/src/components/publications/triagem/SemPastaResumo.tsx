@@ -10,7 +10,7 @@
 // para ~70% das pastas (45% no Master), então silêncio não prova nada.
 
 import { useState } from "react";
-import { ChevronDown, ChevronUp, ExternalLink, FolderOpen, ListOrdered, ShieldCheck } from "lucide-react";
+import { CalendarCheck, ChevronDown, ChevronUp, ExternalLink, FolderOpen, ListOrdered, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { urlPasta } from "./l1";
 import type { SemPastaInfo } from "./types";
@@ -133,6 +133,25 @@ export function SemPastaResumo({ info }: { info?: SemPastaInfo | null }) {
       </div>
 
       {info.cliente_info && <ClienteRepresentado info={info.cliente_info} />}
+
+      {/* Tarefa que o motor já criou sozinha. Fica em destaque e ANTES da
+          ficha porque muda o que o operador faz aqui: não é "agende isto",
+          é "já está agendado, confira". Sem esse aviso ele agendaria uma
+          segunda tarefa na mão para o mesmo caso. */}
+      {info.agendamento_automatico && (
+        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-emerald-300 bg-emerald-50/80 px-3 py-2 text-emerald-900">
+          <CalendarCheck className="h-4 w-4 shrink-0" />
+          <span className="text-[11px] font-extrabold uppercase tracking-wide">
+            Tarefa criada automaticamente
+          </span>
+          {info.agendamento_automatico.task_id && (
+            <span className="font-mono text-[12px]">#{info.agendamento_automatico.task_id}</span>
+          )}
+          <span className="text-[12px]">
+            para cadastrar a pasta — não agende de novo.
+          </span>
+        </div>
+      )}
 
       {/* Ficha de cadastro (tipos críticos): o que a equipe precisa para
           criar a pasta, extraído pela IA. O resumo vem primeiro; o resto
