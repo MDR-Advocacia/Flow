@@ -117,7 +117,9 @@ export function faltaMotivoObrigatorio(d: DraftTask): boolean {
 }
 
 /** Chips de motivo — um clique, e clicar de novo desmarca. */
-function ChipsMotivo({
+// Exportado para o diálogo de duplicata usar os MESMOS chips: o vocabulário
+// de motivos é um só, e reimplementá-lo lá geraria duas listas que divergem.
+export function ChipsMotivo({
   titulo, opcoes, valor, onPick, obrigatorio, disabled,
 }: {
   titulo: string;

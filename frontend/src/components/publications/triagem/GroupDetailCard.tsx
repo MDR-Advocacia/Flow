@@ -20,6 +20,7 @@ import EtiquetasL1 from "./EtiquetasL1";
 import ResponsavelPasta from "./ResponsavelPasta";
 import SemPastaResumo from "./SemPastaResumo";
 import RitoBadge from "./RitoBadge";
+import TarefasNoL1 from "./TarefasNoL1";
 import { IGNORE_REASONS, LABEL_CONSULTOU_AUTOS } from "./motivos";
 import { urlPasta, urlPublicacao } from "./l1";
 import {
@@ -343,6 +344,13 @@ export function GroupDetailCard({
               </span>
             </p>
           )}
+          {/* O que JÁ existe de tarefa neste processo, lido do L1 agora.
+              Vem ANTES do compositor de propósito: agendar sem saber que há
+              tarefa em curso é como o operador cria duplicata sem querer —
+              e é o que a tela clássica mostrava e esta não mostrava. */}
+          <div className="mb-3">
+            <TarefasNoL1 lawsuitId={group.lawsuit_id} />
+          </div>
           <TaskComposer
             drafts={drafts}
             onChange={onDraftsChange}

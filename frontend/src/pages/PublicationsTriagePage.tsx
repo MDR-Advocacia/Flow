@@ -42,6 +42,7 @@ import ResponsavelPasta from "@/components/publications/triagem/ResponsavelPasta
 import AuditoriaCard from "@/components/publications/triagem/AuditoriaCard";
 import DistribuicaoBar from "@/components/publications/triagem/DistribuicaoBar";
 import FeedbackClassificacao from "@/components/publications/triagem/FeedbackClassificacao";
+import DuplicataDialog from "@/components/publications/triagem/DuplicataDialog";
 import ConfirmarAgendamentoDialog, {
   confirmacaoDispensadaHoje, dispensarConfirmacaoHoje,
 } from "@/components/publications/triagem/ConfirmarAgendamentoDialog";
@@ -185,6 +186,11 @@ export default function PublicationsTriagePage() {
   const [draftsByKey, setDraftsByKey] = useState<Record<string, DraftTask[]>>({});
   const [consultouPorKey, setConsultouPorKey] = useState<Record<string, boolean>>({});
   const [duplicatas, setDuplicatas] = useState<Record<number, TarefaAbertaL1[]>>({});
+  // Agendamento barrado por duplicata: guarda o grupo para o operador poder
+  // confirmar depois de ver o que já existe (null = diálogo fechado).
+  const [conflito, setConflito] = useState<
+    { grupo: GroupedRecord; quantas: number; subtipos: number[] } | null
+  >(null);
   // Texto integral por record — a listagem só traz 200 caracteres.
   const [textos, setTextos] = useState<Record<number, PublicationRecord>>({});
   const [submitting, setSubmitting] = useState(false);
@@ -399,6 +405,20 @@ export default function PublicationsTriagePage() {
     [textos],
   );
 
+  // Chave ESTAVEL dos subtipos escolhidos. Existe porque a checagem de
+  // duplicata precisa refazer quando o operador TROCA ou ADICIONA subtipo,
+  // mas nao pode refazer a cada tecla da descricao — e depender de `drafts`
+  // inteiro faria isso. Recalcular uma string e barato; a chamada de rede
+  // e que nao pode repetir.
+  const subtiposKey = useMemo(() => {
+    if (!grupoVisivel) return "";
+    return draftsDe(grupoVisivel)
+      .filter((d) => d.subTypeId && !d.removida)
+      .map((d) => d.subTypeId as number)
+      .sort((a, b) => a - b)
+      .join(",");
+  }, [grupoVisivel, draftsDe]);
+
   useEffect(() => {
     if (aba !== "nova" || !grupoVisivel?.lawsuit_id) { setDuplicatas({}); return; }
     const subtipos = draftsDe(grupoVisivel)
@@ -420,10 +440,14 @@ export default function PublicationsTriagePage() {
       }
     })();
     return () => { cancelado = true; };
-    // draftsDe muda a cada tecla; depender só do grupo evita refazer a
-    // chamada enquanto o operador digita a descrição.
+    // Depende da CHAVE dos subtipos, nao de `drafts`: refaz quando o operador
+    // troca/adiciona subtipo (que e quando a resposta muda) e nao refaz
+    // enquanto ele digita. Antes dependia so do grupo, entao a checagem
+    // rodava UMA vez com os subtipos iniciais — trocar o subtipo depois
+    // deixava o aviso invisivel e o operador batia no 409 sem nunca ter
+    // sido avisado. Era esse o beco.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [aba, grupoVisivel?.lawsuit_id]);
+  }, [aba, grupoVisivel?.lawsuit_id, subtiposKey]);
 
   /* ─── ações ─── */
   const removerDaFila = useCallback((g: GroupedRecord) => {
@@ -433,7 +457,9 @@ export default function PublicationsTriagePage() {
     setTratadas((n) => n + 1);
   }, []);
 
-  const enviarAgendamento = useCallback(async (g: GroupedRecord) => {
+  // `forcar` chega do diálogo de duplicata: o operador VIU as tarefas em
+  // aberto e decidiu agendar mesmo assim. Duplicata nunca é veto — é aviso.
+  const enviarAgendamento = useCallback(async (g: GroupedRecord, forcar = false) => {
     const todos = draftsDe(g);
     const drafts = todos.filter(draftValido);
     if (!drafts.length) {
@@ -467,19 +493,25 @@ export default function PublicationsTriagePage() {
       const url = g.lawsuit_id
         ? `${API}/groups/${g.lawsuit_id}/schedule`
         : `${API}/groups/records/schedule`;
+      const forcarDuplicata = temAberta || forcar;
       const body = g.lawsuit_id
-        ? { payload_overrides: payloads, record_ids: recordIds, force_duplicate: temAberta }
-        : { record_ids: recordIds, payload_overrides: payloads, force_duplicate: temAberta };
+        ? { payload_overrides: payloads, record_ids: recordIds, force_duplicate: forcarDuplicata }
+        : { record_ids: recordIds, payload_overrides: payloads, force_duplicate: forcarDuplicata };
 
       const res = await apiFetch(url, { method: "POST", body: JSON.stringify(body) });
       if (res.status === 409) {
+        // Duplicata NÃO barra: mostra o que já existe no L1 e devolve a
+        // decisão ao operador. O toast vermelho de antes era um beco — ele
+        // mandava "reenvie com force_duplicate=true", que é parâmetro de
+        // API e ninguém na mesa tem como fazer.
         const j = await res.json().catch(() => ({}));
-        toast({
-          title: "Tarefa duplicada no Legal One",
-          description:
-            String(j?.detail || "").replace(/^DUPLICATE_BLOCKED:\d+:/, "") ||
-            "Já existe tarefa pendente do mesmo subtipo. Diga por que agendar mesmo assim.",
-          variant: "destructive",
+        const quantas = Number(
+          String(j?.detail || "").match(/^DUPLICATE_BLOCKED:(\d+):/)?.[1] || 0,
+        );
+        setConflito({
+          grupo: g,
+          quantas,
+          subtipos: [...new Set(drafts.map((d) => d.subTypeId).filter(Boolean) as number[])],
         });
         return;
       }
@@ -1062,6 +1094,28 @@ export default function PublicationsTriagePage() {
           está na fila SEM PASTA, e a taxonomia v2 do escritório na fila
           comum. Recarrega a fila ao gravar, porque o endpoint também APLICA
           a correção ao registro. */}
+      {/* Duplicata: mostra o que já existe e devolve a decisão ao operador,
+          em vez do beco que mandava "reenvie com force_duplicate=true". */}
+      <DuplicataDialog
+        conflito={
+          conflito
+            ? {
+                lawsuitId: conflito.grupo.lawsuit_id ?? null,
+                cnj: conflito.grupo.lawsuit_cnj,
+                quantas: conflito.quantas,
+                subtipos: conflito.subtipos,
+              }
+            : null
+        }
+        enviando={submitting}
+        onCancelar={() => setConflito(null)}
+        onAgendarMesmoAssim={() => {
+          const g = conflito?.grupo;
+          setConflito(null);
+          if (g) void enviarAgendamento(g, true);
+        }}
+      />
+
       <FeedbackClassificacao
         record={feedbackDe}
         taxonomy={taxonomy}
