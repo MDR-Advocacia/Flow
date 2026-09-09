@@ -131,3 +131,13 @@ def test_mesmo_conjunto_de_pids_nao_repete_o_email(proc_falso, monkeypatch):
     proc_falso["77"] = ("node", 60 * 24)
     wd.rodar_ciclo(matar=True)
     assert len(avisos) == 2
+
+
+def test_xvfb_nunca_e_alvo_por_mais_velho_que_seja(proc_falso, monkeypatch):
+    """O display :99 nasce com o container e vive pra sempre — idade nele não
+    é sintoma. Matá-lo deixa a coleta do BB (não-headless) sem onde abrir o
+    Chrome. Em 08/09/2026 o vigia o listou a cada tick (192 min), com e-mail."""
+    proc_falso.update({"10": ("Xvfb", 60 * 24 * 3), "99": ("chrome", 60 * 24)})
+    monkeypatch.setattr(wd, "_estado", lambda pid: "S")
+
+    assert [a["pid"] for a in wd.listar_rpa_pendurado(idade_max_min=120)] == [99]

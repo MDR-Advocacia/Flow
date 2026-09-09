@@ -57,7 +57,12 @@ logger = logging.getLogger(__name__)
 
 # Nomes de processo que são RPA e podem ser mortos quando envelhecem.
 # `python` está FORA de propósito: é o uvicorn e os workers da aplicação.
-_RPA_COMMS = re.compile(r"^(chrome|chromium|node|undetected_chro|chromedriver|Xvfb)", re.I)
+# `Xvfb` também está FORA: é o display :99 que `docker-api-start.sh` sobe UMA
+# vez no boot do container e do qual a coleta do BB (não-headless) depende. Ele
+# é velho por definição — e em 08/09/2026 às 22h o vigia o listou como
+# "pendurado há 192 min" a cada tick, com e-mail a cada vez. Vigia que mata o
+# display deixa toda coleta seguinte sem onde abrir o Chrome.
+_RPA_COMMS = re.compile(r"^(chrome|chromium|node|undetected_chro|chromedriver)", re.I)
 
 # Runner honesto do L1 fecha em poucos minutos. Duas horas é folga larga
 # pra rodada pesada (o tratamento de 2.4k publicações leva ~30 min) e ainda
