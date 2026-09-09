@@ -273,7 +273,22 @@ class PublicationTreatmentService:
         target_status = self._map_record_status_to_target(record.status)
         item = record.treatment_item
 
-        if target_status is None or not record.legal_one_update_id:
+        # ID SINTÉTICO (negativo) NÃO ENTRA NA FILA. Publicação que veio do
+        # fallback (DJEN / planilha / relatório) ganha um `legal_one_update_id`
+        # negativo justamente porque NÃO existe no módulo Publicações do L1 —
+        # o importador documenta o contrato: "negativo → nunca colide com ID
+        # real do L1, que é positivo". Tratar no L1 o que o L1 não tem é
+        # impossível, e o runner descobre isso do pior jeito: abre a página
+        # com 0 de 0 itens e recebe "Ocorreu um erro interno" a cada item.
+        # Medido em 09/09/2026: 2.399 itens assim na fila desde 30/07 e 27/08,
+        # 0 tratados EM TODA A HISTÓRIA, e o Tratamento Web "quebrado desde
+        # 06/09" era só isso — as runs 240/241 tiveram 2.382/2.382 erros, cada
+        # uma gerando ~2.400 requisições inúteis ao L1 e ~250 MB de screenshots
+        # de falha, quatro vezes por dia. O que já estava na fila é cancelado
+        # aqui com o motivo escrito; o que chega depois nunca entra.
+        id_sintetico = bool(record.legal_one_update_id) and record.legal_one_update_id < 0
+
+        if target_status is None or not record.legal_one_update_id or id_sintetico:
             if item is not None:
                 item.source_record_status = record.status
                 item.linked_lawsuit_id = record.linked_lawsuit_id
@@ -283,6 +298,12 @@ class PublicationTreatmentService:
                 if item.queue_status != QUEUE_STATUS_COMPLETED:
                     item.queue_status = QUEUE_STATUS_CANCELLED
                     item.updated_at = now
+                    if id_sintetico:
+                        item.last_error = (
+                            "Publicação sem id no Legal One (id sintético do fallback "
+                            "DJEN/planilha): não existe no módulo Publicações do L1, "
+                            "nada a tratar lá."
+                        )
             if commit:
                 self.db.commit()
             return item

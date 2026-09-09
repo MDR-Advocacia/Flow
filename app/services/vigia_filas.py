@@ -439,6 +439,47 @@ def _lote_externo_nao_aplicado(db, agora: datetime) -> list[Violacao]:
     ]
 
 
+def _fila_intratavel(db, agora: datetime) -> list[Violacao]:
+    """Item na fila do Tratamento Web que NUNCA vai dar certo: id sintético.
+
+    Publicação do fallback (DJEN/planilha) tem `legal_one_update_id` negativo
+    porque não existe no L1 — e o Tratamento Web marca coisas NO L1. Em
+    09/09/2026 havia 2.399 desses na fila desde 30/07 e 27/08, 0 tratados em
+    toda a história; cada run gastava ~2.400 requisições no L1 e ~250 MB de
+    screenshot de falha pra descobrir isso de novo, quatro vezes por dia. O
+    `sync_item_from_record` passou a cancelar na origem; este invariante é a
+    rede: se voltar a entrar por outra porta, aparece aqui.
+    """
+    from sqlalchemy import func
+
+    from app.models.publication_treatment import (
+        QUEUE_STATUS_FAILED,
+        QUEUE_STATUS_PENDING,
+        PublicationTreatmentItem,
+    )
+
+    q = (
+        db.query(func.count(PublicationTreatmentItem.id), func.min(PublicationTreatmentItem.created_at))
+        .filter(
+            PublicationTreatmentItem.queue_status.in_((QUEUE_STATUS_PENDING, QUEUE_STATUS_FAILED)),
+            PublicationTreatmentItem.legal_one_update_id < 0,
+        )
+        .one()
+    )
+    if not q[0]:
+        return []
+    return [Violacao(
+        fila="Tratamento Web", invariante="fila intratável",
+        chave="tratamento:intratavel", gravidade=AVISO,
+        mensagem=(
+            f"{q[0]} item(ns) na fila do Tratamento Web com id sintético (negativo) — "
+            "publicação que não existe no L1 e nunca poderá ser tratada lá (o mais antigo "
+            f"há {_ha(agora, q[1])}). Cada run gasta requisições e disco falhando neles."
+        ),
+        dados={"intrataveis": q[0]},
+    )]
+
+
 INVARIANTES: tuple[Callable[[Any, datetime], list[Violacao]], ...] = (
     _sucesso_vazio_lotes,
     _sucesso_vazio_tratamento,
@@ -446,6 +487,7 @@ INVARIANTES: tuple[Callable[[Any, datetime], list[Violacao]], ...] = (
     _fila_parada,
     _refem_ciencia_sem_cadastro,
     _lote_externo_nao_aplicado,
+    _fila_intratavel,
 )
 
 

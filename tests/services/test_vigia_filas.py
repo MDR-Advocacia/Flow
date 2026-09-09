@@ -330,3 +330,32 @@ def test_smtp_fora_nao_derruba_o_ciclo(db_session, monkeypatch):
     r = vf.rodar_ciclo(db_session)
 
     assert len(r["violacoes"]) == 1 and r["email_enviado"] is False
+
+
+# ── fila intratável (os 2.399 de id sintético, 09/09/2026) ──────────────
+
+
+def test_item_com_id_sintetico_na_fila_do_tratamento_e_intratavel(db_session):
+    recs = _publicacoes(db_session, 3, RECORD_STATUS_CLASSIFIED, _ha(days=40))
+    for r in recs:
+        r.legal_one_update_id = -abs(r.legal_one_update_id)      # sintético (DJEN/planilha)
+    db_session.flush()
+    for r in recs:
+        db_session.add(PublicationTreatmentItem(
+            publication_record_id=r.id, legal_one_update_id=r.legal_one_update_id,
+            source_record_status="AGENDADO", target_status="TRATADA",
+            queue_status=QUEUE_STATUS_PENDING, created_at=_ha(days=40),
+        ))
+    # um item de verdade (id positivo) não conta
+    ok = _publicacoes(db_session, 1, RECORD_STATUS_CLASSIFIED, _ha(days=1))[0]
+    db_session.add(PublicationTreatmentItem(
+        publication_record_id=ok.id, legal_one_update_id=ok.legal_one_update_id,
+        source_record_status="AGENDADO", target_status="TRATADA",
+        queue_status=QUEUE_STATUS_PENDING, created_at=_ha(days=1),
+    ))
+    db_session.commit()
+
+    achados = _invariantes(db_session, "fila intratável")
+
+    assert len(achados) == 1 and achados[0].gravidade == vf.AVISO
+    assert "3 item" in achados[0].mensagem and "sintético" in achados[0].mensagem
