@@ -42,7 +42,13 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
         stream=sys.stdout,
-        format="%(asctime)s - %(levelname)s - [coleta-filho run=%s] %%(message)s" % args.run_id,
+        # f-string, NÃO `%`: a string tem %(asctime)s/%(levelname)s, que são
+        # placeholders de MAPPING do logging. Interpolar ela com um inteiro
+        # (`% args.run_id`) faz o Python tentar resolver esses nomes num int e
+        # levantar "TypeError: format requires a mapping" — foi o que matou a
+        # coleta das 03:00 de 09/09/2026 no primeiro segundo do processo filho
+        # (rc=1, run 241 fechada pelo supervisor antes de qualquer ciência).
+        format=f"%(asctime)s - %(levelname)s - [coleta-filho run={args.run_id}] %(message)s",
     )
     log = logging.getLogger("distribuidos_bb.coleta_runner")
     log.info("iniciando (pid %s)", __import__("os").getpid())
