@@ -69,6 +69,10 @@ _ALERTA_PCT = int(os.environ.get("RPA_WATCHDOG_ALERTA_PCT", "70"))
 _ALERTA_INTERVALO_S = int(os.environ.get("RPA_WATCHDOG_ALERTA_INTERVALO_S", "3600"))
 
 _ultimo_alerta = {"t": 0.0}
+# PIDs do último reap avisado por e-mail. Se o mesmo conjunto "morre" de novo
+# no ciclo seguinte, o kill não pegou (processo inmatável) — repetir o e-mail
+# não muda nada e treina o operador a ignorar o vigia.
+_ultimo_reap: set[int] = set()
 
 
 # ── leitura do cgroup ──────────────────────────────────────────────────
@@ -128,6 +132,18 @@ def _comm(pid: str) -> str:
         return ""
 
 
+def _estado(pid: str) -> str:
+    """Letra de estado do processo (R/S/D/Z/T...), do /proc/<pid>/stat.
+
+    Lê depois do último ')' porque o nome do comando pode conter espaço e
+    parêntese — o split ingênuo erra o campo."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        return stat[stat.rindex(")") + 2:].split()[0]
+    except (OSError, ValueError, IndexError):
+        return "?"
+
+
 def _cmdline(pid: str) -> str:
     try:
         return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(
@@ -148,6 +164,15 @@ def listar_rpa_pendurado(idade_max_min: int = _IDADE_MAX_MIN) -> list[dict]:
     for pid in pids:
         comm = _comm(pid)
         if not comm or not _RPA_COMMS.match(comm):
+            continue
+        # ZUMBI (Z) não é pendurado: já morreu, só falta o pai dar wait().
+        # SIGKILL nele não faz nada — e foi assim que, em 08/09/2026 às 22h,
+        # o vigia "removeu" o mesmo undetected_chromedriver a cada 10 min e
+        # mandou um e-mail por vez, a noite inteira, sobre 1 slot de PID.
+        # Zumbi some quando o pai morre (redeploy) ou colhe; até lá é só um
+        # número na tabela, sem thread nenhuma.
+        if _estado(pid) == "Z":
+            logger.info("Watchdog RPA: %s (pid %s) é zumbi — ignorado, só o pai resolve.", comm, pid)
             continue
         idade = _idade_segundos(pid)
         if idade is None or idade < limite:
@@ -232,6 +257,16 @@ def rodar_ciclo(*, matar: bool = True) -> dict:
             "Watchdog RPA: %d processo(s) pendurado(s) removido(s) (ocupação %s%%).",
             len(mortos), pct,
         )
+        pids_mortos = {m["pid"] for m in mortos}
+        repetido = pids_mortos <= _ultimo_reap
+        _ultimo_reap.clear()
+        _ultimo_reap.update(pids_mortos)
+        if repetido:
+            logger.warning(
+                "Watchdog RPA: os mesmos PIDs %s voltaram — kill não os remove; "
+                "e-mail não repetido.", sorted(pids_mortos),
+            )
+            return {**resumo, "email_repetido_suprimido": True}
         _avisar(
             "Watchdog de RPA — processos pendurados removidos",
             [{

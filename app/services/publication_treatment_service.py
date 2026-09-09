@@ -801,7 +801,11 @@ class PublicationTreatmentService:
         if state in {"running", "sleeping", "starting"}:
             return RUN_STATUS_RUNNING
         if state == "completed":
-            if failed_count > 0 or retry_pending_count > 0:
+            # "Sem erro" não é "sucesso": runner que declara completed com itens
+            # RESTANTES não fez o trabalho todo, e carimbar CONCLUÍDO por cima
+            # é o mesmo visto verde falso do lote 6019 (08/09/2026). A contagem
+            # manda mais que a palavra do runner.
+            if failed_count > 0 or retry_pending_count > 0 or remaining_items > 0:
                 return RUN_STATUS_COMPLETED_WITH_ERRORS
             return RUN_STATUS_COMPLETED
         if state == "stopped":

@@ -154,6 +154,13 @@ class Settings(BaseSettings):
     # RPA_WATCHDOG_IDADE_MAX_MIN (120), RPA_WATCHDOG_ALERTA_PCT (70),
     # RPA_WATCHDOG_INTERVALO_MIN (10).
     rpa_pid_watchdog_enabled: bool = True
+    # Vigia de Filas (08/09/2026): UM job que confere, em toda fila do sistema,
+    # se o RESULTADO bate com o status (lote "concluído" com 0 processados, run
+    # ativa há horas, ciência dada sem pasta no L1, lote pronto na Anthropic e
+    # não aplicado...) e avisa por e-mail. Nasceu do dia em que 5 filas
+    # travaram e nenhuma avisou. Ajustáveis por env: VIGIA_FILAS_INTERVALO_MIN
+    # (10), VIGIA_FILAS_REPETE_APOS_S (21600), VIGIA_FILAS_JANELA_DIAS (7).
+    vigia_filas_enabled: bool = True
 
     # ── Terceira contingência: DJEN/Comunica ──────────────────────────
     # Última rede da captura, acionada só depois que a API do L1 E o relatório
@@ -514,6 +521,13 @@ class Settings(BaseSettings):
     #     Seguro: a ciência tira o item da lista do BB, então a retentativa só
     #     pega o que sobrou (retomada), e o fingerprint impede duplicata no banco.
     distribuidos_bb_coleta_tentativas: int = 3
+    # (c) TETO DE RELÓGIO da coleta (08/09/2026). A coleta roda num processo
+    #     filho (coleta_runner) vigiado por coleta_supervisor: passou disto, o
+    #     grupo inteiro (node/chrome/chromedriver) é morto e o run vira ERRO
+    #     com a verdade + e-mail. Passagem honesta leva ~6 min; pior caso
+    #     legítimo (OneLog lento x 3 tentativas) ~48. A run 240 travou 59 min
+    #     em silêncio como thread — thread não se mata; processo, sim.
+    distribuidos_bb_coleta_teto_min: int = 60
     distribuidos_bb_coleta_retry_espera_seg: int = 60
 
     # Trava de segurança GLOBAL da ciência: por run o operador pode ligar,

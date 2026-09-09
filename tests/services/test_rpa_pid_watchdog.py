@@ -93,3 +93,41 @@ def test_fora_de_container_o_vigia_e_inofensivo(proc_falso, monkeypatch):
 
     assert resumo["ocupacao_pct"] is None
     assert resumo["mortos"] == 0
+
+
+# ── zumbi e repetição (08/09/2026, 22h) ────────────────────────────────
+
+
+def test_zumbi_nao_e_pendurado_nem_e_morto(proc_falso, monkeypatch):
+    """SIGKILL em zumbi não faz nada — só o pai colhe. Listá-lo como
+    'pendurado' e 'removido' a cada ciclo era mentira repetida por e-mail."""
+    proc_falso.update({"808": ("undetected_chro", 150), "99": ("chrome", 60 * 24)})
+    monkeypatch.setattr(wd, "_estado", lambda pid: "Z" if pid == "808" else "S")
+
+    achados = wd.listar_rpa_pendurado(idade_max_min=120)
+
+    assert [a["pid"] for a in achados] == [99], "zumbi entrou na lista"
+
+
+def test_mesmo_conjunto_de_pids_nao_repete_o_email(proc_falso, monkeypatch):
+    """Processo que 'morre' de novo no ciclo seguinte não morreu: repetir o
+    e-mail não muda nada e treina a ignorar o vigia."""
+    proc_falso.update({"99": ("chrome", 60 * 24)})
+    monkeypatch.setattr(wd, "_estado", lambda pid: "S")
+    monkeypatch.setattr(wd.os, "kill", lambda pid, sig: None, raising=False)
+    monkeypatch.setattr(wd.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(wd, "ocupacao_pids", lambda: (30, 800))
+    wd._ultimo_reap.clear()
+    avisos = []
+    monkeypatch.setattr(wd, "_avisar", lambda *a, **k: avisos.append(a))
+
+    wd.rodar_ciclo(matar=True)
+    r2 = wd.rodar_ciclo(matar=True)
+
+    assert len(avisos) == 1
+    assert r2.get("email_repetido_suprimido") is True
+
+    # um PID NOVO no conjunto volta a avisar
+    proc_falso["77"] = ("node", 60 * 24)
+    wd.rodar_ciclo(matar=True)
+    assert len(avisos) == 2

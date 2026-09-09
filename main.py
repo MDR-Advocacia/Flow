@@ -336,6 +336,18 @@ async def lifespan(_: FastAPI):
     except Exception:
         logger.exception("Falha ao registrar o vigia de PIDs/RPA.")
 
+    # Vigia de FILAS (08/09/2026): o de PIDs olha o container; este olha o
+    # RESULTADO de cada fila contra o status que ela declara. Dez reapers
+    # existiam, um por fila, e nenhum conferia resultado nem avisava — o dia
+    # em que Tratamento Web, lote de agendamento, classificacao e coleta BB
+    # travaram juntos passou sem um e-mail. Ver app/services/vigia_filas.py.
+    try:
+        from app.services.vigia_filas import register_vigia_filas_job
+
+        register_vigia_filas_job(scheduler)
+    except Exception:
+        logger.exception("Falha ao registrar o Vigia de Filas.")
+
     # Motor dormente do Classificador — agrupa PDFs do robo em batches.
     try:
         from app.services.classificador.pending_worker import (
