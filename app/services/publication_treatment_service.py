@@ -52,6 +52,45 @@ from app.models.publication_treatment import (
 logger = logging.getLogger(__name__)
 
 
+def _esperar_runner_e_finalizar(proc, run_id: int) -> None:
+    """Espera o runner sair, COLHE o processo e fecha o run no banco na hora.
+
+    Sem isto, no caminho do autorun ninguém chamava `wait()` no filho: o node
+    virava ZUMBI ao terminar (o watchdog de PIDs o listou como tal em
+    09/09/2026, run 248) e o run ficava "EXECUTANDO 0/3574" no banco por
+    horas depois de o status.json já dizer `completed` — até o reaper do tick
+    seguinte ou alguém abrir a tela. Painel mentindo por atraso, não por bug.
+
+    `_sync_run_from_status_file` é idempotente: se o reaper/tick passar antes
+    ou depois, o resultado é o mesmo. Sessão própria: esta thread sobrevive à
+    requisição que iniciou o run.
+    """
+    try:
+        proc.wait()
+    except Exception:  # noqa: BLE001
+        logger.exception("tratamento: wait() do runner do run %s falhou (ignorado).", run_id)
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        run = db.get(PublicationTreatmentRun, run_id)
+        if run is None:
+            return
+        PublicationTreatmentService(db)._sync_run_from_status_file(run, commit=True)
+        logger.info(
+            "tratamento: runner do run %s saiu (rc=%s); run fechado como %s (%s/%s).",
+            run_id, getattr(proc, "returncode", None), run.status, run.processed_items, run.total_items,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("tratamento: falha ao fechar o run %s depois do runner sair (ignorado).", run_id)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        db.close()
+
+
 def _tail_runner_log_to_logger(
     file_path: Path,
     pid: int,
@@ -798,6 +837,14 @@ class PublicationTreatmentService:
             args=(paths["error_log"], proc.pid, run.id, logging.WARNING),
             daemon=True,
             name=f"runner-stderr-tail-{run.id}",
+        ).start()
+        # Quem espera o filho: colhe o processo (sem zumbi) e fecha o run no
+        # banco assim que o status.json ficar final — ver _esperar_runner_e_finalizar.
+        threading.Thread(
+            target=_esperar_runner_e_finalizar,
+            args=(proc, run.id),
+            daemon=True,
+            name=f"runner-wait-{run.id}",
         ).start()
 
         run.status = RUN_STATUS_RUNNING
