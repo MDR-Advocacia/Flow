@@ -10,6 +10,13 @@ painel dias depois.
 A trava anti-colisão de `criar_run` já ignora run com mais de 45 min, então o
 zumbi não bloqueava coleta nova — o estrago era de LEITURA. O reaper fecha o
 run com mensagem honesta e preserva o que já foi coletado.
+
+08/09/2026 mudou o que "honesta" quer dizer: a run 240 NÃO morreu por redeploy
+— travou dentro do Playwright, viva, 59 min em silêncio — e o texto antigo
+("o processo morreu (redeploy/restart)") mandou a investigação pro lugar
+errado. O reaper só sabe uma coisa: não há sinal de vida. É só isso que ele
+afirma. E desde então ele também AVISA por e-mail (stubado aqui: a suíte não
+pode mandar e-mail de verdade).
 """
 from datetime import datetime, timedelta, timezone
 
@@ -25,7 +32,14 @@ from app.models.distribuidos_bb import (
     BbEvento,
     BbRun,
 )
+from app.services.distribuidos_bb import alertas
 from app.services.distribuidos_bb.coleta_service import reapear_runs_zumbis
+
+
+@pytest.fixture(autouse=True)
+def _sem_email_de_verdade(monkeypatch):
+    """O reaper manda e-mail ao fechar zumbi; a suíte nunca pode bater no SMTP."""
+    monkeypatch.setattr(alertas, "alertar_falha_cadastro", lambda **kw: None)
 
 
 @pytest.fixture
@@ -59,8 +73,9 @@ def test_zumbi_antigo_e_fechado_com_erro_honesto(db):
     assert r.status == RUN_ERRO
     assert r.concluido_em is not None
     assert "sem sinal de vida" in r.erro
-    # não inventa reinício: diz o que de fato aconteceu
-    assert "redeploy/restart" in r.erro
+    # não inventa reinício: o reaper não sabe se travou ou morreu, e não afirma
+    assert "redeploy" not in r.erro and "morreu" not in r.erro
+    assert "processo foi encerrado" in r.erro
     # o que já foi coletado é preservado
     assert r.total_coletados == 3
 
@@ -75,8 +90,9 @@ def test_coleta_recente_nao_e_tocada(db):
 
 
 def test_limiar_tem_folga_sobre_a_trava_anticolisao(db):
-    """A trava de criar_run libera aos 45 min; o reaper só age aos 60 —
-    nunca abre janela de colisão que a trava já não tivesse aberto."""
+    """A trava de criar_run libera aos 45 min; o reaper só age aos 90 (atrás
+    do supervisor do processo filho, que mata aos 60) — nunca abre janela de
+    colisão que a trava já não tivesse aberto."""
     _run(db, 301, ha_min=50)
 
     assert reapear_runs_zumbis(db)["fechadas"] == []

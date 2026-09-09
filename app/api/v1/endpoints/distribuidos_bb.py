@@ -1338,8 +1338,15 @@ def coletar(
     # Aviso claro quando o operador pediu ciência mas a trava global bloqueia.
     ciencia_efetiva = payload.confirmar_ciencia and settings.distribuidos_bb_confirmar_ciencia
 
+    # A coleta roda em processo FILHO vigiado por teto de relógio
+    # (coleta_supervisor). A thread aqui só existe pra devolver o 202 já: ela
+    # não carrega navegador nenhum — quem carrega é o filho, que pode ser
+    # morto de fora se travar (run 240, 08/09/2026: 59 min pendurada como
+    # thread, inencerrável).
+    from app.services.distribuidos_bb.coleta_supervisor import rodar_coleta_supervisionada
+
     thread = threading.Thread(
-        target=coleta_service.executar_coleta_background,
+        target=rodar_coleta_supervisionada,
         args=(run.id,),
         kwargs={
             "data_inicial": payload.data_inicial,
@@ -1347,6 +1354,7 @@ def coletar(
             "coletar_envolvidos": payload.coletar_envolvidos,
         },
         daemon=True,
+        name=f"coleta-supervisor-{run.id}",
     )
     thread.start()
 

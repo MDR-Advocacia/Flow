@@ -436,9 +436,18 @@ def recuperar_pool_orfao(db: Session) -> Optional[int]:
     `retentar_planilhas_orfas` não cobre isso: ela re-tenta planilha gerada e
     não subida, e aqui a execução parou ANTES de existir planilha.
 
-    Assinatura do órfão: run CONCLUÍDO, com distribuídos, passada a janela de
-    graça, e SEM nenhum evento de auto-cadastro. Só age com o auto-cadastro
-    ligado — desligado, pool NOVO é a escolha do operador, não um órfão.
+    Assinatura do órfão: run CONCLUÍDO **ou ERRO**, com distribuídos, passada a
+    janela de graça, e SEM nenhum evento de auto-cadastro. Só age com o
+    auto-cadastro ligado — desligado, pool NOVO é a escolha do operador, não
+    um órfão.
+
+    O ERRO entrou em 08/09/2026 (run 240): a coleta TRAVOU depois de dar
+    ciência em 15 notificações e o reaper a fechou como ERRO — e como a
+    varredura só olhava CONCLUÍDO, 15 processos ficaram reféns: ciência dada
+    no portal do BB (irreversível, o BB não mostra mais), pasta nenhuma no
+    L1, e nenhuma recuperação a caminho até a coleta seguinte sobreviver.
+    Ciência dada é compromisso assumido; o status do run que a deu não muda
+    isso.
 
     Devolve o id do run recuperado, ou None quando não havia o que fazer.
     """
@@ -456,7 +465,7 @@ def recuperar_pool_orfao(db: Session) -> Optional[int]:
     candidatos = (
         db.query(BbRun)
         .filter(
-            BbRun.status == RUN_CONCLUIDO,
+            BbRun.status.in_((RUN_CONCLUIDO, RUN_ERRO)),
             BbRun.total_distribuidos > 0,
             BbRun.concluido_em <= agora - timedelta(minutes=_ORFAO_GRACA_MIN),
             BbRun.concluido_em >= agora - timedelta(hours=_ORFAO_IDADE_MAX_H),
@@ -479,14 +488,23 @@ def recuperar_pool_orfao(db: Session) -> Optional[int]:
 
         # Evento ANTES da tentativa: se o import estourar, o run sai da
         # varredura mesmo assim e o retry de planilha órfã assume daqui.
-        registrar_evento(
-            db, secao=SECAO_CADASTRO, nivel=NIVEL_AVISO, acao=_ACAO_ORFAO,
-            mensagem=(
+        if run.status == RUN_ERRO:
+            motivo = (
+                f"O run {run.id} foi fechado como ERRO (travou ou foi "
+                "interrompido) depois de distribuir processos e ANTES do "
+                "auto-cadastro. Quem já recebeu ciência no portal não volta a "
+                "aparecer lá — precisa da pasta no L1 de qualquer jeito."
+            )
+        else:
+            motivo = (
                 f"O run {run.id} concluiu a coleta mas o auto-cadastro nunca "
                 "rodou (interrupção do processo — tipicamente um redeploy no "
-                "meio). Retomando o cadastro do pool automaticamente."
-            ),
-            dados={"run_id": run.id}, run_id=run.id,
+                "meio)."
+            )
+        registrar_evento(
+            db, secao=SECAO_CADASTRO, nivel=NIVEL_AVISO, acao=_ACAO_ORFAO,
+            mensagem=f"{motivo} Retomando o cadastro do pool automaticamente.",
+            dados={"run_id": run.id, "status_do_run": run.status}, run_id=run.id,
         )
         db.commit()
         logger.warning("Distribuídos BB: recuperando pool órfão do run %s.", run.id)
@@ -983,7 +1001,11 @@ def reapear_runs_zumbis(db, *, apos_min: Optional[int] = None) -> dict:
     import os as _os
 
     if apos_min is None:
-        apos_min = int(_os.environ.get("BBD_RUN_ORFA_APOS_MIN", "60"))
+        # 90, não 60: quem mata coleta travada agora é o supervisor do
+        # processo filho (teto de 60 min, killpg). Este reaper ficou como REDE
+        # DE SEGURANÇA — só age se o supervisor também morreu (container
+        # reiniciado no meio), e por isso precisa vir DEPOIS dele.
+        apos_min = int(_os.environ.get("BBD_RUN_ORFA_APOS_MIN", "90"))
     agora = datetime.now(timezone.utc)
     corte = agora - timedelta(minutes=apos_min)
 
@@ -999,24 +1021,46 @@ def reapear_runs_zumbis(db, *, apos_min: Optional[int] = None) -> dict:
         .count()
     )
     for run in zumbis:
+        # O texto antigo AFIRMAVA "o processo que a conduzia morreu
+        # (redeploy/restart)". Em 08/09/2026 isso era falso: a run 240 travou
+        # dentro do Playwright com o navegador vivo e ficou 59 min em silêncio
+        # — e o texto mandou a investigação atrás de redeploy que não houve.
+        # O reaper só sabe UMA coisa: não há sinal de vida. É isso que ele diz.
         run.status = RUN_ERRO
         run.erro = (
-            f"Coleta interrompida — sem sinal de vida há mais de {apos_min} min. "
-            "O processo que a conduzia morreu (redeploy/restart) antes de "
-            "fechar o run. Os processos já coletados foram preservados; o que "
-            "faltava roda na próxima passagem."
+            f"Coleta sem sinal de vida há mais de {apos_min} min — fechada pelo "
+            "reaper. Não se sabe se travou ou se o processo foi encerrado. "
+            f"{run.total_coletados} coletado(s) e {run.total_distribuidos} "
+            "distribuído(s) ficam no pool; se receberam ciência no portal, a "
+            "recuperação do pool órfão os cadastra no L1 mesmo assim."
         )
         run.concluido_em = agora
         registrar_evento(
-            db, secao="coleta", acao="run_zumbi_fechado", nivel=NIVEL_AVISO,
+            db, secao="coleta", acao="run_zumbi_fechado", nivel=NIVEL_ERRO,
             mensagem=(
                 f"Run {run.id} (iniciada {run.iniciado_em:%d/%m %H:%M}) fechada "
-                f"pelo reaper: {run.total_coletados} coletado(s), "
-                f"{run.total_distribuidos} distribuído(s)."
+                f"pelo reaper sem sinal de vida: {run.total_coletados} "
+                f"coletado(s), {run.total_distribuidos} distribuído(s)."
             ),
             dados={"run_id": run.id, "apos_min": apos_min},
             run_id=run.id,
         )
+        # E-MAIL. Até aqui coleta travada era só um evento AVISO na tela: em
+        # 07–08/09/2026 travaram 5 de 6 passagens agendadas e ninguém foi
+        # avisado — o operador descobriu pelo painel, à noite, olhando à mão.
+        # Reusa o alerta do cadastro (um vocabulário, um destinatário), porque
+        # o efeito prático de coleta travada É cadastro que não acontece.
+        try:
+            from app.services.distribuidos_bb.alertas import alertar_falha_cadastro
+
+            alertar_falha_cadastro(
+                contexto="coleta travada — fechada pelo reaper sem sinal de vida",
+                erro=run.erro,
+                total_processos=run.total_distribuidos or None,
+                run_id=run.id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Reaper de coletas: falha ao enviar o alerta (ignorado).")
     if zumbis:
         db.commit()
         logger.warning(

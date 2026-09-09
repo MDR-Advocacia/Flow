@@ -92,14 +92,22 @@ def _tick() -> None:
             run_id, data_inicial, data_final,
         )
         try:
-            # Já estamos numa thread do scheduler — roda a coleta síncrona aqui.
-            coleta_service.executar_coleta_background(
+            # Processo FILHO com teto de relógio (coleta_supervisor). Antes a
+            # coleta rodava aqui mesmo, como thread — e a run 240 (08/09/2026)
+            # travou 59 min em silêncio segurando este advisory lock, sem que
+            # nada pudesse encerrá-la. O supervisor bloqueia até o filho
+            # terminar OU estourar o teto; nos dois casos o lock é solto.
+            from app.services.distribuidos_bb.coleta_supervisor import (
+                rodar_coleta_supervisionada,
+            )
+
+            res = rodar_coleta_supervisionada(
                 run_id,
                 data_inicial=data_inicial,
                 data_final=data_final,
                 coletar_envolvidos=True,
             )
-            logger.info("Distribuídos BB agendado: run #%s concluído.", run_id)
+            logger.info("Distribuídos BB agendado: run #%s — %s.", run_id, res.get("desfecho"))
         except Exception:
             logger.exception("Distribuídos BB agendado: run #%s falhou.", run_id)
 
