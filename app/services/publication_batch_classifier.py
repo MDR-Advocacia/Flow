@@ -1023,14 +1023,28 @@ class PublicationBatchClassifier:
                 # Natureza do processo: só pra publicações sem pasta vinculada
                 if rec.linked_lawsuit_id is None:
                     rec.natureza_processo = clean.natureza_processo
-                # Múltiplas classificações
-                extra = classification.get("_extra_classifications")
-                if extra:
-                    all_clf = [classification] + extra
-                    rec.classifications = [
-                        {k: v for k, v in c.items() if k != "_extra_classifications"}
-                        for c in all_clf
-                    ]
+                # Classificacoes: a PRIMARIA sempre, extras quando houver.
+                #
+                # Ate 09/09/2026 esta gravacao acontecia so' `if extra` — ou
+                # seja, apenas quando a IA devolvia mais de uma classificacao.
+                # No caso normal (uma so'), a coluna ficava NULL e junto com
+                # ela se perdiam a JUSTIFICATIVA e a `prazo_fundamentacao`,
+                # que vivem dentro do dict da classificacao e nao tem coluna
+                # propria. Efeito medido em producao: 80% da fila pendente sem
+                # `classifications` (2.794 de 3.506), e com isso o operador
+                # nunca via POR QUE a IA classificou assim e o grifo do trecho
+                # decisivo na Triagem nao tinha o que marcar — recurso que
+                # existia e nunca funcionou para a maioria.
+                #
+                # Os consumidores ja tratam a lista como "[0] e' a primaria,
+                # [1:] sao extras" (template matching, export, serializacao do
+                # grupo), entao lista de UM elemento e' o caso degenerado
+                # correto, nao um formato novo.
+                extra = classification.get("_extra_classifications") or []
+                rec.classifications = [
+                    {k: v for k, v in c.items() if k != "_extra_classifications"}
+                    for c in [classification] + list(extra)
+                ]
                 atualizar_prazo_estimado(self.db, rec)
                 rec.status = RECORD_STATUS_CLASSIFIED
                 succeeded += 1

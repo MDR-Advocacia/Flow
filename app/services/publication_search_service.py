@@ -1131,6 +1131,19 @@ class PublicationSearchService:
                             # Natureza do processo: só pra publicações sem pasta vinculada
                             if rec.linked_lawsuit_id is None:
                                 rec.natureza_processo = clean.natureza_processo
+                            # A classificacao INTEIRA, nao so' as colunas
+                            # planas. E' aqui que vivem a JUSTIFICATIVA e a
+                            # `prazo_fundamentacao`, que nao tem coluna
+                            # propria: sem gravar isto o operador nunca ve
+                            # POR QUE a IA classificou assim, e o grifo do
+                            # trecho decisivo na Triagem fica sem nada pra
+                            # marcar. Este caminho (classificacao online) nao
+                            # gravava a coluna em NENHUM caso ate 09/09/2026.
+                            # Formato igual ao do lote: [0] e' a primaria.
+                            rec.classifications = [{
+                                k: v for k, v in dict(result).items()
+                                if k != "_extra_classifications"
+                            }] + list(result.get("_extra_classifications") or [])
                             atualizar_prazo_estimado(self.db, rec)
                             rec.status = RECORD_STATUS_CLASSIFIED
                             logger.debug(
