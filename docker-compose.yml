@@ -56,18 +56,27 @@ services:
     # exatamente pra colher órfão. Zumbi não gasta CPU, mas consome slot de PID
     # e polui todo diagnóstico do servidor (foi lido como "112 Chromes vivos").
     init: true
-    # Teto de PROCESSOS do container. Operação normal usa ~30 PIDs (com
-    # runners Playwright ativos, ~60), então 300 nunca é tocado no dia a dia —
-    # ele existe pra vazamento: se um bug voltar a acumular processos (como os
-    # 122 chrome defunct de 12/08/2026, ou os ~1.979 PIDs que o onesid juntou
-    # no mesmo servidor), o crescimento PARA no teto e o erro aparece no log
-    # DESTE container ("fork failed"), em vez de esgotar a tabela de processos
-    # do host e derrubar o desempenho de todos os projetos.
+    # Teto de TASKS do container — e task, pro cgroup, é THREAD, não processo.
+    # O 300 original foi calibrado em processos ("operação normal ~30, com
+    # runners ~60") e por isso mentia: em 08/09/2026 o container tinha 31
+    # processos e 241 threads. Medido naquele dia, em threads:
+    #   API em repouso (6 python + init + Xvfb) ........ ~21
+    #   uma coleta do BB (Chromium do Playwright) ..... ~220
+    #   runner do Tratamento Web (node + ~6 chrome) ... ~150
+    #   login do cancel-legacy-task (1 chrome) ........ ~100
+    # Pior caso legítimo ≈ 490. 800 deixa folga pro dia a dia e ainda para um
+    # vazamento muito antes de o host sentir (pid_max do kernel é 4 milhões e
+    # o host inteiro usa ~2.700). O teto existe pra vazamento: se um bug voltar
+    # a acumular processos (os 122 chrome defunct de 12/08/2026, os ~1.979
+    # PIDs que o onesid juntou no mesmo servidor), o crescimento PARA aqui e o
+    # erro aparece no log DESTE container ("fork failed"), em vez de esgotar
+    # o host. Quem vigia a ocupação e mata RPA pendurado antes do teto é o
+    # app/services/rpa_pid_watchdog.py (alerta em 70%).
     #
     # De propósito NÃO há mem_limit: limite de memória apertado mataria um
     # Chromium da coleta ou um worker do uvicorn no meio do trabalho — decisão
     # do operador em 12/08/2026 (só PIDs por enquanto).
-    pids_limit: 300
+    pids_limit: 800
     # Chromium (Playwright) crasha com "Target closed" se /dev/shm for muito
     # pequeno. Padrão do Docker é 64MB — subimos pra 1GB.
     shm_size: "1gb"
@@ -123,7 +132,7 @@ services:
     # risco de vazamento de processo. init colhe órfão; pids_limit trava
     # qualquer acúmulo no teto sem afetar o host.
     init: true
-    pids_limit: 300
+    pids_limit: 800
     # Chromium precisa de /dev/shm grande pra não travar.
     shm_size: "1gb"
     environment:
