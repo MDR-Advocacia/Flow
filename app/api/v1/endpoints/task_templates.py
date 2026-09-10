@@ -51,6 +51,13 @@ class TaskTemplateBase(BaseModel):
     # Combinado com target_role: 'principal'=lider, 'assistente'=assistente
     # (round-robin) da squad de suporte.
     target_squad_id: Optional[int] = Field(default=None, ge=1)
+    # Exceção por etiqueta do processo (sqd005). Ex.: "NERC" — processo com
+    # essa etiqueta sai da regra deste template e fica com o responsável da
+    # pasta e com o assistente da squad marcada com a mesma etiqueta.
+    excecao_etiqueta: Optional[str] = Field(default=None, max_length=80)
+    # Quem da equipe da etiqueta recebe: 'principal' (advogado) ou
+    # 'assistente'. Vazio = segue o target_role.
+    excecao_papel: Optional[str] = Field(default=None, pattern="^(principal|assistente)$")
 
 
 class TaskTemplateCreate(TaskTemplateBase):
@@ -72,6 +79,8 @@ class TaskTemplateUpdate(BaseModel):
     is_active: Optional[bool] = None
     target_role: Optional[str] = Field(default=None, pattern="^(principal|assistente)$")
     target_squad_id: Optional[int] = Field(default=None, ge=1)
+    excecao_etiqueta: Optional[str] = Field(default=None, max_length=80)
+    excecao_papel: Optional[str] = Field(default=None, pattern="^(principal|assistente)$")
 
 
 class TaskTemplateResponse(TaskTemplateBase):
@@ -146,6 +155,8 @@ def _to_response(tmpl: TaskTemplate) -> dict:
         "target_role": getattr(tmpl, "target_role", None) or "principal",
         "target_squad_id": getattr(tmpl, "target_squad_id", None),
         "target_squad_name": _support_squad_name_lookup(tmpl),
+        "excecao_etiqueta": getattr(tmpl, "excecao_etiqueta", None),
+        "excecao_papel": getattr(tmpl, "excecao_papel", None),
         "taxonomy_version": getattr(tmpl, "taxonomy_version", None) or "v1",
         "legacy_label": getattr(tmpl, "legacy_label", None),
         "needs_taxonomy_review": bool(getattr(tmpl, "needs_taxonomy_review", False)),
@@ -725,6 +736,16 @@ def list_users(db: Session = Depends(get_db)):
         .all()
     )
     return [{"external_id": u.external_id, "name": u.name, "email": u.email} for u in users]
+
+
+@router.get("/meta/etiquetas")
+def list_etiquetas(db: Session = Depends(get_db)):
+    """Etiquetas do L1 em uso — alimenta a exceção por etiqueta do template e
+    a etiqueta atendida da squad (sqd005). Só nomes lidos recentemente: o
+    cache inteiro ainda guarda nome antigo (ver `etiquetas_em_uso`)."""
+    from app.services.excecao_etiqueta import etiquetas_em_uso
+
+    return etiquetas_em_uso(db)
 
 
 @router.get("/meta/categories")

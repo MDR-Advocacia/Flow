@@ -81,6 +81,18 @@ class TaskTemplate(Base):
     target_squad_id = Column(
         Integer, ForeignKey("squads.id"), nullable=True, index=True,
     )
+    # Exceção por ETIQUETA do processo (sqd005). Preenchida e o processo com
+    # essa etiqueta no L1: a squad de suporte e o responsável fixo deixam de
+    # valer — advogado vai pro responsável da pasta; assistente pro rodízio da
+    # squad marcada com a mesma etiqueta em que esse responsável está. Caso de
+    # origem: Equipe Mista (NERC), que acumula os dois polos. Ver
+    # app/services/excecao_etiqueta.py.
+    excecao_etiqueta = Column(String(80), nullable=True)
+    # Quem DA EQUIPE da etiqueta recebe: 'principal' (advogado = responsável
+    # da pasta) ou 'assistente' (rodízio da squad marcada). Separado do
+    # target_role de propósito: no BB Autor o grupo de advogados roda como
+    # 'assistente' numa squad de suporte. NULL = segue o target_role.
+    excecao_papel = Column(String(16), nullable=True)
     due_date_reference = Column(
         String, nullable=False, default="publication",
         doc='Referência para cálculo do prazo: "publication" (data da publicação) ou "today" (data atual)',

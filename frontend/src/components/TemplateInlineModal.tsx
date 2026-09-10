@@ -8,6 +8,8 @@
  *  - Atribuir ao assistente do responsavel (target_role).
  *  - Squad de suporte opcional (target_squad_id) — sobrepoe o
  *    responsavel padrao.
+ *  - Excecao por etiqueta opcional (excecao_etiqueta, sqd005) — processo
+ *    com a etiqueta sai da regra e fica com a squad marcada com ela.
  *
  * Usado pelo OfficeTemplateTree quando o operador clica:
  *  - "+ adicionar template" → mode="create" com cat/sub pre-preenchidos
@@ -82,6 +84,17 @@ const DUE_REFERENCE_OPTIONS = [
   { value: "today", label: "Data atual (quando criar a tarefa)" },
 ];
 
+/** Opções do seletor de exceção por etiqueta (sqd005). O valor já salvo
+ *  entra mesmo que a etiqueta tenha saído do cache, pra edição não abrir
+ *  em branco nem apagar a exceção sem ninguém perceber. */
+const etiquetasDoSelect = (lista: string[], atual: string | null | undefined): string[] =>
+  atual && !lista.includes(atual) ? [atual, ...lista] : lista;
+
+/** Papel na equipe da etiqueta: o escolhido no template ou, se vazio, o
+ *  próprio papel do template — mesma regra do backend. */
+const papelNaExcecao = (b: { excecao_papel?: string; target_role_assistant?: boolean }): string =>
+  b.excecao_papel || (b.target_role_assistant ? "assistente" : "principal");
+
 const BLANK_BLOCK = {
   id: undefined as number | undefined,
   task_subtype_external_id: null as number | null,
@@ -94,6 +107,8 @@ const BLANK_BLOCK = {
   notes_template: "",
   target_role_assistant: false,
   target_squad_id: "" as string,
+  excecao_etiqueta: "" as string, // "" = sem exceção; ex.: "NERC" (sqd005)
+  excecao_papel: "" as string, // "principal" | "assistente"; "" = papel do template
 };
 
 type TaskBlock = typeof BLANK_BLOCK;
@@ -129,6 +144,7 @@ export function TemplateInlineModal({
   const [taskTypes, setTaskTypes] = useState<SubtypePickerTaskType[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [supportSquads, setSupportSquads] = useState<SupportSquadOption[]>([]);
+  const [etiquetas, setEtiquetas] = useState<string[]>([]);
   const [loadingMeta, setLoadingMeta] = useState(false);
   const [loadingTemplate, setLoadingTemplate] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -150,14 +166,16 @@ export function TemplateInlineModal({
       apiFetch("/api/v1/task-templates/meta/task-types"),
       apiFetch("/api/v1/task-templates/meta/users"),
       apiFetch("/api/v1/squads?kind=support"),
+      apiFetch("/api/v1/task-templates/meta/etiquetas"),
     ])
-      .then(async ([rTypes, rUsers, rSquads]) => {
+      .then(async ([rTypes, rUsers, rSquads, rEtiquetas]) => {
         if (!rTypes.ok || !rUsers.ok)
           throw new Error("Falha carregando catálogos");
-        const [types, us, sqs] = await Promise.all([
+        const [types, us, sqs, ets] = await Promise.all([
           rTypes.json(),
           rUsers.json(),
           rSquads.ok ? rSquads.json() : Promise.resolve([]),
+          rEtiquetas.ok ? rEtiquetas.json() : Promise.resolve([]),
         ]);
         if (cancelled) return;
         setTaskTypes(types ?? []);
@@ -169,6 +187,7 @@ export function TemplateInlineModal({
             office_external_id: s.office_external_id ?? null,
           })),
         );
+        setEtiquetas(Array.isArray(ets) ? ets : []);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -207,6 +226,8 @@ export function TemplateInlineModal({
             notes_template: t.notes_template ?? "",
             target_role_assistant: t.target_role === "assistente",
             target_squad_id: t.target_squad_id ? String(t.target_squad_id) : "",
+            excecao_etiqueta: t.excecao_etiqueta ?? "",
+            excecao_papel: t.excecao_papel ?? "",
           },
         ]);
       })
@@ -304,6 +325,8 @@ export function TemplateInlineModal({
         target_squad_id: block.target_squad_id
           ? parseInt(block.target_squad_id)
           : null,
+        excecao_etiqueta: block.excecao_etiqueta || null,
+        excecao_papel: block.excecao_etiqueta ? papelNaExcecao(block) : null,
       });
 
       let createdCount = 0;
@@ -562,6 +585,57 @@ export function TemplateInlineModal({
                           ))}
                         </SelectContent>
                       </Select>
+                    </div>
+
+                    {/* Exceção por etiqueta (sqd005): processo com essa etiqueta sai da
+                        regra acima e fica com a equipe marcada com a mesma etiqueta. */}
+                    <div className="grid gap-1.5 pt-1">
+                      <Label className="text-xs">
+                        Exceção por etiqueta{" "}
+                        <span className="text-muted-foreground font-normal">(opcional)</span>
+                      </Label>
+                      <Select
+                        value={block.excecao_etiqueta || "_none"}
+                        onValueChange={(v) =>
+                          setBlockField(idx, "excecao_etiqueta", v === "_none" ? "" : v)
+                        }
+                      >
+                        <SelectTrigger className="h-8 text-sm">
+                          <SelectValue placeholder="Sem exceção" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="_none">Sem exceção (segue a regra acima)</SelectItem>
+                          {etiquetasDoSelect(etiquetas, block.excecao_etiqueta).map((e) => (
+                            <SelectItem key={e} value={e}>
+                              {e}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {block.excecao_etiqueta && (
+                        <div className="grid gap-1.5 rounded-md border border-sky-200 bg-sky-50/60 p-2">
+                          <Label className="text-xs">
+                            Na equipe {block.excecao_etiqueta}, esta tarefa vai para
+                          </Label>
+                          <Select
+                            value={papelNaExcecao(block)}
+                            onValueChange={(v) => setBlockField(idx, "excecao_papel", v)}
+                          >
+                            <SelectTrigger className="h-8 bg-background text-sm">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="principal">Advogado — o responsável da pasta</SelectItem>
+                              <SelectItem value="assistente">Assistente — rodízio da squad da etiqueta</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <p className="text-[11px] leading-snug text-muted-foreground">
+                            Squad de suporte e responsável fixo acima não valem para processo{" "}
+                            {block.excecao_etiqueta}. Escolha pelo tipo de trabalho: tarefa do grupo
+                            de advogados é "Advogado", mesmo que a squad use o rodízio de assistentes.
+                          </p>
+                        </div>
+                      )}
                     </div>
                   </div>
 

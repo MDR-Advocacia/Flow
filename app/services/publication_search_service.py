@@ -4354,6 +4354,11 @@ class PublicationSearchService:
         Em erro do resolver (ex.: squad sem assistente cadastrado),
         levanta ValueError pra que o caller aborte com mensagem humana
         antes de qualquer task ir pro L1.
+
+        Excecao por etiqueta (sqd005): se o template tem `excecao_etiqueta`
+        e o processo tem essa etiqueta, a regra do template da' lugar a
+        `aplicar_excecao_etiqueta` — inclusive no cenario 1 (responsavel
+        fixo). A trava e o override do operador continuam vindo antes.
         """
         if not proposals:
             return
@@ -4375,6 +4380,7 @@ class PublicationSearchService:
                 if contact.get("id") is not None:
                     original_responsible_by_subtype[int(sub)] = int(contact["id"])
 
+        from app.services.excecao_etiqueta import aplicar_excecao_etiqueta
         from app.services.squad_assistant_resolver import resolve_target
 
         for payload_idx, payload in enumerate(payloads):
@@ -4402,20 +4408,19 @@ class PublicationSearchService:
             target_role = (prop.get("target_role") or "principal")
             target_squad_id = prop.get("target_squad_id")
 
-            # Cenario 1 (principal sem support squad) → nada a fazer.
-            if target_role == "principal" and not target_squad_id:
-                continue
-
             parts = payload.get("participants") or []
-            if not parts or not isinstance(parts[0], dict):
-                continue
-            contact = parts[0].get("contact") or {}
+            contact = (
+                (parts[0].get("contact") or {})
+                if parts and isinstance(parts[0], dict) else {}
+            )
             current_id = contact.get("id")
             original_id = original_responsible_by_subtype.get(int(sub))
 
             # Override manual — operador trocou no modal OU frontend ja'
             # resolveu via /claim. Nao queremos substituir nem rodar o
-            # round-robin de novo (cliente que avancou ja avancou).
+            # round-robin de novo (cliente que avancou ja avancou). Vem antes
+            # de QUALQUER regra, inclusive da excecao por etiqueta: a escolha
+            # do operador sempre vence.
             if (
                 current_id is not None
                 and original_id is not None
@@ -4432,24 +4437,46 @@ class PublicationSearchService:
                 payload.get("responsibleOfficeId")
                 or payload.get("originOfficeId")
             )
-            try:
-                result = resolve_target(
-                    self.db,
-                    target_role=target_role,
-                    responsible_user_external_id=int(original_id) if original_id else 0,
-                    target_squad_id=int(target_squad_id) if target_squad_id else None,
-                    office_external_id=int(office_external_id) if office_external_id else None,
-                    task_subtype_external_id=int(sub),
-                    commit=True,
-                )
-            except ValueError as exc:
-                # Squad sem assistente / squad invalida — relevanta pra
-                # caller (schedule_group) abortar com mensagem humana
-                # antes de criar qualquer task no L1.
-                raise ValueError(
-                    f"Squad routing falhou (subType={sub}, "
-                    f"target_role={target_role!r}): {exc}"
-                ) from exc
+
+            # Excecao por ETIQUETA do processo (sqd005). Roda antes da regra
+            # comum e vale tambem no cenario 1: responsavel fixo no template
+            # nao segura processo etiquetado. O ValueError dela ja' vem com
+            # mensagem pro operador e aborta o grupo antes de qualquer tarefa
+            # ir pro L1 — como o erro de squad logo abaixo.
+            excecao = aplicar_excecao_etiqueta(
+                self.db,
+                template_id=prop.get("template_id"),
+                lawsuit_id=lawsuit_id,
+                target_role=target_role,
+                commit=True,
+            )
+            motivo_regra = None
+            if excecao is not None:
+                result, motivo_regra = excecao
+            else:
+                # Cenario 1 (principal sem support squad) → nada a fazer.
+                if target_role == "principal" and not target_squad_id:
+                    continue
+                if not parts or not isinstance(parts[0], dict):
+                    continue
+                try:
+                    result = resolve_target(
+                        self.db,
+                        target_role=target_role,
+                        responsible_user_external_id=int(original_id) if original_id else 0,
+                        target_squad_id=int(target_squad_id) if target_squad_id else None,
+                        office_external_id=int(office_external_id) if office_external_id else None,
+                        task_subtype_external_id=int(sub),
+                        commit=True,
+                    )
+                except ValueError as exc:
+                    # Squad sem assistente / squad invalida — relevanta pra
+                    # caller (schedule_group) abortar com mensagem humana
+                    # antes de criar qualquer task no L1.
+                    raise ValueError(
+                        f"Squad routing falhou (subType={sub}, "
+                        f"target_role={target_role!r}): {exc}"
+                    ) from exc
 
             payload["participants"] = [{
                 "contact": {"id": int(result.user_external_id)},
@@ -4461,7 +4488,7 @@ class PublicationSearchService:
                 routing_notes[payload_idx] = {
                     "antes": int(current_id) if current_id is not None else None,
                     "depois": int(result.user_external_id),
-                    "motivo": (
+                    "motivo": motivo_regra or (
                         "Roteado pela regra do template (target_role="
                         + repr(target_role)
                         + (f", squad de suporte #{target_squad_id}" if target_squad_id else "")
@@ -4471,10 +4498,11 @@ class PublicationSearchService:
             logger.info(
                 "publications.routing lawsuit=%s subType=%s "
                 "template_target_role=%s target_squad_id=%s "
-                "original=%s final=%s squad=%s fallback=%s",
+                "original=%s final=%s squad=%s fallback=%s excecao_etiqueta=%s",
                 lawsuit_id, sub, target_role, target_squad_id,
                 original_id, result.user_external_id,
                 result.squad_name, result.fallback_reason,
+                motivo_regra is not None,
             )
 
     def _append_publication_notes(self, payload, pub_text):

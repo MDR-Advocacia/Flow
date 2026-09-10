@@ -15,7 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import UserSelector from "@/components/ui/UserSelector";
 import { apiFetch } from "@/lib/api-client";
-import { Trash2, Crown, Star } from "lucide-react";
+import { Trash2, Crown, Star, Tag } from "lucide-react";
 import { Squad } from "@/components/admin/types";
 
 // --- Componente: Gerenciamento de Squads (membros + leader/assistente) ---
@@ -40,6 +40,7 @@ interface SquadDetail {
   name: string;
   is_active: boolean;
   kind?: string; // 'principal' | 'support'
+  etiqueta?: string | null; // etiqueta do L1 que a squad atende (sqd005)
   office_external_id: number | null;
   office: OfficeRef | null;
   members: SquadMemberDetail[];
@@ -63,6 +64,10 @@ const SquadsManager = () => {
   // Renomear squad inline (CRUD completo: criar/renomear/excluir).
   const [renamingSquad, setRenamingSquad] = useState<number | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  // Etiqueta atendida (sqd005) — ver app/services/excecao_etiqueta.py.
+  const [editandoEtiqueta, setEditandoEtiqueta] = useState<number | null>(null);
+  const [etiquetaValor, setEtiquetaValor] = useState("");
+  const [etiquetasL1, setEtiquetasL1] = useState<string[]>([]);
 
   const usersForPicker = allUsers
     .filter((u) => u.is_active)
@@ -97,6 +102,16 @@ const SquadsManager = () => {
       }
     } catch (err: any) {
       console.error("SquadsManager: erro em users", err);
+    }
+    try {
+      // Vocabulário de etiquetas: falhar aqui só deixa o seletor vazio.
+      const etRes = await apiFetch("/api/v1/task-templates/meta/etiquetas");
+      if (etRes.ok) {
+        const lista = await etRes.json();
+        setEtiquetasL1(Array.isArray(lista) ? lista : []);
+      }
+    } catch (err: any) {
+      console.warn("SquadsManager: etiquetas indisponíveis", err);
     }
     setLoading(false);
   };
@@ -164,6 +179,34 @@ const SquadsManager = () => {
       if (selectedOffice) await fetchSquads(selectedOffice);
     } catch (err: any) {
       toast({ title: "Erro ao renomear", description: err.message, variant: "destructive" });
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  // Etiqueta do L1 que a squad atende (sqd005). PUT parcial: só o campo; null limpa.
+  const salvarEtiqueta = async (squadId: number, valor: string | null) => {
+    setSaving(squadId);
+    try {
+      const res = await apiFetch(`/api/v1/squads/${squadId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ etiqueta: valor }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+      toast({
+        title: valor ? "Etiqueta definida" : "Etiqueta removida",
+        description: valor
+          ? `Templates com exceção ${valor} passam a usar esta squad.`
+          : undefined,
+      });
+      setEditandoEtiqueta(null);
+      if (selectedOffice) await fetchSquads(selectedOffice);
+    } catch (err: any) {
+      toast({ title: "Erro ao salvar etiqueta", description: err.message, variant: "destructive" });
     } finally {
       setSaving(null);
     }
@@ -270,7 +313,8 @@ const SquadsManager = () => {
         <CardDescription>
           Filtre por escritório responsável e gerencie quem é líder e assistente de cada
           squad. O assistente recebe automaticamente as tarefas marcadas como "tarefa do
-          assistente" no template.
+          assistente" no template. Squads marcadas com uma etiqueta do L1 (ex.: NERC)
+          atendem a exceção por etiqueta dos templates.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -364,6 +408,15 @@ const SquadsManager = () => {
                           {squad.kind === "support" && (
                             <Badge variant="secondary" className="bg-purple-100 text-purple-700 border-purple-200">Suporte</Badge>
                           )}
+                          {squad.etiqueta && (
+                            <Badge
+                              variant="outline"
+                              className="gap-1 border-sky-300 bg-sky-50 text-sky-800"
+                              title="Atende os processos com esta etiqueta quando o template tem exceção por etiqueta"
+                            >
+                              <Tag className="h-3 w-3" /> {squad.etiqueta}
+                            </Badge>
+                          )}
                           <Badge variant="secondary">{squad.members.length} {squad.members.length === 1 ? "membro" : "membros"}</Badge>
                           {leader && (
                             <Badge variant="default" className="gap-1">
@@ -378,6 +431,20 @@ const SquadsManager = () => {
                         </div>
                       </AccordionTrigger>
                       <div className="flex shrink-0 items-center gap-0.5 pl-2">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          onClick={() => {
+                            setEditandoEtiqueta(editandoEtiqueta === squad.id ? null : squad.id);
+                            setEtiquetaValor(squad.etiqueta || "");
+                          }}
+                          disabled={saving === squad.id}
+                          aria-label="Etiqueta atendida"
+                          title="Etiqueta atendida (exceção por etiqueta nos templates)"
+                        >
+                          <Tag className="h-4 w-4" />
+                        </Button>
                         <Button
                           variant="ghost"
                           size="icon"
@@ -404,6 +471,44 @@ const SquadsManager = () => {
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
+                    </div>
+                  )}
+                  {editandoEtiqueta === squad.id && (
+                    <div className="mb-3 flex flex-wrap items-end gap-2 rounded-md border border-sky-200 bg-sky-50/60 p-3">
+                      <div className="grid gap-1">
+                        <Label className="text-xs">Etiqueta do L1 que esta squad atende</Label>
+                        <Select
+                          value={etiquetaValor || "_none"}
+                          onValueChange={(v) => setEtiquetaValor(v === "_none" ? "" : v)}
+                        >
+                          <SelectTrigger className="h-8 w-56 text-sm"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="_none">Nenhuma</SelectItem>
+                            {(etiquetaValor && !etiquetasL1.includes(etiquetaValor)
+                              ? [etiquetaValor, ...etiquetasL1]
+                              : etiquetasL1
+                            ).map((e) => (
+                              <SelectItem key={e} value={e}>{e}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <Button
+                        size="sm"
+                        onClick={() => salvarEtiqueta(squad.id, etiquetaValor || null)}
+                        disabled={saving === squad.id || (etiquetaValor || null) === (squad.etiqueta || null)}
+                      >
+                        Salvar
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => setEditandoEtiqueta(null)}>
+                        Cancelar
+                      </Button>
+                      <p className="basis-full text-[11px] leading-snug text-muted-foreground">
+                        Quando um template tem exceção por essa etiqueta, a tarefa de assistente
+                        do processo etiquetado vai para o rodízio desta squad, desde que o
+                        responsável da pasta seja membro dela. A de advogado vai para o
+                        próprio responsável da pasta.
+                      </p>
                     </div>
                   )}
                   <AccordionContent>

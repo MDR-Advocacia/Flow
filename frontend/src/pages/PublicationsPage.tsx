@@ -1968,15 +1968,25 @@ const PublicationsPage = ({ secao = "todas" }: { secao?: PublicationsPageSecao }
     // Falha individual (squad sem assistente, rede off, etc.) mantem o
     // lider original e exibe um toast — operador escolhe se troca manual
     // ou se cancela e arruma a config da squad.
+    // Motivos de regra especial (ex.: exceção por etiqueta) — um aviso só.
+    const motivosRegraEspecial = new Set<string>();
     const resolvedTasks = await Promise.all(tasks.map(async (t) => {
       const tr = (t as any).target_role || "principal";
       const tsq = (t as any).target_squad_id || null;
-      if (tr !== "assistente" && !tsq) return t;
+      const regraComum = tr === "assistente" || !!tsq;
+      // Exceção por etiqueta (sqd005): só o servidor sabe se o template tem
+      // exceção, mas ela só pode valer em processo COM etiqueta. Sem etiqueta
+      // nada muda aqui e nenhuma chamada a mais é feita.
+      const tplId = (t as any).template_id || null;
+      const podeTerExcecao = !!(
+        tplId && group.lawsuit_id && (group.l1_etiquetas || []).length > 0
+      );
+      if (!regraComum && !podeTerExcecao) return t;
 
       const responsibleId = (t.participants || []).find(
         (p: any) => p?.isResponsible && p?.contact?.id,
       )?.contact?.id;
-      if (!responsibleId) return t;
+      if (!responsibleId && !podeTerExcecao) return t;
 
       const officeId =
         (t as any).responsibleOfficeId || (t as any).originOfficeId || null;
@@ -1987,15 +1997,23 @@ const PublicationsPage = ({ secao = "todas" }: { secao?: PublicationsPageSecao }
           body: JSON.stringify({
             target_role: tr,
             target_squad_id: tsq,
-            responsible_user_external_id: responsibleId,
+            responsible_user_external_id: responsibleId || null,
             office_external_id: officeId,
             task_subtype_external_id: t.subTypeId || null,
+            lawsuit_id: podeTerExcecao ? group.lawsuit_id : null,
+            template_id: podeTerExcecao ? tplId : null,
           }),
         });
         if (!res.ok) {
+          // Chamada feita só por causa da exceção (a regra comum nem chamaria):
+          // 422 = template sem exceção e tarefa sem responsável, segue como
+          // estava e sem alarme. 404 é a própria exceção pedindo decisão.
+          if (!regraComum && res.status !== 404) return t;
           const body = await res.json().catch(() => ({}));
           toast({
-            title: "Falha ao resolver assistente da squad",
+            title: regraComum
+              ? "Falha ao resolver assistente da squad"
+              : "Exceção por etiqueta: escolha o responsável",
             description:
               body.detail ||
               `HTTP ${res.status} — exibindo o líder do template; troque manualmente se necessário.`,
@@ -2006,7 +2024,9 @@ const PublicationsPage = ({ secao = "todas" }: { secao?: PublicationsPageSecao }
         const data = (await res.json()) as {
           user_external_id: number;
           fallback_reason: string | null;
+          motivo?: string | null;
         };
+        if (data.motivo) motivosRegraEspecial.add(data.motivo);
         if (data.fallback_reason === "user_not_in_any_squad") {
           toast({
             title: "Líder fora de squad principal",
@@ -2036,6 +2056,13 @@ const PublicationsPage = ({ secao = "todas" }: { secao?: PublicationsPageSecao }
         return t;
       }
     }));
+
+    if (motivosRegraEspecial.size > 0) {
+      toast({
+        title: "Regra de etiqueta aplicada",
+        description: Array.from(motivosRegraEspecial).join(" "),
+      });
+    }
 
     // ── Recalcula a data dos templates com referencia "data atual" ──────
     // A data da proposta e' congelada quando o template e' aplicado; pra
@@ -2276,6 +2303,8 @@ const PublicationsPage = ({ secao = "todas" }: { secao?: PublicationsPageSecao }
           responsible_user_external_id: responsibleId || null,
           office_external_id: officeId || null,
           task_subtype_external_id: t.subTypeId || null,
+          lawsuit_id: scheduleGroup?.lawsuit_id || null,
+          template_id: (t as any).template_id || null,
         };
         const res = await apiFetch("/api/v1/squads/resolve-target/claim", {
           method: "POST",

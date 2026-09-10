@@ -212,6 +212,57 @@ class ResolveTargetRequest(BaseModel):
     target_squad_id: Optional[int] = None
     office_external_id: Optional[int] = None
     task_subtype_external_id: Optional[int] = None
+    # Excecao por etiqueta (sqd005): com o processo e o template, a regra do
+    # template e' aplicada antes do rodizio. A tela classica resolve por aqui
+    # antes de enviar a tarefa; sem estes campos a excecao so' valeria na
+    # Triagem, que resolve no servidor. Opcionais: chamada antiga segue igual.
+    lawsuit_id: Optional[int] = None
+    template_id: Optional[int] = None
+
+
+def _resolver_destino(
+    db: Session, body: "ResolveTargetRequest", *, commit: bool,
+) -> schemas.AssistantResolution:
+    """Preview e claim resolvem pelo MESMO caminho, com a excecao por etiqueta
+    (sqd005) antes da regra comum. A unica diferenca entre os dois e' o
+    `commit`, que avanca (claim) ou nao (preview) o rodizio."""
+    from app.services.excecao_etiqueta import aplicar_excecao_etiqueta
+    from app.services.squad_assistant_resolver import resolve_target
+
+    excecao = aplicar_excecao_etiqueta(
+        db,
+        template_id=body.template_id,
+        lawsuit_id=body.lawsuit_id,
+        target_role=body.target_role,
+        commit=commit,
+    )
+    if excecao is not None:
+        result, motivo = excecao
+    else:
+        if body.target_role == "principal" and body.target_squad_id is None:
+            # Sem squad de suporte e papel=principal: precisa do responsible_user_external_id
+            if not body.responsible_user_external_id:
+                raise HTTPException(
+                    status_code=422,
+                    detail="responsible_user_external_id obrigatorio quando target_squad_id nao informado.",
+                )
+        result = resolve_target(
+            db,
+            target_role=body.target_role,
+            responsible_user_external_id=body.responsible_user_external_id or 0,
+            target_squad_id=body.target_squad_id,
+            office_external_id=body.office_external_id,
+            task_subtype_external_id=body.task_subtype_external_id,
+            commit=commit,
+        )
+        motivo = None
+    return schemas.AssistantResolution(
+        user_external_id=result.user_external_id,
+        squad_id=result.squad_id,
+        squad_name=result.squad_name,
+        fallback_reason=result.fallback_reason,
+        motivo=motivo,
+    )
 
 
 @router.post(
@@ -223,32 +274,10 @@ def resolve_target_preview(
     body: ResolveTargetRequest,
     db: Session = Depends(get_db),
 ):
-    from app.services.squad_assistant_resolver import resolve_target
-    if body.target_role == "principal" and body.target_squad_id is None:
-        # Sem squad de suporte e papel=principal: precisa do responsible_user_external_id
-        if not body.responsible_user_external_id:
-            raise HTTPException(
-                status_code=422,
-                detail="responsible_user_external_id obrigatorio quando target_squad_id nao informado.",
-            )
     try:
-        result = resolve_target(
-            db,
-            target_role=body.target_role,
-            responsible_user_external_id=body.responsible_user_external_id or 0,
-            target_squad_id=body.target_squad_id,
-            office_external_id=body.office_external_id,
-            task_subtype_external_id=body.task_subtype_external_id,
-            commit=False,
-        )
+        return _resolver_destino(db, body, commit=False)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return schemas.AssistantResolution(
-        user_external_id=result.user_external_id,
-        squad_id=result.squad_id,
-        squad_name=result.squad_name,
-        fallback_reason=result.fallback_reason,
-    )
 
 
 @router.post(
@@ -260,33 +289,13 @@ def resolve_target_claim(
     body: ResolveTargetRequest,
     db: Session = Depends(get_db),
 ):
-    from app.services.squad_assistant_resolver import resolve_target
-    if body.target_role == "principal" and body.target_squad_id is None:
-        if not body.responsible_user_external_id:
-            raise HTTPException(
-                status_code=422,
-                detail="responsible_user_external_id obrigatorio quando target_squad_id nao informado.",
-            )
     try:
-        result = resolve_target(
-            db,
-            target_role=body.target_role,
-            responsible_user_external_id=body.responsible_user_external_id or 0,
-            target_squad_id=body.target_squad_id,
-            office_external_id=body.office_external_id,
-            task_subtype_external_id=body.task_subtype_external_id,
-            commit=True,
-        )
+        resposta = _resolver_destino(db, body, commit=True)
         db.commit()
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return schemas.AssistantResolution(
-        user_external_id=result.user_external_id,
-        squad_id=result.squad_id,
-        squad_name=result.squad_name,
-        fallback_reason=result.fallback_reason,
-    )
+    return resposta
 
 
 @router.post(

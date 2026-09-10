@@ -77,6 +77,13 @@ class Squad(Base):
         nullable=True,
         index=True,
     )
+    # Etiqueta do L1 que esta squad ATENDE (ex.: "NERC" na Equipe Mista).
+    # Quando o template ativa a exceção por etiqueta e o processo tem essa
+    # etiqueta, a tarefa de assistente vai pro rodízio da squad marcada em
+    # que o responsável da pasta está. Nome, não id: o id da NERC já mudou
+    # no L1 (7 -> 83, 04/09/2026) e o nome ficou. Migration sqd005.
+    etiqueta = Column(String(80), nullable=True)
+
     office = relationship('LegalOneOffice', foreign_keys=[office_external_id])
 
     members = relationship('SquadMember', back_populates='squad', cascade="all, delete-orphan")

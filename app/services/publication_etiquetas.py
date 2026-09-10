@@ -41,6 +41,23 @@ _TTL_HORAS = 20            # revalida 1x/dia útil (etiqueta muda raramente)
 _MAX_POR_RODADA = 400      # teto por tick do job (30 min) — cobre o pico do dia
 _JANELA_PUBS_DIAS = 3      # só lawsuits com publicação recente interessam
 
+# Página de edição por TIPO de pasta. Processo (Lawsuit) responde na primeira;
+# recurso e incidente (Litigation) dão 404 nela e têm rota própria. Sem isso
+# eles NUNCA entravam no cache: em 10/09/2026 os mesmos 17 falhavam em todo
+# tick desde a captura de 08/09 (sondados: 2 incidentes e 1 recurso) e
+# ficavam sem chip, sem filtro e sem a exceção por etiqueta dos templates.
+_ROTAS_EDICAO = (
+    "/processos/processos/edit/{id}",
+    "/processos/recursos/edit/{id}",
+    "/processos/incidentes/edit/{id}",
+)
+# Pasta que falhou só é tentada de novo depois disso. A fila pendente nunca
+# lida é candidata em todo tick, e sem espera uma pasta excluída seria
+# reconsultada a cada 30 min enquanto a publicação esperasse. Em memória de
+# propósito: reinício ou troca de líder só antecipam a próxima tentativa.
+_ESPERA_APOS_FALHA_S = 6 * 3600
+_falhas_recentes: dict[int, float] = {}
+
 
 def _parse_etiquetas(html_page: str) -> list[dict] | None:
     """Extrai as etiquetas do HTML da página de edição. None = página sem o
@@ -69,27 +86,78 @@ def _parse_etiquetas(html_page: str) -> list[dict] | None:
     return out
 
 
+def _adiada(lid: int, agora: float) -> bool:
+    """True se a pasta falhou há menos de `_ESPERA_APOS_FALHA_S`."""
+    quando = _falhas_recentes.get(lid)
+    return quando is not None and agora - quando < _ESPERA_APOS_FALHA_S
+
+
+def _get_pagina_edicao(base: str, lid: int, cookies, svc):
+    """GET da página de edição tentando as rotas por tipo de pasta.
+
+    Só passa para a rota seguinte em 404 (rota de outro tipo de pasta).
+    Sessão caída (401/403/redirect pra login) → relogin único e repete a MESMA
+    rota. Devolve (resposta, cookies) — os cookies podem ter sido renovados."""
+    resp = None
+    relogou = False
+    for n, rota in enumerate(_ROTAS_EDICAO):
+        if n:
+            time.sleep(_THROTTLE_S)
+        url = f"{base}{rota.format(id=lid)}"
+        resp = requests.get(url, cookies=cookies, timeout=45, allow_redirects=True)
+        if not relogou and (
+            resp.status_code in (401, 403) or "/login" in (resp.url or "").lower()
+        ):
+            svc._invalidate_session()
+            cookies = svc._ensure_session()
+            relogou = True
+            resp = requests.get(url, cookies=cookies, timeout=45, allow_redirects=True)
+        if resp.status_code != 404:
+            break
+    return resp, cookies
+
+
 def enrich_etiquetas_recentes(db: Session) -> dict:
     """Busca no L1 as etiquetas dos lawsuits com publicação recente que estão
-    fora do cache (ou vencidos). Devolve resumo {candidatos, buscados, com_etiqueta,
-    falhas}. Não levanta exceção — job periódico é best-effort."""
+    fora do cache (ou vencidos), mais a fila pendente cuja pasta nunca foi lida.
+    Devolve resumo {candidatos, buscados, com_etiqueta, falhas, adiados}. Não
+    levanta exceção — job periódico é best-effort."""
+    from app.models.publication_search import RECORD_STATUS_CLASSIFIED, RECORD_STATUS_NEW
+
     limite_ttl = datetime.now(timezone.utc) - timedelta(hours=_TTL_HORAS)
+    # Duas portas de entrada: (1) publicação recente com cache ausente ou
+    # vencido — o de sempre; (2) publicação ainda PENDENTE cuja pasta nunca foi
+    # lida, de qualquer idade. Sem a (2), pasta que falhou dentro da janela de
+    # 3 dias saía dela sem etiqueta enquanto a publicação esperava tratamento.
+    # Mais recentes primeiro: o teto por tick não pode ir para fila velha.
     rows = db.execute(
         text(
             f"""
-            SELECT DISTINCT pr.linked_lawsuit_id
+            SELECT pr.linked_lawsuit_id
               FROM publicacao_registros pr
               LEFT JOIN pub_l1_etiqueta_cache ec ON ec.lawsuit_id = pr.linked_lawsuit_id
              WHERE pr.linked_lawsuit_id IS NOT NULL
-               AND pr.created_at >= now() - interval '{_JANELA_PUBS_DIAS} days'
-               AND (ec.lawsuit_id IS NULL OR ec.fetched_at < :limite)
+               AND (
+                     (pr.created_at >= now() - interval '{_JANELA_PUBS_DIAS} days'
+                      AND (ec.lawsuit_id IS NULL OR ec.fetched_at < :limite))
+                  OR (pr.status IN (:st_novo, :st_classificado) AND ec.lawsuit_id IS NULL)
+                   )
+             GROUP BY pr.linked_lawsuit_id
+             ORDER BY max(pr.created_at) DESC
              LIMIT :max_n
             """
         ),
-        {"limite": limite_ttl, "max_n": _MAX_POR_RODADA},
+        {
+            "limite": limite_ttl,
+            "max_n": _MAX_POR_RODADA,
+            "st_novo": RECORD_STATUS_NEW,
+            "st_classificado": RECORD_STATUS_CLASSIFIED,
+        },
     ).fetchall()
     ids = [int(r[0]) for r in rows]
-    resumo = {"candidatos": len(ids), "buscados": 0, "com_etiqueta": 0, "falhas": 0}
+    resumo = {
+        "candidatos": len(ids), "buscados": 0, "com_etiqueta": 0, "falhas": 0, "adiados": 0,
+    }
     if not ids:
         return resumo
 
@@ -103,24 +171,19 @@ def enrich_etiquetas_recentes(db: Session) -> dict:
     cookies = svc._ensure_session()
     base = svc._web_base_url()
 
+    agora = time.monotonic()
     for i, lid in enumerate(ids):
+        if _adiada(lid, agora):
+            resumo["adiados"] += 1
+            continue
         try:
-            resp = requests.get(
-                f"{base}/processos/processos/edit/{lid}",
-                cookies=cookies, timeout=45, allow_redirects=True,
-            )
-            # Sessão caiu no meio (redirect pra login) → relogin único e retry.
-            if resp.status_code in (401, 403) or "/login" in (resp.url or "").lower():
-                svc._invalidate_session()
-                cookies = svc._ensure_session()
-                resp = requests.get(
-                    f"{base}/processos/processos/edit/{lid}",
-                    cookies=cookies, timeout=45, allow_redirects=True,
-                )
+            resp, cookies = _get_pagina_edicao(base, lid, cookies, svc)
             etiquetas = _parse_etiquetas(resp.text) if resp.status_code == 200 else None
             if etiquetas is None:
                 resumo["falhas"] += 1
+                _falhas_recentes[lid] = time.monotonic()
             else:
+                _falhas_recentes.pop(lid, None)
                 db.execute(
                     text(
                         """
@@ -138,14 +201,16 @@ def enrich_etiquetas_recentes(db: Session) -> dict:
                     resumo["com_etiqueta"] += 1
         except Exception:  # noqa: BLE001
             resumo["falhas"] += 1
+            _falhas_recentes[lid] = time.monotonic()
             logger.exception("Falha ao buscar etiquetas do lawsuit %s", lid)
             db.rollback()
         if i < len(ids) - 1:
             time.sleep(_THROTTLE_S)
 
     logger.info(
-        "Etiquetas L1: %d candidatos, %d buscados, %d com etiqueta, %d falhas.",
+        "Etiquetas L1: %d candidatos, %d buscados, %d com etiqueta, %d falhas, %d adiados.",
         resumo["candidatos"], resumo["buscados"], resumo["com_etiqueta"], resumo["falhas"],
+        resumo["adiados"],
     )
     return resumo
 

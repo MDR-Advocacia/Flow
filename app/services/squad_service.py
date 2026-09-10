@@ -60,6 +60,7 @@ class SquadService:
             name=squad_data.name,
             office_external_id=squad_data.office_external_id,
             kind=getattr(squad_data, "kind", None) or "principal",
+            etiqueta=(getattr(squad_data, "etiqueta", None) or "").strip() or None,
             is_active=True,
         )
         self.db.add(new_squad)
@@ -111,6 +112,11 @@ class SquadService:
         # Atualiza o kind (principal | support)
         if getattr(squad_data, "kind", None):
             squad.kind = squad_data.kind
+
+        # Etiqueta atendida (sqd005). Pode ser LIMPA, então decide por "veio
+        # no corpo", e não por "não é None".
+        if "etiqueta" in getattr(squad_data, "model_fields_set", set()):
+            squad.etiqueta = (squad_data.etiqueta or "").strip() or None
 
         # Atualiza os membros (se a lista for fornecida)
         if squad_data.members is not None:

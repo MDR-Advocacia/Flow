@@ -188,6 +188,8 @@ interface TaskTemplate {
   target_role?: string; // 'principal' | 'assistente'
   target_squad_id?: number | null;
   target_squad_name?: string | null;
+  excecao_etiqueta?: string | null; // exceção por etiqueta do processo (sqd005)
+  excecao_papel?: string | null; // 'principal' | 'assistente' na equipe da etiqueta
 }
 
 interface SupportSquadOption {
@@ -246,6 +248,17 @@ const phaseForCategory = (category: string): CoveragePhase =>
   COVERAGE_CATEGORY_TO_PHASE[category] ?? "Outros";
 
 
+/** Opções do seletor de exceção por etiqueta (sqd005). O valor já salvo
+ *  entra mesmo que a etiqueta tenha saído do cache, pra edição não abrir
+ *  em branco nem apagar a exceção sem ninguém perceber. */
+const etiquetasDoSelect = (lista: string[], atual: string | null | undefined): string[] =>
+  atual && !lista.includes(atual) ? [atual, ...lista] : lista;
+
+/** Papel na equipe da etiqueta: o escolhido no template ou, se vazio, o
+ *  próprio papel do template — mesma regra do backend. */
+const papelNaExcecao = (b: { excecao_papel?: string; target_role_assistant?: boolean }): string =>
+  b.excecao_papel || (b.target_role_assistant ? "assistente" : "principal");
+
 const BLANK_TASK_BLOCK = {
   id: undefined as number | undefined,
   name: "",
@@ -261,6 +274,8 @@ const BLANK_TASK_BLOCK = {
   is_active: true,
   target_role_assistant: false,
   target_squad_id: "" as string,  // "" = sem squad de suporte; "<id>" = aponta pra support
+  excecao_etiqueta: "" as string, // "" = sem exceção; ex.: "NERC" (sqd005)
+  excecao_papel: "" as string, // "principal" | "assistente"; "" = papel do template
 };
 
 type TaskBlock = typeof BLANK_TASK_BLOCK;
@@ -287,6 +302,7 @@ const TaskTemplatesPageLegacy = () => {
   const [taskTypes, setTaskTypes] = useState<TaskType[]>([]);
   const [users, setUsers] = useState<AppUser[]>([]);
   const [supportSquads, setSupportSquads] = useState<SupportSquadOption[]>([]);
+  const [etiquetasL1, setEtiquetasL1] = useState<string[]>([]);
   const [categories, setCategories] = useState<CategoryEntry[]>([]);
   // Escritório fictício "Publicações sem pasta" (-1): taxonomia PRÓPRIA do
   // motor da fila sem pasta, plana. Carregada à parte e trocada no
@@ -373,7 +389,7 @@ const TaskTemplatesPageLegacy = () => {
     setLoading(true);
     setError(null);
     try {
-      const [tplRes, offRes, ttRes, usrRes, catRes, sqRes, catSpRes] = await Promise.all([
+      const [tplRes, offRes, ttRes, usrRes, catRes, sqRes, catSpRes, etRes] = await Promise.all([
         apiFetch(`${API}/`),
         apiFetch("/api/v1/offices?include_virtual=true"),
         apiFetch(`${API}/meta/task-types`),
@@ -381,6 +397,7 @@ const TaskTemplatesPageLegacy = () => {
         apiFetch(`${API}/meta/categories`),
         apiFetch("/api/v1/squads?kind=support"),
         apiFetch(`${API}/meta/categories?office_external_id=${OFFICE_SEM_PASTA}`),
+        apiFetch(`${API}/meta/etiquetas`),
       ]);
 
       if (!tplRes.ok || !offRes.ok || !ttRes.ok || !usrRes.ok || !catRes.ok) {
@@ -406,6 +423,12 @@ const TaskTemplatesPageLegacy = () => {
           name: s.name,
           office_external_id: s.office_external_id,
         })));
+      }
+      // Etiquetas do L1 pra exceção por etiqueta (sqd005). Opcional como as
+      // squads: sem elas o seletor só oferece "Sem exceção".
+      if (etRes.ok) {
+        const etData = await etRes.json();
+        setEtiquetasL1(Array.isArray(etData) ? etData : []);
       }
     } catch (err: any) {
       setError(err.message);
@@ -817,6 +840,8 @@ const TaskTemplatesPageLegacy = () => {
       is_active: tmpl.is_active,
       target_role_assistant: tmpl.target_role === "assistente",
       target_squad_id: tmpl.target_squad_id ? String(tmpl.target_squad_id) : "",
+      excecao_etiqueta: tmpl.excecao_etiqueta ?? "",
+      excecao_papel: tmpl.excecao_papel ?? "",
     };
   };
 
@@ -966,6 +991,8 @@ const TaskTemplatesPageLegacy = () => {
       is_active: block.is_active,
       target_role: block.target_role_assistant ? "assistente" : "principal",
       target_squad_id: block.target_squad_id ? parseInt(block.target_squad_id) : null,
+      excecao_etiqueta: block.excecao_etiqueta || null,
+      excecao_papel: block.excecao_etiqueta ? papelNaExcecao(block) : null,
     });
 
     try {
@@ -2953,6 +2980,56 @@ const TaskTemplatesPageLegacy = () => {
                               ))}
                           </SelectContent>
                         </Select>
+                      </div>
+                      {/* Exceção por etiqueta (sqd005): processo com essa etiqueta sai da
+                          regra acima e fica com a equipe marcada com a mesma etiqueta. */}
+                      <div className="grid gap-1.5 pt-1">
+                        <Label className="text-xs">
+                          Exceção por etiqueta{" "}
+                          <span className="text-muted-foreground font-normal">(opcional)</span>
+                        </Label>
+                        <Select
+                          value={block.excecao_etiqueta || "_none"}
+                          onValueChange={(v) =>
+                            setBlockField(idx, "excecao_etiqueta", v === "_none" ? "" : v)
+                          }
+                        >
+                          <SelectTrigger className="h-8 text-sm">
+                            <SelectValue placeholder="Sem exceção" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="_none">Sem exceção (segue a regra acima)</SelectItem>
+                            {etiquetasDoSelect(etiquetasL1, block.excecao_etiqueta).map((e) => (
+                              <SelectItem key={e} value={e}>
+                                {e}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        {block.excecao_etiqueta && (
+                          <div className="grid gap-1.5 rounded-md border border-sky-200 bg-sky-50/60 p-2">
+                            <Label className="text-xs">
+                              Na equipe {block.excecao_etiqueta}, esta tarefa vai para
+                            </Label>
+                            <Select
+                              value={papelNaExcecao(block)}
+                              onValueChange={(v) => setBlockField(idx, "excecao_papel", v)}
+                            >
+                              <SelectTrigger className="h-8 bg-background text-sm">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="principal">Advogado — o responsável da pasta</SelectItem>
+                                <SelectItem value="assistente">Assistente — rodízio da squad da etiqueta</SelectItem>
+                              </SelectContent>
+                            </Select>
+                            <p className="text-[11px] leading-snug text-muted-foreground">
+                              Squad de suporte e responsável fixo acima não valem para processo{" "}
+                              {block.excecao_etiqueta}. Escolha pelo tipo de trabalho: tarefa do grupo
+                              de advogados é "Advogado", mesmo que a squad use o rodízio de assistentes.
+                            </p>
+                          </div>
+                        )}
                       </div>
                     </div>
 

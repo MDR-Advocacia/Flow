@@ -141,6 +141,8 @@ class Squad(BaseModel):
     is_active: bool
     kind: str = "principal"  # 'principal' | 'support'
     office_external_id: Optional[int] = None
+    # Etiqueta do L1 que a squad atende (sqd005). Ver app/services/excecao_etiqueta.py.
+    etiqueta: Optional[str] = None
     office: Optional[OfficeRef] = None
     members: List[SquadMember] = []
     model_config = ConfigDict(from_attributes=True)
@@ -178,17 +180,22 @@ class AssistantResolution(BaseModel):
     squad_id: Optional[int] = None
     squad_name: Optional[str] = None
     fallback_reason: Optional[str] = None
+    # Preenchido quando uma regra especial decidiu o destino (ex.: exceção por
+    # etiqueta, sqd005) — texto em português pra tela e auditoria.
+    motivo: Optional[str] = None
 
 class SquadCreateSchema(BaseModel):
     name: str
     office_external_id: int
     kind: str = Field(default="principal", pattern="^(principal|support)$")
+    etiqueta: Optional[str] = Field(default=None, max_length=80)
     members: List[SquadMemberSchema] = []
 
 class SquadUpdateSchema(BaseModel):
     name: Optional[str] = None
     office_external_id: Optional[int] = None
     kind: Optional[str] = Field(default=None, pattern="^(principal|support)$")
+    etiqueta: Optional[str] = Field(default=None, max_length=80)
     members: Optional[List[SquadMemberSchema]] = None
 
 # --- Schema para Task Templates ---
