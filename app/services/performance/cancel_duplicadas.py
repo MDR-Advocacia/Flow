@@ -448,13 +448,49 @@ def cancelar_em_massa(db, dry_run: bool = False, origem: str = "manual") -> dict
 
 
 def subtipos_catalogo(db, busca: str = "", limit: int = 50) -> list:
-    """Catálogo GLOBAL de subtipos (por volume) pro combobox da whitelist."""
-    like = "AND subtipo ILIKE :b" if busca.strip() else ""
-    params = {"b": f"%{busca.strip()}%"} if busca.strip() else {}
+    """Catálogo GLOBAL de subtipos pro combobox da whitelist, com o volume.
+
+    A fonte era SÓ `perf_l1_tarefa` — ou seja, só listava subtipo que já tinha
+    tarefa no relatório do Minha Equipe. Subtipo recém-criado no L1 nunca
+    aparecia: em 10/09/2026 o operador criou "Verificar Citação - Banco Master"
+    (id 1405) justamente pra deixar a regra de duplicadas pronta ANTES de as
+    tarefas começarem a nascer, e não conseguiu liberá-lo porque ele tinha zero
+    tarefas. Liberar antes é o uso certo: a madrugada só cancela o que existe.
+
+    Agora a lista é a UNIÃO do catálogo sincronizado do L1 (subtipos ativos)
+    com o que aparece no relatório (que continua valendo sozinho — subtipo
+    inativo mas com tarefa ainda precisa poder ser liberado), e o volume vem
+    do relatório, 0 quando não há tarefa.
+
+    TRIM obrigatório: a rotina de cancelamento casa pelo NOME exato do
+    relatório (`perf_l1_tarefa.subtipo = :s`), e 2 nomes do catálogo do L1 têm
+    espaço no fim ("Agravo de Petição (art. 897, b, CLT) ") que o relatório
+    não tem — liberar o nome cru não cancelaria nada, calado. E DISTINCT: o
+    mesmo nome se repete sob tipos pai diferentes (1.012 ativos, 776 nomes).
+
+    `lower(...) LIKE lower(...)` em vez de ILIKE: mesmo resultado no Postgres e
+    funciona no SQLite da suíte.
+    """
+    termo = busca.strip()
+    filtro = "AND lower(t.subtipo) LIKE lower(:b)" if termo else ""
+    params = {"b": f"%{termo}%", "lim": int(limit)} if termo else {"lim": int(limit)}
     rows = db.execute(
         text(
-            f"SELECT subtipo, count(*) n FROM perf_l1_tarefa "
-            f"WHERE subtipo IS NOT NULL {like} GROUP BY subtipo ORDER BY n DESC LIMIT {int(limit)}"
+            f"""
+            WITH vol AS (
+                SELECT subtipo, count(*) AS n FROM perf_l1_tarefa
+                WHERE subtipo IS NOT NULL GROUP BY subtipo
+            ), todos AS (
+                SELECT trim(name) AS subtipo FROM legal_one_task_subtypes WHERE is_active
+                UNION
+                SELECT subtipo FROM vol
+            )
+            SELECT t.subtipo AS subtipo, coalesce(v.n, 0) AS n
+            FROM todos t LEFT JOIN vol v ON v.subtipo = t.subtipo
+            WHERE t.subtipo IS NOT NULL AND t.subtipo <> '' {filtro}
+            ORDER BY n DESC, t.subtipo
+            LIMIT :lim
+            """
         ),
         params,
     ).fetchall()
