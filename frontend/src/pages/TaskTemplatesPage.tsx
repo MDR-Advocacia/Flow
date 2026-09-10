@@ -259,6 +259,15 @@ const etiquetasDoSelect = (lista: string[], atual: string | null | undefined): s
 const papelNaExcecao = (b: { excecao_papel?: string; target_role_assistant?: boolean }): string =>
   b.excecao_papel || (b.target_role_assistant ? "assistente" : "principal");
 
+/** Descrição padrão da casa (10/09/2026): subtipo — classificação — data da
+ *  publicação. As variáveis são preenchidas pela publicação na hora de montar
+ *  a tarefa, então a descrição não fica velha se o template mudar. */
+const DESCRICAO_PADRAO = "{subtipo} — {classificacao} — publicação de {data_publicacao}";
+const VARIAVEIS_DESCRICAO = [
+  "subtipo", "classificacao", "data_publicacao", "cnj",
+  "audiencia_data_br", "audiencia_hora", "description",
+];
+
 const BLANK_TASK_BLOCK = {
   id: undefined as number | undefined,
   name: "",
@@ -268,8 +277,7 @@ const BLANK_TASK_BLOCK = {
   priority: "Normal",
   due_business_days: "3",
   due_date_reference: "publication",
-  description_template:
-    "Publicação judicial referente ao processo {cnj} em {publication_date}.",
+  description_template: DESCRICAO_PADRAO,
   notes_template: "",
   is_active: true,
   target_role_assistant: false,
@@ -1555,16 +1563,8 @@ const TaskTemplatesPageLegacy = () => {
                 subcategoria). O motor procura o template que combina{" "}
                 <strong>categoria + subcategoria + escritório responsável</strong> e
                 monta o payload da tarefa automaticamente. O operador só precisa
-                revisar e confirmar. Placeholders disponíveis:{" "}
-                <code className="rounded bg-blue-100 px-1 text-xs">{"{cnj}"}</code>,{" "}
-                <code className="rounded bg-blue-100 px-1 text-xs">
-                  {"{publication_date}"}
-                </code>
-                ,{" "}
-                <code className="rounded bg-blue-100 px-1 text-xs">
-                  {"{description}"}
-                </code>
-                .
+                revisar e confirmar. Descrição padrão:{" "}
+                <code className="rounded bg-blue-100 px-1 text-xs">{DESCRICAO_PADRAO}</code>.
               </p>
             </div>
           </div>
@@ -3082,16 +3082,27 @@ const TaskTemplatesPageLegacy = () => {
                     {/* Textos */}
                     <div className="grid gap-2">
                       <p className="text-xs text-muted-foreground">
-                        Placeholders:{" "}
-                        <code className="rounded bg-muted px-1">{"{cnj}"}</code>{" "}
-                        <code className="rounded bg-muted px-1">{"{publication_date}"}</code>{" "}
-                        <code className="rounded bg-muted px-1">{"{description}"}</code>
+                        Variáveis:{" "}
+                        {VARIAVEIS_DESCRICAO.map((v) => (
+                          <code key={v} className="mr-1 rounded bg-muted px-1">{`{${v}}`}</code>
+                        ))}
                       </p>
                       <div className="grid gap-1.5">
-                        <Label className="text-xs">Descrição da tarefa</Label>
+                        <div className="flex items-center justify-between gap-2">
+                          <Label className="text-xs">Descrição da tarefa</Label>
+                          {block.description_template !== DESCRICAO_PADRAO && (
+                            <button
+                              type="button"
+                              className="text-[11px] text-primary underline-offset-2 hover:underline"
+                              onClick={() => setBlockField(idx, "description_template", DESCRICAO_PADRAO)}
+                            >
+                              Usar a descrição padrão
+                            </button>
+                          )}
+                        </div>
                         <Textarea
                           rows={2}
-                          placeholder="Publicação judicial referente ao processo {cnj}..."
+                          placeholder={DESCRICAO_PADRAO}
                           value={block.description_template}
                           onChange={(e) => setBlockField(idx, "description_template", e.target.value)}
                           className="text-sm"

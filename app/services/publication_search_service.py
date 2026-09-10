@@ -2338,8 +2338,35 @@ class PublicationSearchService:
 
         publish_iso = _brt_to_utc_z(base_date.isoformat(), "00:00:00")
 
-        # Interpolação simples de variáveis na descrição/notas
+        # Campos do template via external_id (os FKs são external_id)
+        from app.models.legal_one import LegalOneTaskSubType, LegalOneUser, LegalOneOffice
+
+        subtype = self.db.query(LegalOneTaskSubType).options(
+            joinedload(LegalOneTaskSubType.parent_type)
+        ).filter(LegalOneTaskSubType.external_id == tmpl.task_subtype_external_id).first()
+
+        if not (subtype and subtype.parent_type):
+            raise ValueError("Template com referências inválidas (subtype/user).")
+
+        def _data_br(valor) -> str:
+            if not valor:
+                return ""
+            try:
+                return datetime.fromisoformat(str(valor)[:10]).strftime("%d/%m/%Y")
+            except ValueError:
+                return str(valor)
+
+        # Interpolação simples de variáveis na descrição/notas.
+        # `{subtipo}`, `{classificacao}` e `{data_publicacao}` sustentam a
+        # descrição padrão da casa (10/09/2026): "subtipo — classificação —
+        # publicação de dd/mm/aaaa". Como vêm da PUBLICAÇÃO e do template na
+        # hora de montar, não ficam velhas quando alguém troca o subtipo.
+        # `{publication_date}` segue ISO: há templates usando assim.
         ctx = {
+            "subtipo": subtype.name or "",
+            "classificacao": " / ".join(p for p in (rec.category, rec.subcategory) if p),
+            "data_publicacao": base_date.strftime("%d/%m/%Y"),
+            "audiencia_data_br": _data_br(rec.audiencia_data),
             "cnj": rec.linked_lawsuit_cnj or "",
             "publication_date": base_date.isoformat(),
             "description": (rec.description or "")[:300],
@@ -2364,16 +2391,6 @@ class PublicationSearchService:
         if rec.audiencia_link:
             link_note = f"\n\n🔗 Link da audiência virtual: {rec.audiencia_link}"
             notes = (notes or "") + link_note
-
-        # Campos do template via external_id (os FKs são external_id)
-        from app.models.legal_one import LegalOneTaskSubType, LegalOneUser, LegalOneOffice
-
-        subtype = self.db.query(LegalOneTaskSubType).options(
-            joinedload(LegalOneTaskSubType.parent_type)
-        ).filter(LegalOneTaskSubType.external_id == tmpl.task_subtype_external_id).first()
-
-        if not (subtype and subtype.parent_type):
-            raise ValueError("Template com referências inválidas (subtype/user).")
 
         user = None
         if tmpl.responsible_user_external_id is not None:
