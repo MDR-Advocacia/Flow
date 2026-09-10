@@ -101,3 +101,15 @@ def test_data_da_audiencia_tambem_sai_no_formato_brasileiro():
     )
 
     assert _descricao(svc, rec, tmpl) == "Audiência em 15/10/2026 (2026-10-15)"
+
+
+def test_subcategoria_traco_conta_como_sem_subcategoria():
+    """O classificador grava "-" quando a categoria não tem subcategoria — 6,5%
+    das publicações classificadas em 30 dias (medido em 10/09/2026). Sem o
+    filtro, a tarefa saía "Para Análise / -" no L1."""
+    for traco in ("-", " - ", "—"):
+        svc, rec, tmpl = _cenario(descricao=PADRAO, subcategoria=traco)
+
+        assert _descricao(svc, rec, tmpl) == (
+            "Contrarrazões - Ativos e BB Autor — Recursos — publicação de 02/09/2026"
+        )

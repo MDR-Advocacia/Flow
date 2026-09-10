@@ -2364,7 +2364,13 @@ class PublicationSearchService:
         # `{publication_date}` segue ISO: há templates usando assim.
         ctx = {
             "subtipo": subtype.name or "",
-            "classificacao": " / ".join(p for p in (rec.category, rec.subcategory) if p),
+            # Subcategoria gravada como "-" é o classificador dizendo "não tem"
+            # (6,5% das classificadas em 30 dias, medido em 10/09/2026): sem o
+            # filtro a descrição sairia "Para Análise / -".
+            "classificacao": " / ".join(
+                p.strip() for p in (rec.category, rec.subcategory)
+                if p and p.strip() not in ("-", "—", "–")
+            ),
             "data_publicacao": base_date.strftime("%d/%m/%Y"),
             "audiencia_data_br": _data_br(rec.audiencia_data),
             "cnj": rec.linked_lawsuit_cnj or "",
