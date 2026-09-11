@@ -174,16 +174,14 @@ def _normalizar_titulo(titulo: object) -> str:
 def _tipo_da_aba(titulo: object) -> str:
     t = _normalizar_titulo(titulo)
     palavras = set(t.split())
-    # HABILITAÇÃO ANTERIOR não é cadastro (decisão do operador em 11/09/2026).
-    if any(p.startswith("HABILITAC") for p in palavras):
+    # HABILITAÇÃO ANTERIOR e AGUARDANDO CADASTRO não são cadastro (decisões do
+    # operador em 11/09/2026). "Pendente de cadastro" segue a mesma regra: estado
+    # de espera não entra — só entra aba que diz CADASTRAR / PARA CADASTRO.
+    if any(p.startswith("HABILITAC") for p in palavras) or palavras & {"AGUARDANDO", "PENDENTE", "PENDENTES"}:
         return _ABA_CONTROLE
     # "SEM CADASTRO" vazou pra fila no lote de 21/07: negação nunca é PARA nem JÁ.
     negada = bool(palavras & {"SEM", "NAO", "NUNCA"})
-    if not negada and (
-        "CADASTRAR" in palavras
-        or re.search(r"\bPARA CADASTR", t)
-        or (palavras & {"PENDENTE", "PENDENTES"} and "CADASTR" in t)
-    ):
+    if not negada and ("CADASTRAR" in palavras or re.search(r"\bPARA CADASTR", t)):
         return _ABA_PARA
     if not negada and re.search(r"\bCADASTRAD[OA]S?\b", t):
         return _ABA_JA

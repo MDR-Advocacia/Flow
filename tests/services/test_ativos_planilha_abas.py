@@ -58,6 +58,18 @@ def test_planilha_de_09_09_so_a_para_cadastrar_entra():
     assert D not in _cnjs(linhas)
 
 
+def test_planilha_de_10_09_aguardando_cadastro_nao_entra():
+    # decisão do operador em 11/09/2026: AGUARDANDO CADASTRO não é cadastro
+    conteudo = _xlsx({
+        "PARA CADASTRO": [A, B],
+        "PROCESSOS CADASTRADOS": [C],
+        "AGUARDANDO CADASTRO": [D],
+    })
+    linhas, ja = parse_planilha_ativos(conteudo, "10.09 MARCOS DELLI.xlsx")
+
+    assert _cnjs(linhas) == [A, B] and ja == {_dig(C)}
+
+
 @pytest.mark.parametrize("titulo, tipo", [
     ("PARA CADASTRO", "para"),
     ("PARA CADASTRAR", "para"),
@@ -65,7 +77,8 @@ def test_planilha_de_09_09_so_a_para_cadastrar_entra():
     ("PARA_CADASTRO", "para"),
     ("A CADASTRAR", "para"),
     ("PARA CADASTRO (2)", "para"),
-    ("Pendentes de cadastro", "para"),
+    ("AGUARDANDO CADASTRO", "controle"),
+    ("Pendentes de cadastro", "controle"),
     ("JÁ CADASTRADO", "ja"),
     ("JA CADASTRADOS", "ja"),
     ("PROCESSOS CADASTRADOS", "ja"),
