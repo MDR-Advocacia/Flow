@@ -48,6 +48,8 @@ import EncerramentosL1Page from './pages/EncerramentosL1Page';
 import DistribuidosBBDashboardPage from './pages/DistribuidosBBDashboardPage';
 import DistribuidosBBConfigPage from './pages/DistribuidosBBConfigPage';
 import MinhaEquipePage from './pages/MinhaEquipePage';
+import EmbargosExecucaoDetalhePage from './pages/EmbargosExecucaoDetalhePage';
+import EmbargosTemplatesPage from './pages/EmbargosTemplatesPage';
 
 // Contexto de Autenticação
 import { AuthProvider, AuthContext } from './contexts/AuthContext';
@@ -122,6 +124,8 @@ function AppContent() {
             <Route path="/distribuidos-bb/config" element={<DistribuidosBBConfigPage />} />
             <Route path="/minha-equipe" element={<MinhaEquipePage />} />
             <Route path="/minha-equipe/:team" element={<MinhaEquipePage />} />
+            <Route path="/minha-equipe/:team/embargos/templates" element={<EmbargosTemplatesPage />} />
+            <Route path="/minha-equipe/:team/embargos/:id" element={<EmbargosExecucaoDetalhePage />} />
           </Route>
 
           {/* Rota para página não encontrada */}

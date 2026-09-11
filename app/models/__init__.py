@@ -72,6 +72,14 @@ from .citacoes_bm import (
 )
 from .onerequest import OnerequestAnotacao, OnerequestSolicitacao
 from .analise_risco import AnaliseRiscoTarefa
+from .embargos_execucao import (
+    EmbCandidato,
+    EmbEvento,
+    EmbExecucao,
+    EmbParte,
+    EmbTarefaDisparo,
+    EmbTarefaTemplate,
+)
 from .onenotify_bb import OneNotifyBBNotification
 from .analise_recursal import (
     AnaliseRecursal,

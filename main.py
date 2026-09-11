@@ -50,6 +50,7 @@ from app.api.v1.endpoints import (
     cargos,
     uso,
     analise_risco_intake,
+    embargos_execucao,
 )
 from app.core import auth as auth_security
 from app.core.config import settings
@@ -591,6 +592,15 @@ async def lifespan(_: FastAPI):
             "Falha ao registrar a esteira de verificação da Análise de Risco no startup."
         )
 
+    # Fluxo Embargos à Execução (Controladoria): relatório do L1, partes no
+    # portal do BB e monitor do tribunal (DataJud + DJEN).
+    try:
+        from app.services.embargos_execucao.worker import register_embargos_execucao_jobs
+
+        register_embargos_execucao_jobs(scheduler)
+    except Exception:
+        logger.exception("Falha ao registrar os jobs do Fluxo Embargos à Execução no startup.")
+
     # Ativos: a consulta ao DataJud acontece SÓ na ingestão (decisão do operador
     # 2026-07-17: sem worker recorrente depois do cadastro — o que o DataJud não
     # tiver na hora, fica com o dado da planilha e pronto).
@@ -721,6 +731,8 @@ app.include_router(
 # Análise Recursal (dentro de Prazos Processuais): JWT + permissão prazos_iniciais.
 app.include_router(recursal.router, prefix="/api/v1", dependencies=protected_dependencies)
 app.include_router(distribuidos_bb.router, prefix="/api/v1", tags=["Distribuídos BB"], dependencies=protected_dependencies)
+# Fluxo Embargos à Execução — aba da Controladoria (gate por time no próprio router).
+app.include_router(embargos_execucao.router, prefix="/api/v1", tags=["Embargos à Execução"], dependencies=protected_dependencies)
 app.include_router(task_templates.router, prefix="/api/v1/task-templates", tags=["Templates de Tarefa"], dependencies=protected_dependencies)
 app.include_router(ajus.router, prefix="/api/v1", tags=["AJUS"], dependencies=protected_dependencies)
 # GED LegalOne — envio em lote de arquivos pro GED (ECM) de processos do L1.

@@ -20,6 +20,7 @@ import {
   Clock,
   Database,
   FileText,
+  Gavel,
   Gauge,
   Layers,
   type LucideIcon,
@@ -66,6 +67,7 @@ import ReagendamentosSection from "@/components/performance/ReagendamentosSectio
 import RedistribuicoesLog from "@/components/balanceador/RedistribuicoesLog";
 import AcompanhamentoVinculosTab from "@/components/distribuidos-bb/AcompanhamentoVinculosTab";
 import AnaliseRiscoTab from "@/components/minha-equipe/AnaliseRiscoTab";
+import EmbargosExecucaoTab from "@/components/minha-equipe/EmbargosExecucaoTab";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/hooks/useAuth";
 import {
@@ -205,6 +207,12 @@ export default function MinhaEquipePage() {
   // com a verificação no portal BB (cumprida no L1 != análise feita no banco).
   const ehBbReu = team === "bb-reu";
   const [abaBbReu, setAbaBbReu] = useState<"desempenho" | "analise-risco">("desempenho");
+  // Controladoria (chave bb-cadastro) tem a aba "Embargos à Execução". `?aba=embargos`
+  // abre direto nela (volta da página dedicada da execução).
+  const ehControladoria = team === "bb-cadastro";
+  const [abaControladoria, setAbaControladoria] = useState<"desempenho" | "embargos">(() =>
+    new URLSearchParams(window.location.search).get("aba") === "embargos" ? "embargos" : "desempenho",
+  );
 
   // Estado GLOBAL da atualização (vem do servidor): true = alguém está
   // atualizando AGORA (qualquer equipe, qualquer usuário). Trava o botão e
@@ -473,6 +481,30 @@ export default function MinhaEquipePage() {
         </Tabs>
       ) : null}
 
+      {ehControladoria ? (
+        <Tabs value={abaControladoria} onValueChange={(v) => setAbaControladoria(v as "desempenho" | "embargos")}>
+          <TabsList>
+            <TabsTrigger value="desempenho">
+              <Gauge className="mr-1.5 h-4 w-4" /> Desempenho
+            </TabsTrigger>
+            <TabsTrigger value="embargos">
+              <Gavel className="mr-1.5 h-4 w-4" /> Embargos à Execução
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
+      ) : null}
+
+      {ehControladoria && abaControladoria === "embargos" && (
+        <div className="space-y-3">
+          <p className="text-sm text-muted-foreground">
+            Execuções do BB Autor com a <strong>inicial protocolada</strong>. Passada a janela de dias úteis, o
+            Flow consulta o tribunal a cada intervalo até achar <strong>embargos à execução</strong> ligados a
+            elas — aí para, avisa e mostra aqui para a conferência do vínculo.
+          </p>
+          <EmbargosExecucaoTab team={team} />
+        </div>
+      )}
+
       {ehBbReu && abaBbReu === "analise-risco" && (
         <div className="space-y-3">
           <p className="text-sm text-muted-foreground">
@@ -495,7 +527,7 @@ export default function MinhaEquipePage() {
         </div>
       )}
 
-      {(!ehMista || abaMista === "desempenho") && (!ehBbReu || abaBbReu === "desempenho") && (
+      {(!ehMista || abaMista === "desempenho") && (!ehBbReu || abaBbReu === "desempenho") && (!ehControladoria || abaControladoria === "desempenho") && (
       <>
       <CollapsibleSection title="Desempenho da equipe" subtitle={`Últimos ${days} dias`}>
       {/* KPIs */}

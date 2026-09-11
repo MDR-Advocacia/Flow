@@ -574,6 +574,21 @@ class Settings(BaseSettings):
     analise_risco_verificacao_intervalo_min: int = 10
     analise_risco_verificacao_lote: int = 50
 
+    # ── Fluxo Embargos à Execução (Controladoria) ──
+    # Relatório "ROBÔ - EMBARGOS À EXECUÇÃO" do L1 (gera+importa só caso novo),
+    # partes no portal do BB (processo filho com teto) e monitor do tribunal
+    # (DataJud + DJEN). A cadência em dias úteis mora no card, não aqui.
+    embargos_execucao_relatorio_ativo: bool = True
+    embargos_execucao_relatorio_horarios: str = "7"
+    embargos_execucao_partes_ativo: bool = True
+    # Uma passagem por dia, de madrugada (operador: Chromium o dia todo pilharia
+    # o servidor). O board tem botão pra disparar na hora.
+    embargos_execucao_partes_hora: str = "3"
+    embargos_execucao_partes_lote: int = 80
+    embargos_execucao_partes_teto_min: int = 60
+    embargos_execucao_monitor_ativo: bool = True
+    embargos_execucao_monitor_lote: int = 40
+
 
     # Cadastro 100% automático: ao fim de uma coleta com processos distribuídos,
     # gera a planilha e importa no L1 (cria as pastas + dispara o workflow) sem
