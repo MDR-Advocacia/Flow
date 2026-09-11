@@ -149,12 +149,59 @@ def _linha_para_dict(row: tuple, idx: dict[str, int]) -> Optional[dict]:
     }
 
 
+# O NOME das abas também não é estável. "PARA CADASTRO" / "JÁ CADASTRADO" em
+# julho; em 09/09/2026 veio "PARA CADASTRAR" / "PROCESSOS CADASTRADOS" /
+# "HABILITAÇÃO ANTERIOR" — e o teste por texto exato leu a aba errada: as 60
+# linhas da PARA CADASTRAR foram tratadas como controle (tinham "CADASTR" no
+# nome sem ser "PARA CADASTRO"), a PROCESSOS CADASTRADOS não serviu de dedupe,
+# e o único processo da HABILITAÇÃO ANTERIOR (nome sem "CADASTR") foi cadastrado
+# no L1. Agora o nome é normalizado (sem acento, caixa, pontuação) e a aba é
+# classificada pelo SENTIDO:
+_ABA_PARA = "para"              # processos a cadastrar: entra na fila
+_ABA_JA = "ja"                  # já cadastrados: só dedupe
+_ABA_CONTROLE = "controle"      # nunca entra (SEM CADASTRO, HABILITAÇÃO ANTERIOR…)
+_ABA_SEM_ROTULO = "sem_rotulo"  # nome que não diz nada (Planilha1)
+
+
+def _normalizar_titulo(titulo: object) -> str:
+    import unicodedata
+
+    t = unicodedata.normalize("NFKD", _norm(titulo))
+    t = "".join(c for c in t if not unicodedata.combining(c)).upper()
+    return " ".join(re.sub(r"[^A-Z0-9]+", " ", t).split())
+
+
+def _tipo_da_aba(titulo: object) -> str:
+    t = _normalizar_titulo(titulo)
+    palavras = set(t.split())
+    # HABILITAÇÃO ANTERIOR não é cadastro (decisão do operador em 11/09/2026).
+    if any(p.startswith("HABILITAC") for p in palavras):
+        return _ABA_CONTROLE
+    # "SEM CADASTRO" vazou pra fila no lote de 21/07: negação nunca é PARA nem JÁ.
+    negada = bool(palavras & {"SEM", "NAO", "NUNCA"})
+    if not negada and (
+        "CADASTRAR" in palavras
+        or re.search(r"\bPARA CADASTR", t)
+        or (palavras & {"PENDENTE", "PENDENTES"} and "CADASTR" in t)
+    ):
+        return _ABA_PARA
+    if not negada and re.search(r"\bCADASTRAD[OA]S?\b", t):
+        return _ABA_JA
+    if "CADASTR" in t:
+        return _ABA_CONTROLE
+    return _ABA_SEM_ROTULO
+
+
 def parse_planilha_ativos(conteudo: bytes, nome_arquivo: str) -> tuple[list[dict], set[str]]:
     """Lê o arquivo da Ativos.
 
     Devolve (linhas_para_cadastro, cnjs_ja_cadastrado):
-    - linhas_para_cadastro: dicts da aba "PARA CADASTRO" (dedup por CNJ);
-    - cnjs_ja_cadastrado: dígitos dos CNJs da aba "JÁ CADASTRADO" (só p/ pular).
+    - linhas_para_cadastro: dicts da(s) aba(s) de processos a cadastrar (dedup por CNJ);
+    - cnjs_ja_cadastrado: dígitos dos CNJs da(s) aba(s) de já cadastrados (só p/ pular).
+
+    Havendo aba a cadastrar, SÓ ela entra — aba de nome neutro (Planilha1) é
+    ignorada. Sem aba a cadastrar, uma única aba de nome neutro com dados vira
+    lista; mais de uma é recusada (ValueError) em vez de adivinhar.
 
     CSV/TXT (sem abas) caem no modo lista-seca: tudo vira PARA CADASTRO, só CNJ.
     """
@@ -180,23 +227,28 @@ def parse_planilha_ativos(conteudo: bytes, nome_arquivo: str) -> tuple[list[dict
     import openpyxl
 
     wb = openpyxl.load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
+    abas = []
     for ws in wb.worksheets:
-        titulo = (ws.title or "").strip().upper()
-        eh_ja = "JÁ CADASTRAD" in titulo or "JA CADASTRAD" in titulo
-        eh_para = "PARA CADASTRO" in titulo
-        # Só a PARA CADASTRO entra na fila. Qualquer OUTRA aba que mencione
-        # "cadastr" no título (JÁ CADASTRADO, SEM CADASTRO, etc.) é de controle
-        # da Ativos e NÃO pode ser varrida — a "SEM CADASTRO" (2 linhas) já
-        # vazou pra fila no lote de 21/07 justamente por escapar do teste
-        # antigo, que só barrava "CADASTRAD" (com D). Abas sem rótulo nenhum
-        # continuam entrando (modo lista-seca de planilha de aba única).
-        eh_outra_de_controle = (not eh_para) and (not eh_ja) and ("CADASTR" in titulo)
-        if eh_outra_de_controle:
-            logger.info("Ativos: aba %r ignorada (aba de controle, não é PARA CADASTRO).", ws.title)
-            continue
         rows = list(ws.iter_rows(values_only=True))
+        tem_dado = any(any(c not in (None, "") for c in r) for r in rows)
+        abas.append((ws.title, _tipo_da_aba(ws.title), rows, tem_dado))
+    tem_para = any(tipo == _ABA_PARA for _, tipo, _, _ in abas)
+    neutras_com_dado = [t for t, tipo, _, dado in abas if tipo == _ABA_SEM_ROTULO and dado]
+    if not tem_para and len(neutras_com_dado) > 1:
+        raise ValueError(
+            "Não achei a aba dos processos a cadastrar (um nome como PARA CADASTRO) e a "
+            f"planilha tem mais de uma aba com dados: {', '.join(neutras_com_dado)}. "
+            "Renomeie a aba certa e suba de novo."
+        )
+    for titulo, tipo, rows, _dado in abas:
+        # Controle nunca entra; aba de nome neutro só entra quando não há aba a
+        # cadastrar (planilha de aba única — modo lista-seca).
+        if tipo == _ABA_CONTROLE or (tipo == _ABA_SEM_ROTULO and tem_para):
+            logger.info("Ativos: aba %r ignorada (%s).", titulo, tipo)
+            continue
         if not rows:
             continue
+        eh_ja = tipo == _ABA_JA
         idx = _mapear_colunas(list(rows[0]))
         if "cnj" not in idx:
             # Aba sem cabeçalho reconhecível: varre CNJs crus (fallback).
