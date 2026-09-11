@@ -432,12 +432,16 @@ class BatchTaskCreationService:
                 ],
             }
 
-            created_task = self.client.create_task(task_payload)
+            # Sai vinculada à pasta: vínculo que não pega cancela a tarefa e
+            # reenvia; esgotou, cai no except (linha FALHA). Antes a linha virava
+            # SUCESSO com a tarefa sem pasta.
+            from app.services.legal_one_vinculo_tarefa import criar_tarefa_na_pasta
+
+            created_task = criar_tarefa_na_pasta(self.client, task_payload, lawsuit_id)
             if not created_task or not created_task.get("id"):
                 raise Exception("Falha na criacao da tarefa (resposta invalida da API).")
 
             task_id = created_task["id"]
-            self.client.link_task_to_lawsuit(task_id, {"linkType": "Litigation", "linkId": lawsuit_id})
 
             log_item.status = "SUCESSO"
             log_item.created_task_id = task_id

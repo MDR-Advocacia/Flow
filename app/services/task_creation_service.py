@@ -135,21 +135,24 @@ class TaskCreationService:
         final_payload = self._build_final_payload(request)
         
         self.logger.info(f"Criando tarefa com payload definitivo e ordenado: {final_payload}")
-        created_task = self.legal_one_client.create_task(final_payload)
+        from app.services.legal_one_vinculo_tarefa import (
+            TarefaSemVinculoError,
+            criar_tarefa_na_pasta,
+        )
+
+        try:
+            # Sai vinculada: vínculo que não pega cancela e reenvia; só vira
+            # erro esgotado — e aí sem tarefa solta no L1.
+            created_task = criar_tarefa_na_pasta(self.legal_one_client, final_payload, lawsuit_id)
+        except TarefaSemVinculoError as exc:
+            self.logger.error(f"Falha crítica ao vincular a tarefa ao processo {lawsuit_id}: {exc}")
+            raise TaskLinkingError(str(exc)) from exc
         if not created_task or 'id' not in created_task:
             raise TaskCreationError("A resposta da API na criação da tarefa não continha um ID válido.")
-            
-        task_id = created_task['id']
-        self.logger.info(f"TAREFA CRIADA COM SUCESSO! ID: {task_id}")
 
-        self.logger.info(f"Vinculando tarefa {task_id} ao processo {lawsuit_id}.")
-        link_success = self.legal_one_client.link_task_to_lawsuit(task_id, {"linkType": "Litigation", "linkId": lawsuit_id})
-        if not link_success:
-            self.logger.error(f"Falha crítica ao vincular a tarefa {task_id} ao processo {lawsuit_id}.")
-            raise TaskLinkingError(f"Não foi possível vincular a tarefa {task_id} ao processo {lawsuit_id}.")
-        
-        self.logger.info("Vínculo com o processo realizado com sucesso.")
-        
+        task_id = created_task['id']
+        self.logger.info(f"TAREFA CRIADA E VINCULADA! ID: {task_id}")
+
         return {
             "message": "Tarefa criada e vinculada com sucesso!",
             "created_task": created_task

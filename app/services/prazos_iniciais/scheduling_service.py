@@ -489,7 +489,16 @@ class PrazosIniciaisSchedulingService:
             "prazos_iniciais.create_task: intake=%s sugestao=%s subType=%s cnj=%s",
             intake.id, sugestao.id, sugestao.task_subtype_id, intake.cnj_number,
         )
-        created = self.l1_client.create_task(payload)
+        # Com processo, a tarefa sai VINCULADA: vínculo que não pega cancela a
+        # tarefa e reenvia (legal_one_vinculo_tarefa). Antes seguia com warning
+        # e a tarefa ficava sem pasta na agenda (11/09/2026). Sem lawsuit_id,
+        # fica avulsa no L1 — raro mas legítimo (intake sem match CNJ).
+        if intake.lawsuit_id:
+            from app.services.legal_one_vinculo_tarefa import criar_tarefa_na_pasta
+
+            created = criar_tarefa_na_pasta(self.l1_client, payload, int(intake.lawsuit_id))
+        else:
+            created = self.l1_client.create_task(payload)
         if not created or not created.get("id"):
             # Mensagem humanizada do L1 quando disponível (ex: "Campos
             # obrigatórios não enviados: Data de publicação"). Fallback
@@ -499,25 +508,7 @@ class PrazosIniciaisSchedulingService:
                 l1_detail
                 or f"Legal One recusou a criação da tarefa (sugestão #{sugestao.id})."
             )
-        task_id = int(created["id"])
-
-        # Vínculo ao processo (se houver). Sem lawsuit_id, a tarefa fica
-        # avulsa no L1 — cenário raro mas legítimo (intake sem match CNJ).
-        if intake.lawsuit_id:
-            try:
-                self.l1_client.link_task_to_lawsuit(
-                    task_id,
-                    {"linkType": "Litigation", "linkId": int(intake.lawsuit_id)},
-                )
-            except Exception as exc:  # noqa: BLE001
-                # Task foi criada mas não linkou — log warning e segue.
-                # Não reverte pois criar a task sem vínculo é menos ruim
-                # que zerar a task recém-criada.
-                logger.warning(
-                    "prazos_iniciais.link_task falhou (task_id=%s lawsuit=%s): %s",
-                    task_id, intake.lawsuit_id, exc,
-                )
-        return task_id
+        return int(created["id"])
 
     def _create_custom_task(
         self,
@@ -614,7 +605,13 @@ class PrazosIniciaisSchedulingService:
             "prazos_iniciais.create_custom_task: intake=%s subType=%s cnj=%s",
             intake.id, custom_task.task_subtype_external_id, intake.cnj_number,
         )
-        created = self.l1_client.create_task(payload)
+        if intake.lawsuit_id:
+            from app.services.legal_one_vinculo_tarefa import criar_tarefa_na_pasta
+
+            # Mesma regra de _create_task_in_legal_one: sai vinculada ou reenvia.
+            created = criar_tarefa_na_pasta(self.l1_client, payload, int(intake.lawsuit_id))
+        else:
+            created = self.l1_client.create_task(payload)
         if not created or not created.get("id"):
             l1_detail = self.l1_client.format_last_create_task_error()
             raise RuntimeError(
@@ -622,19 +619,6 @@ class PrazosIniciaisSchedulingService:
                 or f"Legal One recusou a criacao da tarefa avulsa (intake {intake.id})."
             )
         task_id = int(created["id"])
-
-        if intake.lawsuit_id:
-            try:
-                self.l1_client.link_task_to_lawsuit(
-                    task_id,
-                    {"linkType": "Litigation", "linkId": int(intake.lawsuit_id)},
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "prazos_iniciais.link_custom_task falhou (task_id=%s "
-                    "lawsuit=%s): %s",
-                    task_id, intake.lawsuit_id, exc,
-                )
 
         # Sugestao sintetica — review_status=APROVADO ja na criacao
         # porque o operador acabou de submeter. created_task_id

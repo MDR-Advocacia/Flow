@@ -136,13 +136,13 @@ class OnesidStrategy(BaseStrategy):
                 "isRequester": True
             })
 
-            # --- 5. Criação da Tarefa ---
-            created_task = self.client.create_task(task_payload)
+            # --- 5/6. Criação da Tarefa já vinculada ao Processo ---
+            # (vínculo que não pega cancela e reenvia; esgotou, cai no except)
+            from app.services.legal_one_vinculo_tarefa import criar_tarefa_na_pasta
+
+            created_task = criar_tarefa_na_pasta(self.client, task_payload, lawsuit_id)
             if not created_task or not created_task.get('id'):
                 raise Exception("API retornou sucesso mas sem ID da tarefa.")
-
-            # --- 6. Vínculo com Processo ---
-            self.client.link_task_to_lawsuit(created_task['id'], {"linkType": "Litigation", "linkId": lawsuit_id})
 
             # --- 7. Sucesso ---
             log_item.status = "SUCESSO"

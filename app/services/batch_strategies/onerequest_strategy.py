@@ -235,16 +235,14 @@ class OnerequestStrategy(BaseStrategy):
             if task_notes:
                 task_payload['notes'] = task_notes
             
-            # --- 5. Criação na API ---
-            created_task = self.client.create_task(task_payload)
+            # --- 5. Criação na API (sai vinculada; sem vínculo, cancela e reenvia) ---
+            from app.services.legal_one_vinculo_tarefa import criar_tarefa_na_pasta
+
+            created_task = criar_tarefa_na_pasta(self.client, task_payload, lawsuit_id)
             if not created_task or not created_task.get('id'):
                 raise Exception("Falha na criação da tarefa (resposta inválida da API).")
-            
+
             task_id = created_task['id']
-            
-            link_success = self.client.link_task_to_lawsuit(task_id, {"linkType": "Litigation", "linkId": lawsuit_id})
-            if not link_success:
-                logging.warning(f"Tarefa ID {task_id} criada, mas falha ao vincular.")
 
             # --- 6. Sucesso ---
             log_item.status = "SUCESSO"

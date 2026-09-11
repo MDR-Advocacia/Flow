@@ -765,16 +765,18 @@ class OnerequestService:
             if notes:
                 task_payload["notes"] = notes
 
-            created = client.create_task(task_payload)
+            # Vínculo com a pasta SÓ quando há pasta; avulsa fica sem vínculo.
+            # Com pasta, a tarefa sai vinculada: vínculo que não pega cancela e
+            # reenvia — antes a DMI virava AGENDADO com a tarefa sem pasta.
+            if lawsuit_id:
+                from app.services.legal_one_vinculo_tarefa import criar_tarefa_na_pasta
+
+                created = criar_tarefa_na_pasta(client, task_payload, lawsuit_id)
+            else:
+                created = client.create_task(task_payload)
             if not created or not created.get("id"):
                 raise Exception("Falha na criação da tarefa (resposta inválida da API).")
             task_id = created["id"]
-
-            # Vínculo com a pasta SÓ quando há pasta. Avulsa fica sem vínculo.
-            if lawsuit_id and not client.link_task_to_lawsuit(
-                task_id, {"linkType": "Litigation", "linkId": lawsuit_id}
-            ):
-                logger.warning("Tarefa %s criada mas falha ao vincular ao processo %s.", task_id, lawsuit_id)
 
             solicitacao.created_task_id = task_id
             solicitacao.linked_lawsuit_id = lawsuit_id

@@ -269,7 +269,10 @@ def _run_job(job_id: int) -> None:
                         it["erro"] = "Já havia tarefa aberta desse subtipo na pasta."
                         job.pulados += 1
                     else:
-                        criada = client.create_task(_payload_tarefa(config, it))
+                        # Sai vinculada: vínculo que não pega cancela e reenvia.
+                        from app.services.legal_one_vinculo_tarefa import criar_tarefa_na_pasta
+
+                        criada = criar_tarefa_na_pasta(client, _payload_tarefa(config, it), lawsuit_id)
                         if not criada or not criada.get("id"):
                             raise RuntimeError(
                                 client.format_last_create_task_error()
@@ -277,9 +280,6 @@ def _run_job(job_id: int) -> None:
                                 else "L1 não retornou id da tarefa."
                             )
                         tid = criada["id"]
-                        client.link_task_to_lawsuit(
-                            tid, {"linkType": "Litigation", "linkId": lawsuit_id}
-                        )
                         it["status"] = "criado"
                         it["task_id"] = tid
                         job.criados += 1

@@ -4731,6 +4731,36 @@ class PublicationSearchService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("shadow: desfecho de agendamento não registrado (%s)", exc)
 
+    def _abortar_agendamento_parcial(self, exc: Exception, criadas: list) -> Exception:
+        """
+        Agendamento de grupo é tudo-ou-nada. Se a tarefa N não saiu (criação
+        recusada, ou vínculo que não pegou nem reenviando), as tarefas 1..N-1
+        deste pedido — já criadas e vinculadas — são canceladas no L1: o banco
+        volta atrás, então sem isso a auditoria perde tarefa que existe e o
+        reenvio duplica (ou esbarra no bloqueio de duplicata).
+        """
+        from app.services.legal_one_vinculo_tarefa import (
+            TarefaSemVinculoError,
+            cancelar_tarefas_criadas,
+        )
+
+        mensagem = str(exc) or type(exc).__name__
+        if criadas:
+            nao_canceladas = cancelar_tarefas_criadas(self.client, criadas)
+            logger.warning(
+                "Agendamento de grupo abortado na tarefa %s (%s): canceladas %s, não canceladas %s.",
+                len(criadas) + 1, mensagem,
+                [t for t in criadas if int(t) not in nao_canceladas], nao_canceladas,
+            )
+            if nao_canceladas:
+                mensagem += (
+                    " Tarefas que ficaram no Legal One: "
+                    f"{', '.join(str(t) for t in nao_canceladas)}."
+                )
+        if isinstance(exc, (ValueError, TarefaSemVinculoError)):
+            return ValueError(mensagem)
+        return RuntimeError(mensagem)
+
     def schedule_group(
         self,
         lawsuit_id: int,
@@ -4855,38 +4885,41 @@ class PublicationSearchService:
 
         import copy as _copy
 
+        from app.services.legal_one_vinculo_tarefa import criar_tarefa_na_pasta
+
         created_task_ids: list[int] = []
         system_adjustments_per_payload: list[dict] = []
-        for payload_idx, payload in enumerate(payloads):
-            # Snapshot do payload como o operador confirmou — o diff contra o
-            # payload pós-ajustes vira a trilha "ajuste automático do sistema".
-            confirmed_by_operator = _copy.deepcopy(payload)
-            self._enforce_description_limit(payload)
-            self._apply_required_task_defaults(
-                payload, fallback_office_id=fallback_office_id,
-            )
-            self._ensure_endtime_in_future(payload)
-            adjustments_entry = self._diff_system_adjustments(confirmed_by_operator, payload)
-            # Roteamento de squad é regra do TEMPLATE — nem ajuste mecânico,
-            # nem override do operador. Entra na trilha azul com motivo
-            # próprio (e tira o campo da conta de override humano no audit).
-            if routing_notes[payload_idx]:
-                adjustments_entry["responsavel_contact_id"] = routing_notes[payload_idx]
-            system_adjustments_per_payload.append(adjustments_entry)
-            created = self.client.create_task(payload)
-            if not created or not created.get("id"):
-                # Se o client conseguiu extrair o que o L1 reclamou, usa
-                # direto a mensagem humana (ex: "Campos obrigatórios não
-                # enviados: Data de publicação, Escritório de origem").
-                # Senão, cai no genérico pra pelo menos dar feedback.
-                l1_detail = self.client.format_last_create_task_error()
-                raise ValueError(l1_detail or "Falha ao criar tarefa no Legal One.")
-            task_id = created["id"]
-            self.client.link_task_to_lawsuit(
-                task_id,
-                {"linkType": "Litigation", "linkId": lawsuit_id},
-            )
-            created_task_ids.append(task_id)
+        try:
+            for payload_idx, payload in enumerate(payloads):
+                # Snapshot do payload como o operador confirmou — o diff contra o
+                # payload pós-ajustes vira a trilha "ajuste automático do sistema".
+                confirmed_by_operator = _copy.deepcopy(payload)
+                self._enforce_description_limit(payload)
+                self._apply_required_task_defaults(
+                    payload, fallback_office_id=fallback_office_id,
+                )
+                self._ensure_endtime_in_future(payload)
+                adjustments_entry = self._diff_system_adjustments(confirmed_by_operator, payload)
+                # Roteamento de squad é regra do TEMPLATE — nem ajuste mecânico,
+                # nem override do operador. Entra na trilha azul com motivo
+                # próprio (e tira o campo da conta de override humano no audit).
+                if routing_notes[payload_idx]:
+                    adjustments_entry["responsavel_contact_id"] = routing_notes[payload_idx]
+                system_adjustments_per_payload.append(adjustments_entry)
+                # Sai vinculada à pasta: vínculo que não pega cancela a tarefa e
+                # reenvia sozinho. Antes o False era ignorado e a publicação
+                # virava AGENDADO com a tarefa solta, sem pasta (28/08 e 02/09).
+                created = criar_tarefa_na_pasta(self.client, payload, lawsuit_id)
+                if not created or not created.get("id"):
+                    # Se o client conseguiu extrair o que o L1 reclamou, usa
+                    # direto a mensagem humana (ex: "Campos obrigatórios não
+                    # enviados: Data de publicação, Escritório de origem").
+                    # Senão, cai no genérico pra pelo menos dar feedback.
+                    l1_detail = self.client.format_last_create_task_error()
+                    raise ValueError(l1_detail or "Falha ao criar tarefa no Legal One.")
+                created_task_ids.append(created["id"])
+        except Exception as exc:  # noqa: BLE001
+            raise self._abortar_agendamento_parcial(exc, created_task_ids) from exc
 
         from app.services.publication_treatment_service import PublicationTreatmentService
         treatment_service = PublicationTreatmentService(self.db)

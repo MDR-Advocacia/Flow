@@ -1618,15 +1618,46 @@ class LegalOneApiClient:
         )
 
     def link_task_to_lawsuit(self, task_id: int, link_payload: Dict[str, Any]) -> bool:
+        """
+        POST /tasks/{id}/relationships. Devolve False quando o L1 recusa (e
+        guarda a resposta em `_last_link_error`); rede esgotada sobe exceção.
+        Quem cria tarefa em pasta não chama isto direto: usa
+        `legal_one_vinculo_tarefa.criar_tarefa_na_pasta`, que cancela e reenvia
+        a tarefa quando o vínculo não pega.
+        """
         self.logger.info("Vinculando tarefa ID %s com payload: %s", task_id, link_payload)
         endpoint = f"/tasks/{task_id}/relationships"
         url = f"{self.base_url}{endpoint}"
+        self._last_link_error = None
         try:
             self._request_with_retry("POST", url, json=link_payload)
             return True
         except requests.exceptions.HTTPError as exc:
-            self.logger.error("Erro HTTP ao vincular tarefa %s: %s", task_id, exc.response.text)
+            resp = exc.response
+            texto = (getattr(resp, "text", "") or "")[:300]
+            self.logger.error("Erro HTTP ao vincular tarefa %s: %s", task_id, texto)
+            self._last_link_error = f"HTTP {getattr(resp, 'status_code', '?')}: {texto}".strip()
             return False
+
+    def processo_existe(self, lawsuit_id: int) -> Optional[bool]:
+        """
+        True/False se o processo existe no L1, procurando nas DUAS entidades
+        (/Lawsuits e /Litigations — a errada dá 404). None quando não deu pra
+        saber (rede, 5xx). Sem cache de propósito: o `lawsuit_cache` ainda
+        mostrava a pasta 67080 dias depois de ela sumir do L1.
+        """
+        for entidade in ("Lawsuits", "Litigations"):
+            url = f"{self.base_url}/{entidade}/{int(lawsuit_id)}?$select=id"
+            try:
+                self._request_with_retry("GET", url)
+                return True
+            except requests.exceptions.HTTPError as exc:
+                if getattr(exc.response, "status_code", None) == 404:
+                    continue
+                return None
+            except Exception:  # noqa: BLE001
+                return None
+        return False
 
     def add_participant_to_task(self, task_id: int, participant_payload: Dict[str, Any]) -> bool:
         self.logger.info("Adicionando participante a tarefa ID %s com payload: %s", task_id, participant_payload)
