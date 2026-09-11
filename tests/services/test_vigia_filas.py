@@ -359,3 +359,31 @@ def test_item_com_id_sintetico_na_fila_do_tratamento_e_intratavel(db_session):
 
     assert len(achados) == 1 and achados[0].gravidade == vf.AVISO
     assert "3 item" in achados[0].mensagem and "sintético" in achados[0].mensagem
+
+
+# ── proposta de tarefa nunca montada (as 359 de 09/09/2026) ─────────────
+
+
+def test_classificada_ha_horas_sem_proposta_montada(db_session):
+    busca = PublicationSearch(status=SEARCH_STATUS_COMPLETED, date_from="2026-09-09")
+    db_session.add(busca)
+    db_session.flush()
+    crua = [{"linkId": 80663, "linkType": "Litigation"}]
+
+    def pub(uid, raw, ha):
+        db_session.add(PublicationRecord(
+            search_id=busca.id, legal_one_update_id=uid, status=RECORD_STATUS_CLASSIFIED,
+            is_duplicate=False, category="Audiências", raw_relationships=raw, created_at=ha,
+        ))
+
+    pub(810001, crua, _ha(hours=6))                        # ficou para trás
+    pub(810002, None, _ha(hours=5))                        # ficou para trás
+    pub(810003, {"_relationships": crua}, _ha(hours=6))    # passou, sem template: não é problema
+    pub(810004, crua, _ha(hours=1))                        # a repassada ainda tem tempo
+    pub(810005, crua, _ha(days=20))                        # fora da janela do e-mail
+    db_session.commit()
+
+    achados = _invariantes(db_session, "proposta de tarefa nunca montada")
+
+    assert len(achados) == 1 and achados[0].gravidade == vf.AVISO
+    assert "2 publicação" in achados[0].mensagem

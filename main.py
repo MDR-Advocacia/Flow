@@ -348,6 +348,20 @@ async def lifespan(_: FastAPI):
     except Exception:
         logger.exception("Falha ao registrar o Vigia de Filas.")
 
+    # Propostas de tarefa que ficaram para tras (11/09/2026): classificacao
+    # aplicada e proposta nunca montada porque a busca do responsavel da pasta
+    # caiu inteira — as publicacoes de 09/09 ficaram "sem template" na mesa por
+    # dois dias. Repassa calado a cada 30 min; o Vigia avisa se passar de 3 h.
+    # Ver app/services/publication_propostas_worker.py.
+    try:
+        from app.services.publication_propostas_worker import (
+            register_propostas_para_tras_job,
+        )
+
+        register_propostas_para_tras_job(scheduler)
+    except Exception:
+        logger.exception("Falha ao registrar a repassada de propostas de tarefa.")
+
     # Motor dormente do Classificador — agrupa PDFs do robo em batches.
     try:
         from app.services.classificador.pending_worker import (

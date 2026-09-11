@@ -480,6 +480,35 @@ def _fila_intratavel(db, agora: datetime) -> list[Violacao]:
     )]
 
 
+def _proposta_nunca_montada(db, agora: datetime) -> list[Violacao]:
+    """Publicação classificada há mais de 3 h sem a proposta de tarefa montada.
+
+    Classificar e montar a proposta são passos separados; o segundo depende da
+    busca do responsável da pasta no L1 e, quando ela cai inteira, deixa o
+    registro intocado. Em 09/09/2026 foram 359 — o operador viu "sem template"
+    dois dias depois. O `publication_propostas_worker` repassa a cada 30 min
+    sem avisar ninguém; se ainda sobrou depois de 3 h, é ele que não está dando
+    conta.
+    """
+    from app.services.publication_propostas_worker import ids_sem_proposta_montada
+
+    ids = ids_sem_proposta_montada(
+        db, agora, folga_min=180, desde=agora - timedelta(days=_JANELA_DIAS), limite=None,
+    )
+    if not ids:
+        return []
+    return [Violacao(
+        fila="Publicações", invariante="proposta de tarefa nunca montada",
+        chave="publicacoes:proposta_nunca_montada", gravidade=AVISO,
+        mensagem=(
+            f"{len(ids)} publicação(ões) classificada(s) há mais de 3 h sem a proposta de "
+            "tarefa montada — na mesa aparecem sem template. A repassada automática (a cada "
+            "30 min) não deu conta: a busca do responsável da pasta no L1 deve estar fora."
+        ),
+        dados={"sem_proposta": len(ids)},
+    )]
+
+
 INVARIANTES: tuple[Callable[[Any, datetime], list[Violacao]], ...] = (
     _sucesso_vazio_lotes,
     _sucesso_vazio_tratamento,
@@ -488,6 +517,7 @@ INVARIANTES: tuple[Callable[[Any, datetime], list[Violacao]], ...] = (
     _refem_ciencia_sem_cadastro,
     _lote_externo_nao_aplicado,
     _fila_intratavel,
+    _proposta_nunca_montada,
 )
 
 
