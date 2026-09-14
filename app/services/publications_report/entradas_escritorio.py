@@ -3,7 +3,8 @@
 Pedido do operador (14/09/2026): um PDF executivo e conciso com o volume de
 entrada de publicações por escritório responsável e o volume tratado — só
 números, sem narrativa. Reusa o renderizador do Relatório Crítico de
-Performance (Chromium do Playwright que já vive na imagem da API).
+Performance (Chromium do Playwright que já vive na imagem da API). A mesma
+compilação também sai em Excel, com números, percentuais e datas nativos.
 
 Definições — as mesmas do Dashboard de Publicações, para os números baterem:
 
@@ -389,3 +390,181 @@ def render_entradas_escritorio_html(dados: dict[str, Any]) -> str:
     )
     out.append("</section></body></html>")
     return "".join(out)
+
+
+# ── Excel ──────────────────────────────────────────────────────────────────
+
+
+def render_entradas_escritorio_xlsx(dados: dict[str, Any]) -> bytes:
+    """Mesmo relatório em planilha: aba por escritório (indicadores + tabela) e aba
+    por dia (com gráfico). Números, percentuais e datas vão como valores do Excel."""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+    from openpyxl.chart import BarChart, LineChart, Reference
+    from openpyxl.chart.marker import Marker
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+
+    per, tot = dados["periodo"], dados["totais"]
+    gerado = _utc(datetime.fromisoformat(dados["gerado_em"])).astimezone(_BRT)
+    base_txt = "data de captura" if per["base"] == "captura" else "data de publicação"
+    n_dias = per["dias"] or 1
+
+    navy = "0F2F57"
+    cinza = Font(size=10, color="5B6170")
+    negrito = Font(bold=True)
+    cab_font, cab_fill = Font(bold=True, color="FFFFFF"), PatternFill("solid", fgColor=navy)
+    kpi_fill = PatternFill("solid", fgColor="F4F6F9")
+    fina, forte = Side(style="thin", color="DFE2E8"), Side(style="medium", color=navy)
+    INT, DEC, PCT, DATA = "#,##0", "#,##0.0", "0%", "dd/mm/yyyy"
+
+    def dia(iso: Optional[str]) -> Optional[date]:
+        return date.fromisoformat(iso[:10]) if iso else None
+
+    def fracao(parte: int, todo: int) -> Optional[float]:
+        return parte / todo if todo else None
+
+    def cabecalho(ws, linha: int, colunas) -> None:
+        for col, (nome, largura, _fmt) in enumerate(colunas, start=1):
+            c = ws.cell(row=linha, column=col, value=nome)
+            c.font, c.fill = cab_font, cab_fill
+            c.alignment = Alignment(horizontal="left" if col == 1 else "right", vertical="center", wrap_text=True)
+            ws.column_dimensions[get_column_letter(col)].width = largura
+        ws.row_dimensions[linha].height = 30
+
+    def preencher(ws, linha: int, colunas, valores, *, total: bool = False, rotulo_negrito: bool = True) -> None:
+        for col, valor in enumerate(valores, start=1):
+            c = ws.cell(row=linha, column=col, value=valor)
+            if colunas[col - 1][2]:
+                c.number_format = colunas[col - 1][2]
+            c.border = Border(top=forte) if total else Border(bottom=fina)
+            if total or (col == 1 and rotulo_negrito):
+                c.font = negrito
+
+    wb = Workbook()
+
+    # ── aba 1: por escritório ──
+    ws = wb.active
+    ws.title = "Por escritório"
+    ws.sheet_view.showGridLines = False
+    ws["A1"] = "Entradas e Tratamento por Escritório — Publicações"
+    ws["A1"].font = Font(size=15, bold=True, color=navy)
+    ws["A2"] = (
+        f"MDR Advocacia · {_data_br(per['de'])} a {_data_br(per['ate'])} · "
+        f"{per['dias']} dia(s) · entradas por {base_txt}"
+    )
+    ws["A2"].font = cinza
+    ws["A3"] = f"Gerado em {gerado.strftime('%d/%m/%Y %H:%M')} (horário de Brasília)"
+    ws["A3"].font = cinza
+
+    kpis = [
+        ("Entradas", tot["entradas"], INT),
+        ("Média/dia", tot["entradas"] / n_dias, DEC),
+        ("Pico (qtd)", tot["pico_n"] or None, INT),
+        ("Dia do pico", dia(tot["pico_dia"]), DATA),
+        ("Tratadas", tot["tratadas"], INT),
+        ("Agendadas", tot["agendadas"], INT),
+        ("Ciências", tot["ciencias"], INT),
+        ("Tratadas ÷ entradas", fracao(tot["tratadas"], tot["entradas"]), PCT),
+        ("Pendentes agora", tot["pendentes"], INT),
+        ("Pendente mais antiga (dias)", tot["pendente_mais_antiga_dias"], INT),
+    ]
+    for col, (nome, valor, fmt) in enumerate(kpis, start=1):
+        alinhamento = "left" if col == 1 else "right"
+        rot = ws.cell(row=5, column=col, value=nome)
+        rot.font, rot.fill = Font(size=9, bold=True, color="5B6170"), kpi_fill
+        rot.alignment = Alignment(horizontal=alinhamento, vertical="top", wrap_text=True)
+        val = ws.cell(row=6, column=col, value=valor)
+        val.font, val.fill, val.number_format = Font(size=14, bold=True), kpi_fill, fmt
+        val.alignment = Alignment(horizontal=alinhamento)
+    ws.row_dimensions[5].height = 26
+
+    colunas = [
+        ("Escritório", 32, None),
+        ("Entradas", 11, INT),
+        ("Participação", 12, PCT),
+        ("Média/dia", 11, DEC),
+        ("Pico (qtd)", 11, INT),
+        ("Dia do pico", 12, DATA),
+        ("Tratadas", 11, INT),
+        ("Agendadas", 11, INT),
+        ("Ciências", 11, INT),
+        ("Tratadas ÷ entradas", 12, PCT),
+        ("Pendentes agora", 12, INT),
+        ("Pendente mais antiga (dias)", 14, INT),
+    ]
+    cab = 8
+    cabecalho(ws, cab, colunas)
+    linha = cab
+    for x in dados["escritorios"]:
+        linha += 1
+        preencher(ws, linha, colunas, [
+            x["escritorio"], x["entradas"], fracao(x["entradas"], tot["entradas"]), x["entradas"] / n_dias,
+            x["pico_n"] or None, dia(x["pico_dia"]), x["tratadas"], x["agendadas"], x["ciencias"],
+            fracao(x["tratadas"], x["entradas"]), x["pendentes"], x["pendente_mais_antiga_dias"],
+        ])
+        taxa = x["taxa_tratamento"]
+        if taxa is not None and (taxa >= 100 or taxa < 70):
+            ws.cell(row=linha, column=10).font = Font(bold=True, color="138A6A" if taxa >= 100 else "B7791F")
+    if linha > cab:
+        ws.auto_filter.ref = f"A{cab}:{get_column_letter(len(colunas))}{linha}"
+    linha += 1
+    preencher(ws, linha, colunas, [
+        "Total", tot["entradas"], 1 if tot["entradas"] else None, tot["entradas"] / n_dias,
+        tot["pico_n"] or None, dia(tot["pico_dia"]), tot["tratadas"], tot["agendadas"], tot["ciencias"],
+        fracao(tot["tratadas"], tot["entradas"]), tot["pendentes"], tot["pendente_mais_antiga_dias"],
+    ], total=True)
+    linha += 1
+    for texto in (
+        f"Entrada: publicação não duplicada, pela {base_txt}.",
+        "Tratada: agendada ou com ciência dentro do período, inclusive de publicações que entraram antes.",
+        "Pendente: aguardando classificação ou tratamento no momento da geração.",
+    ):
+        linha += 1
+        ws.cell(row=linha, column=1, value=texto).font = Font(size=9, color="8A8F9C")
+
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+    # ── aba 2: por dia ──
+    wd = wb.create_sheet("Por dia")
+    colunas_dia = [("Dia", 13, DATA), ("Entradas", 11, INT), ("Tratadas", 11, INT)]
+    cabecalho(wd, 1, colunas_dia)
+    serie = dados["serie"]
+    for i, p in enumerate(serie, start=2):
+        preencher(wd, i, colunas_dia, [date.fromisoformat(p["dia"]), p["entradas"], p["tratadas"]], rotulo_negrito=False)
+    fim = len(serie) + 1
+    preencher(wd, fim + 1, colunas_dia, [
+        "Total", sum(p["entradas"] for p in serie), sum(p["tratadas"] for p in serie),
+    ], total=True)
+    wd.freeze_panes = "A2"
+    if serie:
+        wd.auto_filter.ref = f"A1:C{fim}"
+        grafico = BarChart()
+        grafico.type = "col"
+        grafico.title = "Entradas × tratadas por dia"
+        grafico.add_data(Reference(wd, min_col=2, min_row=1, max_row=fim), titles_from_data=True)
+        grafico.set_categories(Reference(wd, min_col=1, min_row=2, max_row=fim))
+        grafico.series[0].graphicalProperties.solidFill = "B9D6F5"
+        grafico.series[0].graphicalProperties.line.solidFill = "B9D6F5"
+        linha_tratadas = LineChart()
+        linha_tratadas.add_data(Reference(wd, min_col=3, min_row=1, max_row=fim), titles_from_data=True)
+        serie_tratadas = linha_tratadas.series[0]
+        serie_tratadas.graphicalProperties.line.solidFill = navy
+        serie_tratadas.graphicalProperties.line.width = 22000
+        serie_tratadas.marker = Marker(symbol="none")
+        serie_tratadas.smooth = False
+        grafico += linha_tratadas
+        grafico.x_axis.number_format = "dd/mm"
+        grafico.x_axis.delete = False
+        grafico.y_axis.delete = False
+        grafico.legend.position = "b"
+        grafico.height, grafico.width = 9, 26
+        wd.add_chart(grafico, "E2")
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()

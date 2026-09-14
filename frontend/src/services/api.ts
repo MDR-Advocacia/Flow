@@ -2750,15 +2750,16 @@ export async function downloadPublicationsPerformanceReport(
 
 /**
  * Relatório de Entradas e Tratamento por Escritório (Publicações) — PDF
- * executivo do período [dateFrom, dateTo]. `base` define o dia da entrada:
- * data de captura (carga da fila) ou data de publicação (fato no diário).
+ * executivo ou planilha Excel do período [dateFrom, dateTo]. `base` define o
+ * dia da entrada: data de captura (carga da fila) ou data de publicação (fato no diário).
  */
 export async function downloadPublicacoesEntradasEscritorioReport(
   dateFrom: string,
   dateTo: string,
   base: "captura" | "publicacao" = "captura",
+  formato: "pdf" | "xlsx" = "pdf",
 ): Promise<void> {
-  const url = `/api/v1/publications/entradas-escritorio-report.pdf?date_from=${encodeURIComponent(
+  const url = `/api/v1/publications/entradas-escritorio-report.${formato}?date_from=${encodeURIComponent(
     dateFrom,
   )}&date_to=${encodeURIComponent(dateTo)}&base=${base}`;
   const res = await apiFetch(url);
@@ -2770,7 +2771,7 @@ export async function downloadPublicacoesEntradasEscritorioReport(
   const objectUrl = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = objectUrl;
-  a.download = `entradas-tratamento-por-escritorio-${dateFrom}_${dateTo}.pdf`;
+  a.download = `entradas-tratamento-por-escritorio-${dateFrom}_${dateTo}.${formato}`;
   document.body.appendChild(a);
   a.click();
   a.remove();

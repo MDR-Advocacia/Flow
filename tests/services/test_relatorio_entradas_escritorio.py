@@ -179,3 +179,53 @@ def test_endpoint_recusa_periodo_invertido(db_session):
             db=db_session, user=SimpleNamespace(id=1, email="x"),
         )
     assert erro.value.status_code == 422
+
+
+def test_excel_traz_os_mesmos_numeros_como_valores(cenario):
+    import zipfile
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    conteudo = rel.render_entradas_escritorio_xlsx(cenario)
+    wb = load_workbook(BytesIO(conteudo))
+
+    assert wb.sheetnames == ["Por escritório", "Por dia"]
+    ws = wb["Por escritório"]
+    assert [c.value for c in ws[8]][:3] == ["Escritório", "Entradas", "Participação"]
+    bb = [c.value for c in ws[9]]
+    assert bb[:3] == ["Banco do Brasil / Réu", 3, 0.5]
+    assert (bb[4], bb[5]) == (2, datetime(2026, 9, 11))
+    assert bb[6:] == [3, 1, 2, 1, 3, 13]
+    assert [ws.cell(row=r, column=1).value for r in (10, 11)] == ["Sem escritório", "Banco Master / Réu"]
+    total = [c.value for c in ws[12]]
+    assert (total[0], total[1], total[6], total[9], total[10]) == ("Total", 6, 3, 0.5, 6)
+    assert ws.auto_filter.ref == "A8:L11"
+
+    wd = wb["Por dia"]
+    assert [[c.value for c in linha] for linha in wd.iter_rows(min_row=2, max_row=5)] == [
+        [datetime(2026, 9, 10), 1, 1],
+        [datetime(2026, 9, 11), 2, 1],
+        [datetime(2026, 9, 12), 3, 1],
+        ["Total", 6, 3],
+    ]
+    assert "xl/charts/chart1.xml" in zipfile.ZipFile(BytesIO(conteudo)).namelist()
+
+
+def test_periodo_sem_movimento_gera_pdf_e_excel(db_session):
+    dados = rel.compute_entradas_escritorio(db_session, date(2026, 9, 10), date(2026, 9, 12), "captura", agora=AGORA)
+
+    assert dados["escritorios"] == [] and dados["totais"]["entradas"] == 0
+    assert "Total" in rel.render_entradas_escritorio_html(dados)
+    assert rel.render_entradas_escritorio_xlsx(dados)[:2] == b"PK"
+
+
+def test_endpoint_devolve_o_excel(db_session, cenario):
+    from app.api.v1.endpoints import publications_performance as ep
+
+    resp = ep.entradas_escritorio_report_xlsx(
+        date_from=date(2026, 9, 10), date_to=date(2026, 9, 12), base="captura",
+        db=db_session, user=SimpleNamespace(id=1, email="ti@mdradvocacia.com"),
+    )
+    assert resp.media_type.endswith("spreadsheetml.sheet") and resp.body[:2] == b"PK"
+    assert "entradas-tratamento-por-escritorio-2026-09-10_2026-09-12.xlsx" in resp.headers["content-disposition"]

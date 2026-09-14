@@ -97,6 +97,56 @@ def performance_report_pdf(
     )
 
 
+def _compila_entradas_escritorio(
+    db: Session, date_from: date, date_to: date, base: str, user: LegalOneUser, formato: str
+) -> dict:
+    """Números do relatório de entradas por escritório — os mesmos no PDF e no Excel."""
+    from app.services.publications_report.entradas_escritorio import compute_entradas_escritorio
+
+    try:
+        dados = compute_entradas_escritorio(db, date_from, date_to, base)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    except Exception:
+        logger.exception("Relatório de entradas por escritório: falha ao compilar os números.")
+        raise HTTPException(status_code=500, detail="Falha ao compilar os números do período.")
+
+    logger.info(
+        "Relatório de entradas por escritório (%s) solicitado por %s: %s a %s (base %s).",
+        formato, getattr(user, "email", getattr(user, "id", None)), date_from, date_to, base,
+    )
+    return dados
+
+
+@router.get("/entradas-escritorio-report.xlsx")
+def entradas_escritorio_report_xlsx(
+    date_from: date = Query(..., description="Início do período (YYYY-MM-DD)."),
+    date_to: date = Query(..., description="Fim do período (YYYY-MM-DD), inclusivo."),
+    base: Literal["captura", "publicacao"] = Query(
+        "captura",
+        description="Dia da entrada: captura (quando o Flow viu) ou publicacao (quando o diário publicou).",
+    ),
+    db: Session = Depends(get_db),
+    user: LegalOneUser = Depends(auth_security.require_permission("publications")),
+) -> Response:
+    """O mesmo relatório em Excel (pedido do operador em 14/09/2026): aba por escritório e aba por dia."""
+    from app.services.publications_report.entradas_escritorio import render_entradas_escritorio_xlsx
+
+    dados = _compila_entradas_escritorio(db, date_from, date_to, base, user, "Excel")
+    try:
+        conteudo = render_entradas_escritorio_xlsx(dados)
+    except Exception:
+        logger.exception("Relatório de entradas por escritório: falha ao montar a planilha.")
+        raise HTTPException(status_code=500, detail="Falha ao montar a planilha do relatório.")
+
+    filename = f"entradas-tratamento-por-escritorio-{date_from}_{date_to}.xlsx"
+    return Response(
+        content=conteudo,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/entradas-escritorio-report.pdf")
 def entradas_escritorio_report_pdf(
     date_from: date = Query(..., description="Início do período (YYYY-MM-DD)."),
@@ -114,23 +164,9 @@ def entradas_escritorio_report_pdf(
     tratado, só números. Mesmos critérios do Dashboard de Publicações — ver
     app/services/publications_report/entradas_escritorio.py.
     """
-    from app.services.publications_report.entradas_escritorio import (
-        compute_entradas_escritorio,
-        render_entradas_escritorio_html,
-    )
+    from app.services.publications_report.entradas_escritorio import render_entradas_escritorio_html
 
-    try:
-        dados = compute_entradas_escritorio(db, date_from, date_to, base)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
-    except Exception:
-        logger.exception("Relatório de entradas por escritório: falha ao compilar os números.")
-        raise HTTPException(status_code=500, detail="Falha ao compilar os números do período.")
-
-    logger.info(
-        "Relatório de entradas por escritório solicitado por %s: %s a %s (base %s).",
-        getattr(user, "email", getattr(user, "id", None)), date_from, date_to, base,
-    )
+    dados = _compila_entradas_escritorio(db, date_from, date_to, base, user, "PDF")
     try:
         pdf_bytes = html_to_pdf(render_entradas_escritorio_html(dados))
     except Exception:

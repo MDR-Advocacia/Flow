@@ -12,6 +12,7 @@ import {
   Clock,
   CornerDownRight,
   FileBarChart2,
+  FileSpreadsheet,
   FileText,
   Inbox,
   ListChecks,
@@ -1730,7 +1731,8 @@ function EntradasEscritorioReportDialog({ open, onOpenChange }: PerformanceRepor
   const [inicio, setInicio] = useState(() => isoDiasAtras(29));
   const [fim, setFim] = useState(hoje);
   const [base, setBase] = useState<'captura' | 'publicacao'>('captura');
-  const [loading, setLoading] = useState(false);
+  const [gerando, setGerando] = useState<'pdf' | 'xlsx' | null>(null);
+  const loading = gerando !== null;
 
   const dias = useMemo(() => {
     if (!inicio || !fim) return 0;
@@ -1743,13 +1745,15 @@ function EntradasEscritorioReportDialog({ open, onOpenChange }: PerformanceRepor
   const valido = dias >= 1 && dias <= 370;
   const presetAtivo = ENTRADA_PRESETS.find((d) => inicio === isoDiasAtras(d - 1) && fim === hoje);
 
-  const gerar = async () => {
+  const gerar = async (formato: 'pdf' | 'xlsx') => {
     if (!valido || loading) return;
-    setLoading(true);
+    setGerando(formato);
     try {
-      await downloadPublicacoesEntradasEscritorioReport(inicio, fim, base);
-      toast({ title: 'Relatório gerado', description: 'O download do PDF foi iniciado.' });
-      onOpenChange(false);
+      await downloadPublicacoesEntradasEscritorioReport(inicio, fim, base, formato);
+      toast({
+        title: 'Relatório gerado',
+        description: `O download ${formato === 'pdf' ? 'do PDF' : 'da planilha'} foi iniciado.`,
+      });
     } catch (e) {
       toast({
         title: 'Não foi possível gerar o relatório',
@@ -1757,7 +1761,7 @@ function EntradasEscritorioReportDialog({ open, onOpenChange }: PerformanceRepor
         variant: 'destructive',
       });
     } finally {
-      setLoading(false);
+      setGerando(null);
     }
   };
 
@@ -1770,8 +1774,8 @@ function EntradasEscritorioReportDialog({ open, onOpenChange }: PerformanceRepor
             Entradas por Escritório
           </DialogTitle>
           <DialogDescription>
-            PDF executivo com o volume de entrada de publicações por escritório responsável e o
-            volume tratado no período.
+            Relatório executivo em PDF ou Excel com o volume de entrada de publicações por
+            escritório responsável e o volume tratado no período.
           </DialogDescription>
         </DialogHeader>
 
@@ -1846,11 +1850,28 @@ function EntradasEscritorioReportDialog({ open, onOpenChange }: PerformanceRepor
 
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={loading}>
-            Cancelar
+            Fechar
           </Button>
-          <Button onClick={gerar} disabled={!valido || loading} className="gap-2">
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Building2 className="h-4 w-4" />}
-            {loading ? 'Gerando…' : 'Gerar PDF'}
+          <Button
+            variant="outline"
+            onClick={() => gerar('xlsx')}
+            disabled={!valido || loading}
+            className="gap-2"
+          >
+            {gerando === 'xlsx' ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <FileSpreadsheet className="h-4 w-4" />
+            )}
+            {gerando === 'xlsx' ? 'Gerando…' : 'Baixar Excel'}
+          </Button>
+          <Button onClick={() => gerar('pdf')} disabled={!valido || loading} className="gap-2">
+            {gerando === 'pdf' ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <FileText className="h-4 w-4" />
+            )}
+            {gerando === 'pdf' ? 'Gerando…' : 'Baixar PDF'}
           </Button>
         </DialogFooter>
       </DialogContent>
