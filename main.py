@@ -363,6 +363,20 @@ async def lifespan(_: FastAPI):
     except Exception:
         logger.exception("Falha ao registrar a repassada de propostas de tarefa.")
 
+    # Agendamento automatico COM CERTEZA (14/09/2026): as 10 classificacoes do
+    # BB Reu em que a equipe agenda exatamente a proposta (estudo de 30 dias,
+    # sem Para Analise). DORMENTE: o tick sai sem fazer nada ate o setting
+    # publicacoes_agendamento_automatico_ativo ligar; a rodada manual roda
+    # mesmo assim. Ver app/services/publication_agendamento_automatico.py.
+    try:
+        from app.services.publication_agendamento_automatico import (
+            register_publication_agendamento_automatico_job,
+        )
+
+        register_publication_agendamento_automatico_job(scheduler)
+    except Exception:
+        logger.exception("Falha ao registrar o agendamento automatico de publicacoes.")
+
     # Motor dormente do Classificador — agrupa PDFs do robo em batches.
     try:
         from app.services.classificador.pending_worker import (
