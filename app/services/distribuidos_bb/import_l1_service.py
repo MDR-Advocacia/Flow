@@ -286,6 +286,13 @@ _FILA_REVISAO_MAX = int(os.environ.get("BBD_IMPORT_FILA_MAX", "1000"))
 _SAVE_CHUNK = 50
 _SAVE_PAUSA_S = 20
 
+# Espera extra pelas linhas da planilha na revisão do import. O L1 às vezes
+# declara o parse terminado antes de as linhas aparecerem (passagem 251,
+# 12/09/2026): o diff contra o baseline dava vazio e o import respondia "nada
+# novo a cadastrar" com os dois processos sem pasta e sem motivo.
+_ESPERA_LINHAS_S = 15
+_ESPERA_LINHAS_TENTATIVAS = 4
+
 
 def _save(sess, h, selected_ids=None) -> dict:
     model = {
@@ -475,6 +482,35 @@ def _is_unauthorized(exc: Exception) -> bool:
     return "401" in s or "Unauthorized" in s or "invalid credentials" in s
 
 
+def motivo_nao_cadastro(rel: dict[str, Any]) -> str:
+    """O porquê de a planilha não ter criado pasta, em texto pro operador.
+
+    É o que vai no processo quando nenhuma linha dele foi enviada — "Pendente
+    cadastro" sem motivo não pode existir (passagem 251, 12/09/2026).
+    """
+    rel = rel or {}
+    esperadas = rel.get("linhas_esperadas")
+    faltam = rel.get("linhas_nao_encontradas") or 0
+    descartadas = rel.get("descartadas") or []
+    if faltam and esperadas:
+        return (
+            f"Nenhuma pasta criada: o Legal One não devolveu {faltam} de {esperadas} "
+            "linha(s) desta planilha na revisão do import (a planilha subiu, mas as "
+            "linhas não apareceram para salvar)."
+        )
+    if rel.get("incompleto"):
+        return (
+            "Nenhuma pasta criada: nenhuma linha desta planilha voltou na revisão do "
+            "import do Legal One (a planilha subiu, mas as linhas não apareceram para salvar)."
+        )
+    if descartadas:
+        return (
+            f"Nenhuma pasta criada: {len(descartadas)} linha(s) recusada(s) pelo Legal One "
+            "(o motivo de cada uma está no processo)."
+        )
+    return "Nenhuma pasta criada: o Legal One não devolveu linha cadastrável desta planilha."
+
+
 def cadastrar_planilha(
     conteudo: bytes,
     file_name: str,
@@ -483,17 +519,23 @@ def cadastrar_planilha(
     dry_run: bool = True,
     poll_max_s: int = 180,
     cnjs_liberados: Optional[set] = None,
+    esperadas: Optional[int] = None,
 ) -> dict[str, Any]:
     """Sobe a planilha e importa via API interna, commitando SÓ as linhas novas
     (não-duplicadas) via selectedIds — NUNCA varre o staging inteiro. Retry
     automático 1x se o token tiver expirado (401). Devolve relatório por passo.
 
     `cnjs_liberados` (dígitos): resgata linhas dup-com-CNJ cuja pasta existente é
-    de OUTRO cliente (ver _linhas_novas)."""
+    de OUTRO cliente (ver _linhas_novas).
+
+    `esperadas`: quantas linhas a planilha tem. Com ela o relatório diz quantas
+    NÃO voltaram na revisão do import (`linhas_nao_encontradas` / `incompleto`)
+    em vez de chamar de "nada novo" o que simplesmente não apareceu."""
     try:
         return _cadastrar_once(
             conteudo, file_name, firm_id=firm_id, dry_run=dry_run,
             poll_max_s=poll_max_s, tok=obter_token(), cnjs_liberados=cnjs_liberados,
+            esperadas=esperadas,
         )
     except ImportL1Error as exc:
         if not _is_unauthorized(exc):
@@ -503,7 +545,7 @@ def cadastrar_planilha(
             return _cadastrar_once(
                 conteudo, file_name, firm_id=firm_id, dry_run=dry_run,
                 poll_max_s=poll_max_s, tok=obter_token(forcar=True),
-                cnjs_liberados=cnjs_liberados,
+                cnjs_liberados=cnjs_liberados, esperadas=esperadas,
             )
         except ImportL1Error as exc2:
             # 401 MESMO com token fresco = credencial/gateway inválido nessa
@@ -523,7 +565,8 @@ def cadastrar_planilha(
 
 
 def _cadastrar_once(conteudo, file_name, *, firm_id, dry_run, poll_max_s, tok,
-                    cnjs_liberados: Optional[set] = None) -> dict[str, Any]:
+                    cnjs_liberados: Optional[set] = None,
+                    esperadas: Optional[int] = None) -> dict[str, Any]:
     rel: dict[str, Any] = {"passos": [], "dry_run": dry_run, "file": file_name}
     size = len(conteudo)
     rel["importado_por"] = {"user_id": tok.get("user_id"), "nome": tok.get("user_name")}
@@ -567,7 +610,21 @@ def _cadastrar_once(conteudo, file_name, *, firm_id, dry_run, poll_max_s, tok,
     rel["status_import"] = status
 
     # Só as linhas DESTA planilha (id não estava no baseline) e cadastráveis.
+    # Faltou linha? Espera mais um pouco: o parse pode ter "terminado" antes de
+    # as linhas aparecerem na revisão (passagem 251, 12/09/2026).
     desta_planilha = [r for r in _listar_staging(sess, h) if r.get("id") not in baseline_ids]
+    for _ in range(_ESPERA_LINHAS_TENTATIVAS):
+        if esperadas is None or len(desta_planilha) >= esperadas:
+            break
+        time.sleep(_ESPERA_LINHAS_S)
+        desta_planilha = [r for r in _listar_staging(sess, h) if r.get("id") not in baseline_ids]
+    nao_encontradas = max(0, int(esperadas) - len(desta_planilha)) if esperadas is not None else 0
+    rel["linhas_esperadas"] = esperadas
+    rel["linhas_encontradas"] = len(desta_planilha)
+    rel["linhas_nao_encontradas"] = nao_encontradas
+    # Incompleto = linha da planilha que o L1 não devolveu. Sem `esperadas`, só
+    # dá pra afirmar isso quando NADA voltou.
+    rel["incompleto"] = bool(nao_encontradas) or (esperadas is None and not desta_planilha)
     novos, descartadas = _linhas_novas(desta_planilha, cnjs_liberados)
     novos_ids = [x["id"] for x in novos]
     resgatadas = sum(
@@ -597,7 +654,10 @@ def _cadastrar_once(conteudo, file_name, *, firm_id, dry_run, poll_max_s, tok,
         rel["resultado"] = f"DRY_RUN — {len(novos_ids)} linha(s) nova(s) prontas (nada criado)."
         return rel
     if not novos_ids:
-        rel["resultado"] = "Nada novo a cadastrar (todas as linhas já existem no L1)."
+        # Nunca mais "todas as linhas já existem no L1": essa frase saía também
+        # quando as linhas nem tinham voltado da revisão (passagem 251,
+        # 12/09/2026), e os processos ficaram sem pasta e sem motivo.
+        rel["resultado"] = motivo_nao_cadastro(rel)
         return rel
 
     # COMMIT EM BLOCOS. Mandar todos os ids num `save` só faz o L1 enfileirar
@@ -640,6 +700,9 @@ def _cadastrar_once(conteudo, file_name, *, firm_id, dry_run, poll_max_s, tok,
     rel["resultado"] = (
         f"{enviados} linha(s) enviada(s) em {blocos_ok} bloco(s) de {_SAVE_CHUNK}"
         + (f"; {blocos_falha} bloco(s) FALHARAM" if blocos_falha else "")
+        + (f"; {nao_encontradas} linha(s) da planilha não voltaram na revisão do import"
+           if nao_encontradas else "")
+        + (f"; {len(descartadas)} recusada(s) pelo Legal One" if descartadas else "")
     )
     rel["salvo_em"] = datetime.now(timezone.utc).isoformat()
     return rel

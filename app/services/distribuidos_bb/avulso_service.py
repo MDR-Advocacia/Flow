@@ -24,6 +24,7 @@ from app.models.distribuidos_bb import (
     CLIENTE_ATIVOS,
     CLIENTE_BB,
     CLIENTE_OUTRO,
+    NIVEL_AVISO,
     NIVEL_ERRO,
     NIVEL_SUCESSO,
     POOL_NOVO,
@@ -274,23 +275,35 @@ def cadastrar_imediato(db: Session, proc: BbProcesso) -> dict[str, Any]:
 
         rel = cadastrar_planilha(
             bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False,
-            cnjs_liberados=liberados,
+            cnjs_liberados=liberados, esperadas=planilha.total_processos,
         )
         from app.services.distribuidos_bb.cadastro_descartes import registrar_descartes
 
         registrar_descartes(db, rel, planilha_id=planilha.id)
-        planilha.subido_legalone = True
-        planilha.subido_em = datetime.now(timezone.utc)
+        enviado = int(rel.get("novos") or 0) > 0
+        # Linha que não voltou da revisão do import: planilha fica "não subida"
+        # e o monitor re-tenta; o motivo já ficou no processo.
+        if not rel.get("incompleto"):
+            planilha.subido_legalone = True
+            planilha.subido_em = datetime.now(timezone.utc)
         registrar_evento(
-            db, secao=SECAO_CADASTRO, nivel=NIVEL_SUCESSO, acao="Pasta avulsa enviada ao L1",
+            db, secao=SECAO_CADASTRO,
+            nivel=NIVEL_SUCESSO if enviado else NIVEL_AVISO,
+            acao="Pasta avulsa enviada ao L1" if enviado else "Pasta avulsa não cadastrada",
             mensagem=(
                 f"Import no Legal One enviado ({rel.get('novos', 0)} pasta[s]); "
                 f"o monitor confirma nos próximos ciclos."
+                if enviado
+                else f"O processo não entrou no Legal One. {rel.get('resultado', '')}"
             ),
             dados={"planilha_id": planilha.id}, processo_id=proc.id,
         )
         db.commit()
-        return {"cadastrado": True, "planilha_id": planilha.id}
+        return {
+            "cadastrado": enviado,
+            "planilha_id": planilha.id,
+            "motivo": None if enviado else rel.get("resultado"),
+        }
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         logger.exception("Pasta avulsa: cadastro imediato falhou (processo %s).", proc.id)

@@ -226,8 +226,10 @@ export default function PastaAvulsaDialog({
         toast({ title: "Pasta enviada ao Legal One", description: "Import disparado — o monitor confirma o cadastro nos próximos minutos." });
       } else {
         toast({
-          title: "Pasta criada, mas o L1 falhou",
-          description: `${res.erro ?? "Erro no import."} Ela ficou no pool — gere a planilha de novo pra re-tentar.`,
+          title: "Pasta criada, mas o L1 não cadastrou",
+          description: res.motivo
+            ? `${res.motivo} O motivo ficou registrado no processo.`
+            : `${res.erro ?? "Erro no import."} Ela ficou no pool — gere a planilha de novo pra re-tentar.`,
           variant: "destructive",
         });
       }

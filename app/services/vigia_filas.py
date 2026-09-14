@@ -402,6 +402,44 @@ def _refem_ciencia_sem_cadastro(db, agora: datetime) -> list[Violacao]:
     )]
 
 
+def _ciencia_sem_pasta(db, agora: datetime) -> list[Violacao]:
+    """Ciência dada, planilha gerada, e a pasta não nasceu no L1.
+
+    O "refém" acima só olha quem nem entrou em planilha. A passagem 251
+    (12/09/2026) passou por baixo dele: 2 processos com ciência dada, planilha
+    enviada, "nada novo a cadastrar" — e dois dias sem pasta e sem alerta.
+    """
+    from sqlalchemy import func
+
+    from app.models.distribuidos_bb import POOL_PENDENTE_CADASTRO, BbProcesso
+
+    filtros = (
+        BbProcesso.ciencia_dada_em.isnot(None),
+        BbProcesso.planilha_status == POOL_PENDENTE_CADASTRO,
+        BbProcesso.planilha_gerada_em < agora - timedelta(hours=3),
+    )
+    q = db.query(func.count(BbProcesso.id), func.min(BbProcesso.ciencia_dada_em)).filter(*filtros).one()
+    if not q[0]:
+        return []
+    motivo = (
+        db.query(BbProcesso.erro)
+        .filter(*filtros, BbProcesso.erro.isnot(None))
+        .order_by(BbProcesso.id.desc())
+        .limit(1)
+        .scalar()
+    )
+    return [Violacao(
+        fila="Cadastro BB", invariante="ciência sem pasta",
+        chave="cadastro_bb:ciencia_sem_pasta", gravidade=GRAVE,
+        mensagem=(
+            f"{q[0]} processo(s) com ciência dada no portal do BB e planilha gerada há mais "
+            f"de 3 h, sem pasta no L1 (ciência mais antiga há {_ha(agora, q[1])}). "
+            + (f"Último motivo registrado: {motivo[:300]}" if motivo else "Nenhum motivo registrado ainda.")
+        ),
+        dados={"sem_pasta": q[0]},
+    )]
+
+
 def _lote_externo_nao_aplicado(db, agora: datetime) -> list[Violacao]:
     """Lote de classificação parado no provedor (caso 164: pronto na Anthropic
     às 09:20, aplicado à mão às 09:35 — só porque alguém olhou)."""
@@ -515,6 +553,7 @@ INVARIANTES: tuple[Callable[[Any, datetime], list[Violacao]], ...] = (
     _sem_sinal_de_vida,
     _fila_parada,
     _refem_ciencia_sem_cadastro,
+    _ciencia_sem_pasta,
     _lote_externo_nao_aplicado,
     _fila_intratavel,
     _proposta_nunca_montada,

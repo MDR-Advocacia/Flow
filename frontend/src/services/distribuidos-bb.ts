@@ -45,6 +45,10 @@ export interface RunResumo {
   concluido_em: string | null;
   /** Mensagem de erro do run (ex.: por que a coleta desistiu). */
   erro?: string | null;
+  /** Processos com ciência dada nesta passagem que ainda não viraram pasta no L1. */
+  sem_cadastro?: number;
+  /** Motivos registrados (até 3) dos que não viraram pasta. */
+  motivos_sem_cadastro?: string[];
 }
 
 export interface PlanilhasResumo {
@@ -981,6 +985,8 @@ export interface PastaAvulsaResultado {
   cadastrado: boolean;
   planilha_id?: number;
   erro?: string;
+  /** Por que a pasta não foi criada no L1 (quando `cadastrado` é false). */
+  motivo?: string | null;
 }
 export async function criarPastaAvulsa(payload: PastaAvulsaPayload): Promise<PastaAvulsaResultado> {
   return json(await apiFetch(`${BASE}/processos/avulso`, { method: "POST", body: JSON.stringify(payload) }));

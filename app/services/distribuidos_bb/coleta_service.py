@@ -378,6 +378,7 @@ def _auto_cadastrar(db: Session, run: BbRun) -> None:
     rel = cadastrar_planilha(
         bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False,
         cnjs_liberados=cnjs_liberados_da_planilha(db, planilha.id),
+        esperadas=planilha.total_processos,
     )
     novos = rel.get("novos", 0)
     # Linha recusada pelo L1 NÃO pode sumir: grava o motivo no processo, senão
@@ -386,19 +387,37 @@ def _auto_cadastrar(db: Session, run: BbRun) -> None:
     from app.services.distribuidos_bb.cadastro_descartes import registrar_descartes
 
     registrar_descartes(db, rel, run_id=run.id, planilha_id=planilha.id)
+    total = int(planilha.total_processos or 0)
+    incompleto = bool(rel.get("incompleto"))
     # O robô subiu a planilha → marca como subida (não fica pendente na tela).
-    planilha.subido_legalone = True
-    planilha.subido_em = datetime.now(timezone.utc)
+    # EXCETO quando as linhas não voltaram da revisão do import: aí ela fica
+    # "não subida" e o monitor re-tenta sozinho (retentar_planilhas_orfas).
+    if not incompleto:
+        planilha.subido_legalone = True
+        planilha.subido_em = datetime.now(timezone.utc)
     # Contador do run (a UI mostra "cadastrados"): sem isto ficava 0 pra sempre,
     # mesmo com as pastas criadas no L1 — parecia que a rodagem não cadastrou nada.
     run.total_cadastrados += int(novos or 0)
-    registrar_evento(
-        db, secao=SECAO_CADASTRO, nivel=NIVEL_SUCESSO, acao="Auto-cadastro enviado",
-        mensagem=(
+    # SUCESSO só quando a planilha INTEIRA foi enviada. A passagem 251
+    # (12/09/2026) registrou "Auto-cadastro enviado" em verde com 0 de 2 pastas.
+    if int(novos or 0) >= total:
+        nivel, acao = NIVEL_SUCESSO, "Auto-cadastro enviado"
+        mensagem = (
             f"Import no Legal One enviado: {novos} pasta(s) nova(s) criada(s). "
             f"{rel.get('resultado', '')} O monitor confirma cada uma nos próximos ciclos."
-        ),
-        dados={"novos": novos, "planilha_id": planilha.id}, run_id=run.id,
+        )
+    else:
+        nivel = NIVEL_AVISO if novos else NIVEL_ERRO
+        acao = "Auto-cadastro incompleto"
+        mensagem = (
+            f"Import no Legal One: {novos} de {total} processo(s) enviado(s). "
+            f"{rel.get('resultado', '')} O motivo ficou registrado em cada processo "
+            "não cadastrado"
+            + ("; a planilha volta para as retentativas automáticas." if incompleto else ".")
+        )
+    registrar_evento(
+        db, secao=SECAO_CADASTRO, nivel=nivel, acao=acao, mensagem=mensagem,
+        dados={"novos": novos, "total": total, "planilha_id": planilha.id}, run_id=run.id,
     )
     db.commit()
 

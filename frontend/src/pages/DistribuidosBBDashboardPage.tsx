@@ -968,10 +968,33 @@ export default function DistribuidosBBDashboardPage() {
                             {r.erro}
                           </div>
                         )}
+                        {(r.motivos_sem_cadastro ?? []).length > 0 && (
+                          <div
+                            className="mt-1 max-w-[280px] truncate text-xs text-rose-600"
+                            title={(r.motivos_sem_cadastro ?? []).join("\n\n")}
+                          >
+                            Sem pasta: {(r.motivos_sem_cadastro ?? [])[0]}
+                          </div>
+                        )}
                       </td>
                       <td className="px-3 py-2 text-right font-medium">{r.total_coletados}</td>
                       <td className="px-3 py-2 text-right">{r.total_ciencia}</td>
-                      <td className="px-3 py-2 text-right">{r.total_cadastrados}</td>
+                      <td className="px-3 py-2 text-right">
+                        {r.total_cadastrados}
+                        {(r.sem_cadastro ?? 0) > 0 && (
+                          <div
+                            className={`mt-1 whitespace-nowrap text-xs ${
+                              (r.motivos_sem_cadastro ?? []).length > 0 ? "font-medium text-rose-600" : "text-amber-600"
+                            }`}
+                            title={
+                              (r.motivos_sem_cadastro ?? []).join("\n\n")
+                              || "Aguardando o Legal One confirmar a pasta."
+                            }
+                          >
+                            {r.sem_cadastro} sem pasta
+                          </div>
+                        )}
+                      </td>
                       <td className={`px-3 py-2 text-right ${r.total_erros > 0 ? "font-medium text-rose-600" : "text-muted-foreground"}`}>
                         {r.total_erros}
                       </td>

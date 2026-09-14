@@ -117,6 +117,9 @@ def verificar_pendentes(db, *, client=None, limite: int = 300) -> dict:
             p.l1_verificado_em = agora
             if pasta:
                 p.planilha_status = POOL_CADASTRADO_L1
+                # Motivo de não-cadastro de uma tentativa anterior deixa de valer
+                # (o histórico fica nos eventos).
+                p.erro = None
                 p.l1_lawsuit_id = pasta.get("id")
                 p.l1_folder = pasta.get("folder")
                 p.cadastro_confirmado_em = agora
@@ -325,14 +328,17 @@ def retentar_planilhas_orfas(db) -> None:
             rel = cadastrar_planilha(
                 bytes(pl.conteudo), pl.nome_arquivo, dry_run=False,
                 cnjs_liberados=cnjs_liberados_da_planilha(db, pl.id),
+                esperadas=total,
             )
             from app.services.distribuidos_bb.cadastro_descartes import (
                 registrar_descartes,
             )
 
             registrar_descartes(db, rel, planilha_id=pl.id)
-            pl.subido_legalone = True
-            pl.subido_em = datetime.now(timezone.utc)
+            incompleto = bool(rel.get("incompleto"))
+            if not incompleto:
+                pl.subido_legalone = True
+                pl.subido_em = datetime.now(timezone.utc)
 
             # Credita o resultado de volta ao RUN que gerou a planilha.
             #
@@ -365,6 +371,22 @@ def retentar_planilhas_orfas(db) -> None:
                 if run is not None:
                     run.total_cadastrados = (run.total_cadastrados or 0) + novos
 
+            if incompleto:
+                # As linhas não voltaram da revisão do import: a planilha segue
+                # "não subida" e volta aqui depois do cooldown, até o teto — e os
+                # processos já ficaram com o motivo (registrar_descartes).
+                registrar_evento(
+                    db, secao=SECAO_CADASTRO, nivel=NIVEL_AVISO,
+                    acao="Retry do auto-cadastro sem pasta",
+                    mensagem=(
+                        f"Retentativa {tentativas + 1}/{_RETRY_MAX} da planilha "
+                        f"'{pl.nome_arquivo}': {rel.get('resultado', '')}"
+                    ),
+                    dados={"planilha_id": str(pl.id), "novos": novos},
+                    run_id=int(run_origem) if run_origem else None,
+                )
+                db.commit()
+                continue
             registrar_evento(
                 db, secao=SECAO_CADASTRO, nivel=NIVEL_SUCESSO, acao="Retry do auto-cadastro OK",
                 mensagem=(
@@ -413,6 +435,19 @@ def _tick() -> None:
             verificar_pendentes(db)
         except Exception:  # noqa: BLE001
             logger.exception("Monitor cadastro L1: erro inesperado no tick.")
+        finally:
+            db.close()
+        # Nenhum processo fica "Pendente cadastro" mudo: quem passou da hora sem
+        # pasta e sem motivo recebe o que se sabe de fato (passagem 251, 12/09/2026).
+        db = SessionLocal()
+        try:
+            from app.services.distribuidos_bb.cadastro_descartes import (
+                motivar_pendentes_sem_motivo,
+            )
+
+            motivar_pendentes_sem_motivo(db)
+        except Exception:  # noqa: BLE001
+            logger.exception("Monitor cadastro L1: erro ao registrar motivo dos pendentes.")
         finally:
             db.close()
         db = SessionLocal()

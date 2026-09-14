@@ -363,12 +363,16 @@ def _cadastrar_lote(db: Session, lote_id: int, processo_ids: list[int]) -> None:
     rel = cadastrar_planilha(
         bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False,
         cnjs_liberados=cnjs_liberados_da_planilha(db, planilha.id),
+        esperadas=planilha.total_processos,
     )
     from app.services.distribuidos_bb.cadastro_descartes import registrar_descartes
 
     registrar_descartes(db, rel, planilha_id=planilha.id)
-    planilha.subido_legalone = True
-    planilha.subido_em = datetime.now(timezone.utc)
+    # Linha que não voltou da revisão do import: planilha fica "não subida" e o
+    # monitor re-tenta; o motivo já ficou em cada processo.
+    if not rel.get("incompleto"):
+        planilha.subido_legalone = True
+        planilha.subido_em = datetime.now(timezone.utc)
     db.commit()
     # O import diz o que foi ENVIADO, não o que o L1 criou. Confere.
     from app.services.distribuidos_bb.cadastro_conferencia import conferir_duplicacao

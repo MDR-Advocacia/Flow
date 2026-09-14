@@ -166,8 +166,38 @@ class ColetarPayload(BaseModel):
     )
 
 
-def _run_dto(run: BbRun) -> dict[str, Any]:
+def _pendencias_de_cadastro(db: Session, run_ids: list[int]) -> dict[int, dict[str, Any]]:
+    """Por passagem: processos com ciência dada que ainda não viraram pasta no
+    L1, e os motivos registrados (até 3). A passagem 251 (12/09/2026) aparecia
+    como "Concluída" com 2 ciências e 0 cadastros, sem dizer por quê."""
+    from app.models.distribuidos_bb import POOL_CADASTRADO_L1, BbProcesso
+
+    if not run_ids:
+        return {}
+    linhas = (
+        db.query(BbProcesso.run_id, BbProcesso.erro)
+        .filter(
+            BbProcesso.run_id.in_(run_ids),
+            BbProcesso.ciencia_dada_em.isnot(None),
+            BbProcesso.planilha_status != POOL_CADASTRADO_L1,
+        )
+        .order_by(BbProcesso.id)
+        .all()
+    )
+    out: dict[int, dict[str, Any]] = {}
+    for run_id, erro in linhas:
+        d = out.setdefault(run_id, {"sem_cadastro": 0, "motivos_sem_cadastro": []})
+        d["sem_cadastro"] += 1
+        if erro and erro not in d["motivos_sem_cadastro"] and len(d["motivos_sem_cadastro"]) < 3:
+            d["motivos_sem_cadastro"].append(erro)
+    return out
+
+
+def _run_dto(run: BbRun, pendencias: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    pendencias = pendencias or {}
     return {
+        "sem_cadastro": pendencias.get("sem_cadastro", 0),
+        "motivos_sem_cadastro": pendencias.get("motivos_sem_cadastro", []),
         "id": run.id,
         "data_inicial": run.data_inicial,
         "data_final": run.data_final,
@@ -1188,16 +1218,23 @@ def cadastrar_planilha_l1(
         rel = cadastrar_planilha(
             bytes(pl.conteudo), pl.nome_arquivo, dry_run=dry_run,
             cnjs_liberados=cnjs_liberados_da_planilha(db, pl.id),
+            esperadas=pl.total_processos,
         )
     except ImportL1Error as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
-    # Cadastro real bem-sucedido → marca a planilha como subida (o robô subiu).
+    # Cadastro real → motivo em cada processo que não foi (inclusive quando nada
+    # foi enviado) e marca a planilha como subida, salvo se as linhas não
+    # voltaram da revisão do import (aí o monitor re-tenta sozinho).
     if not dry_run:
         from datetime import datetime, timezone
 
-        pl.subido_legalone = True
-        pl.subido_em = datetime.now(timezone.utc)
+        from app.services.distribuidos_bb.cadastro_descartes import registrar_descartes
+
+        registrar_descartes(db, rel, planilha_id=pl.id)
+        if not rel.get("incompleto"):
+            pl.subido_legalone = True
+            pl.subido_em = datetime.now(timezone.utc)
         db.commit()
         # Confere no L1 se cada processo virou UMA pasta. Foi por este caminho
         # que a planilha 119 criou 102 pastas pra 51 processos em 24/08/2026.
@@ -1381,7 +1418,8 @@ def listar_runs(
     q = db.query(BbRun).order_by(BbRun.id.desc())
     total = q.count()
     rows = q.limit(limit).offset(offset).all()
-    return {"total": total, "items": [_run_dto(r) for r in rows]}
+    pendencias = _pendencias_de_cadastro(db, [r.id for r in rows])
+    return {"total": total, "items": [_run_dto(r, pendencias.get(r.id)) for r in rows]}
 
 
 @router.get("/runs/{run_id}", summary="Progresso de uma execução de coleta")
@@ -1394,7 +1432,7 @@ def get_run(
     run = db.get(BbRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Execução não encontrada.")
-    return _run_dto(run)
+    return _run_dto(run, _pendencias_de_cadastro(db, [run.id]).get(run.id))
 
 
 # ─────────────────────────────────────────────────────────────────────
