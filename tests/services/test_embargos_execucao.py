@@ -418,6 +418,23 @@ def test_lista_de_relatorios_identifica_gerando_e_pronto_pelo_titulo():
     assert [(l["id"], l["pronto"], l["gerando"]) for l in linhas] == [(16785, False, True), (16790, True, False)]
 
 
+# HTML REAL da lista do L1 em produção (14/09/2026): relatório pronto tem o título
+# dentro do link, com sufixo "(6)", e o span "gerando_N" oculto continua lá.
+HTML_LISTA_PRONTO = """
+<tr class="webgrid-row-style"><td><input class="grid_check" data-val="16868"/></td>
+<td> <input type="hidden" id="urlEnviarEmail_16868" value="/shared/ReportShared/EnviarEmail/16868" />
+<span id="report_title_16868"> <a href="/shared/ReportShared/GetFile/16868">ROB&#212; - EMBARGOS &#192; EXECU&#199;&#195;O (6)</a> </span> </td>
+<td> ROBÔ - EMBARGOS À EXECUÇÃO </td> <td> 14/09/2026 </td> <td> Rildon Pimentel Pereira </td>
+<td><span id="gerando_16868" data-val-status="7" style="display:none"></span></td></tr>
+<tr class="webgrid-alternating-row"><td><span id="report_title_16869"> <a href="/shared/ReportShared/GetFile/16869">ROBÔ - EMBARGOS À EXECUÇÃO NOVO (1)</a> </span></td></tr>
+"""
+
+
+def test_relatorio_pronto_com_link_e_sufixo_de_contagem_e_reconhecido():
+    linhas = relatorio_l1.relatorios_na_lista(HTML_LISTA_PRONTO, "ROBÔ - EMBARGOS À EXECUÇÃO")
+    assert linhas == [{"id": 16868, "pronto": True, "gerando": False, "data": "14/09/2026"}]
+
+
 def test_listar_kpis_e_paginacao(db_session, params):
     for i in range(3):
         _card(db_session, pasta=f"Proc - 000010{i}")

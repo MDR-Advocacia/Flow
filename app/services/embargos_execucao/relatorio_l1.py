@@ -35,7 +35,13 @@ SETTING_STATUS = "embargos_execucao_relatorio_status"
 _STATUS_GERANDO = {0, 6, 7, 8}
 _STATUS_SEM_DADOS = 4
 _ROW = re.compile(r"<tr\b.*?</tr>", re.S)
-_TITULO_LINHA = re.compile(r'id="report_title_(\d+)"\s*>\s*([^<]+?)\s*<', re.S)
+# O título mora num <span id="report_title_N">. Enquanto gera é texto puro; PRONTO
+# vira link com sufixo de contagem: <a href="…/GetFile/16868">ROBÔ - EMBARGOS À
+# EXECUÇÃO (6)</a>. Só o 1º formato estava no HAR — em produção (12–14/09/2026) os
+# relatórios prontos nunca casavam e todo dia dava "não ficou pronto em 15 min".
+_TITULO_LINHA = re.compile(r'id="report_title_(\d+)"\s*>(.*?)</span>', re.S)
+_TAG = re.compile(r"<[^>]+>")
+_SUFIXO_CONTAGEM = re.compile(r"\s*\(\d+\)\s*$")
 _DATA = re.compile(r"\d{2}/\d{2}/\d{4}")
 _STALE_MIN = 40
 
@@ -52,14 +58,20 @@ def relatorios_na_lista(pagina: str, titulo: str) -> list[dict[str, Any]]:
     saida = []
     for tr in _ROW.findall(pagina or ""):
         m = _TITULO_LINHA.search(tr)
-        if not m or nome_normalizado(html_lib.unescape(m.group(2))) != alvo:
+        if not m:
+            continue
+        titulo_linha = _SUFIXO_CONTAGEM.sub("", html_lib.unescape(_TAG.sub(" ", m.group(2))))
+        if nome_normalizado(titulo_linha) != alvo:
             continue
         rid = int(m.group(1))
         data = _DATA.search(tr)
+        pronto = f"GetFile/{rid}" in tr
         saida.append({
             "id": rid,
-            "pronto": f"GetFile/{rid}" in tr,
-            "gerando": f'id="gerando_{rid}"' in tr,
+            "pronto": pronto,
+            # O span "gerando_N" continua no HTML (oculto) depois de pronto:
+            # o sinal confiável é o link de download.
+            "gerando": not pronto,
             "data": data.group(0) if data else None,
         })
     return saida
