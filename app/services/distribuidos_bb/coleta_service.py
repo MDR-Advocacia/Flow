@@ -375,11 +375,21 @@ def _auto_cadastrar(db: Session, run: BbRun) -> None:
     )
     db.commit()
 
-    rel = cadastrar_planilha(
-        bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False,
-        cnjs_liberados=cnjs_liberados_da_planilha(db, planilha.id),
-        esperadas=planilha.total_processos,
-    )
+    try:
+        rel = cadastrar_planilha(
+            bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False,
+            cnjs_liberados=cnjs_liberados_da_planilha(db, planilha.id),
+            esperadas=planilha.total_processos,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Envio que estoura (401, rede, fila cheia) não pode deixar processo sem
+        # motivo: grava em cada pendente da planilha e deixa o erro seguir
+        # (passagem 257, 14/09/2026).
+        from app.services.distribuidos_bb.cadastro_descartes import registrar_falha_de_envio
+
+        db.rollback()
+        registrar_falha_de_envio(db, planilha.id, str(exc), run_id=run.id)
+        raise
     novos = rel.get("novos", 0)
     # Linha recusada pelo L1 NÃO pode sumir: grava o motivo no processo, senão
     # ele fica "Pendente cadastro" mudo (caso 0801099-88.2026.8.14.0003 em

@@ -413,6 +413,10 @@ def retentar_planilhas_orfas(db) -> None:
                 dados={"planilha_id": str(pl.id)},
             )
             db.commit()
+            # E o motivo vai para cada processo da planilha, não só pro log.
+            from app.services.distribuidos_bb.cadastro_descartes import registrar_falha_de_envio
+
+            registrar_falha_de_envio(db, pl.id, str(exc))
             logger.exception("Retry do auto-cadastro falhou (planilha %s).", pl.id)
             if tentativas + 1 >= _RETRY_MAX:
                 alertar_falha_cadastro(

@@ -361,3 +361,131 @@ def test_vigia_acusa_ciencia_sem_pasta_depois_de_3h(db_session):
 
     assert len(achados) == 1 and achados[0].gravidade == vf.GRAVE
     assert "1 processo" in achados[0].mensagem and "não devolveu 2 de 2" in achados[0].mensagem
+
+
+# ── envio que estoura (passagem 257, 14/09/2026) ───────────────────────────
+
+
+@pytest.fixture
+def db_real():
+    """Sessão que commita de verdade: o caminho de erro faz rollback, e na sessão
+    transacional do conftest o rollback apaga as linhas do próprio teste."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.session import Base
+
+    eng = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(bind=eng)
+    s = sessionmaker(bind=eng)()
+    yield s
+    s.close()
+
+
+def test_envio_que_estoura_grava_motivo_na_hora(db_real, monkeypatch):
+    from app.services.distribuidos_bb import coleta_service
+
+    run = _run(db_real)
+    pl = _planilha(db_real, None, criada_ha=timedelta(0))
+    p = _proc(db_real, pl, run)
+    db_real.commit()
+    _auto_cadastro_falso(monkeypatch, pl, None)
+
+    def _explode(*args, **k):
+        raise imp.ImportL1Error('GetImportDataPaginated 401 na página 0: {"error":{"code":"Unauthorized"}}')
+
+    monkeypatch.setattr("app.services.distribuidos_bb.import_l1_service.cadastrar_planilha", _explode)
+
+    with pytest.raises(imp.ImportL1Error):
+        coleta_service._auto_cadastrar(db_real, run)
+
+    db_real.refresh(p)
+    db_real.refresh(pl)
+    assert "falhou" in p.erro and "401" in p.erro and "tenta de novo" in p.erro
+    assert pl.subido_legalone is False
+    assert [e.acao for e in _eventos(db_real, p.id)] == ["Não cadastrado"]
+
+
+def test_retry_que_estoura_grava_motivo(db_real, monkeypatch):
+    from app.services.distribuidos_bb import cadastro_monitor_worker as worker
+
+    run = _run(db_real)
+    pl = _planilha(db_real, run, subida=False, criada_ha=timedelta(minutes=30))
+    p = _proc(db_real, pl, run)
+    db_real.commit()
+
+    def _explode(*args, **k):
+        raise imp.ImportL1Error("GetStorageSas 401: Unauthorized")
+
+    monkeypatch.setattr("app.services.distribuidos_bb.import_l1_service.cadastrar_planilha", _explode)
+    monkeypatch.setattr("app.services.distribuidos_bb.planilha_service.cnjs_liberados_da_planilha",
+                        lambda *args, **k: set())
+    monkeypatch.setattr("app.services.distribuidos_bb.alertas.alertar_falha_cadastro", lambda **k: None)
+
+    worker.retentar_planilhas_orfas(db_real)
+
+    db_real.refresh(p)
+    assert "GetStorageSas 401" in p.erro
+
+
+class _Token:
+    def __init__(self):
+        self.pedidos = []
+
+    def __call__(self, forcar=False):
+        self.pedidos.append(forcar)
+        return dict(TOK)
+
+
+def test_401_de_sessao_derrubada_espera_e_recaptura_mais_uma_vez(monkeypatch, tmp_path):
+    token, dormidas, chamadas = _Token(), [], []
+    monkeypatch.setattr(imp, "obter_token", token)
+    monkeypatch.setattr(imp, "_dormir", dormidas.append)
+    monkeypatch.setattr(imp, "_TOKEN_CACHE", tmp_path / "token.json")
+
+    def _once(*args, **k):
+        chamadas.append(k["tok"])
+        if len(chamadas) < 3:
+            raise imp.ImportL1Error("GetImportDataPaginated 401 na página 0: Unauthorized")
+        return {"novos": 1}
+
+    monkeypatch.setattr(imp, "_cadastrar_once", _once)
+
+    assert imp.cadastrar_planilha(b"x", "p.xlsx", dry_run=False, esperadas=1) == {"novos": 1}
+    assert token.pedidos == [False, True, True]
+    assert dormidas == [s for s in imp._ESPERAS_APOS_401_S if s]
+
+
+def test_401_que_nao_passa_desiste_e_apaga_o_token(monkeypatch, tmp_path):
+    cache = tmp_path / "token.json"
+    cache.write_text("{}")
+    token = _Token()
+    monkeypatch.setattr(imp, "obter_token", token)
+    monkeypatch.setattr(imp, "_dormir", lambda s: None)
+    monkeypatch.setattr(imp, "_TOKEN_CACHE", cache)
+
+    def _once(*args, **k):
+        raise imp.ImportL1Error("save 401: Unauthorized")
+
+    monkeypatch.setattr(imp, "_cadastrar_once", _once)
+
+    with pytest.raises(imp.ImportL1Error):
+        imp.cadastrar_planilha(b"x", "p.xlsx", dry_run=False, esperadas=1)
+    assert not cache.exists()
+    assert len(token.pedidos) == 1 + len(imp._ESPERAS_APOS_401_S)
+
+
+def test_erro_que_nao_e_401_nao_repete(monkeypatch):
+    chamadas = []
+    monkeypatch.setattr(imp, "obter_token", _Token())
+    monkeypatch.setattr(imp, "_dormir", lambda s: None)
+
+    def _once(*args, **k):
+        chamadas.append(1)
+        raise imp.ImportL1Error("Fila de revisão do Legal One com 5000 linha(s)")
+
+    monkeypatch.setattr(imp, "_cadastrar_once", _once)
+
+    with pytest.raises(imp.ImportL1Error):
+        imp.cadastrar_planilha(b"x", "p.xlsx", dry_run=False)
+    assert chamadas == [1]

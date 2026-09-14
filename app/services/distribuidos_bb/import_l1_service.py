@@ -293,6 +293,14 @@ _SAVE_PAUSA_S = 20
 _ESPERA_LINHAS_S = 15
 _ESPERA_LINHAS_TENTATIVAS = 4
 
+# Espera antes de cada recaptura do token num 401. O L1 tem sessão única por
+# usuário: quando outra rotina do Flow reloga no meio do import, a primeira
+# recaptura cai no meio desse login e também toma 401 (passagem 257, 14/09/2026:
+# o login da escrita web começou 12:11:33 e só terminou 12:12:01). A segunda
+# recaptura espera o login alheio assentar.
+_ESPERAS_APOS_401_S = (0, 90)
+_dormir = time.sleep  # os testes trocam
+
 
 def _save(sess, h, selected_ids=None) -> dict:
     model = {
@@ -522,8 +530,9 @@ def cadastrar_planilha(
     esperadas: Optional[int] = None,
 ) -> dict[str, Any]:
     """Sobe a planilha e importa via API interna, commitando SÓ as linhas novas
-    (não-duplicadas) via selectedIds — NUNCA varre o staging inteiro. Retry
-    automático 1x se o token tiver expirado (401). Devolve relatório por passo.
+    (não-duplicadas) via selectedIds — NUNCA varre o staging inteiro. Em 401
+    recaptura o token até duas vezes, a segunda depois de uma espera (ver
+    `_ESPERAS_APOS_401_S`). Devolve relatório por passo.
 
     `cnjs_liberados` (dígitos): resgata linhas dup-com-CNJ cuja pasta existente é
     de OUTRO cliente (ver _linhas_novas).
@@ -531,37 +540,40 @@ def cadastrar_planilha(
     `esperadas`: quantas linhas a planilha tem. Com ela o relatório diz quantas
     NÃO voltaram na revisão do import (`linhas_nao_encontradas` / `incompleto`)
     em vez de chamar de "nada novo" o que simplesmente não apareceu."""
-    try:
-        return _cadastrar_once(
-            conteudo, file_name, firm_id=firm_id, dry_run=dry_run,
-            poll_max_s=poll_max_s, tok=obter_token(), cnjs_liberados=cnjs_liberados,
-            esperadas=esperadas,
-        )
-    except ImportL1Error as exc:
-        if not _is_unauthorized(exc):
-            raise
-        logger.warning("Import L1: 401 — recapturando token e tentando de novo.")
+    recapturas = 0
+    while True:
         try:
             return _cadastrar_once(
                 conteudo, file_name, firm_id=firm_id, dry_run=dry_run,
-                poll_max_s=poll_max_s, tok=obter_token(forcar=True),
+                poll_max_s=poll_max_s, tok=obter_token(forcar=recapturas > 0),
                 cnjs_liberados=cnjs_liberados, esperadas=esperadas,
             )
-        except ImportL1Error as exc2:
-            # 401 MESMO com token fresco = credencial/gateway inválido nessa
-            # janela (aconteceu 2026-07-23: SSO do L1 instável). O token ruim
-            # ficou cacheado com TTL de ~11h e envenenava as próximas rodadas —
-            # apaga o cache pra próxima tentativa começar do zero.
-            if _is_unauthorized(exc2):
+        except ImportL1Error as exc:
+            if not _is_unauthorized(exc):
+                raise
+            if recapturas:
+                # 401 MESMO com token fresco = sessão do robô derrubada por outro
+                # login no L1 (sessão única por usuário) ou SSO instável
+                # (2026-07-23). O token ruim ficava cacheado por ~11h e envenenava
+                # as próximas rodadas — apaga o cache.
                 try:
                     _TOKEN_CACHE.unlink(missing_ok=True)
-                    logger.warning(
-                        "Import L1: 401 persistiu após recaptura — cache de token "
-                        "apagado (próxima tentativa recaptura do zero)."
-                    )
                 except Exception:  # noqa: BLE001
                     pass
-            raise
+            if recapturas >= len(_ESPERAS_APOS_401_S):
+                logger.warning(
+                    "Import L1: 401 persistiu após %s recaptura(s) — cache de token "
+                    "apagado (próxima tentativa recaptura do zero).", recapturas,
+                )
+                raise
+            espera = _ESPERAS_APOS_401_S[recapturas]
+            logger.warning(
+                "Import L1: 401 — recapturando token%s e tentando de novo.",
+                f" em {espera}s (outro login no L1 pode estar em curso)" if espera else "",
+            )
+            if espera:
+                _dormir(espera)
+            recapturas += 1
 
 
 def _cadastrar_once(conteudo, file_name, *, firm_id, dry_run, poll_max_s, tok,

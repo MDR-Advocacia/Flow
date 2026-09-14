@@ -313,6 +313,11 @@ def cadastrar_imediato(db: Session, proc: BbProcesso) -> dict[str, Any]:
             vivo.planilha_status = POOL_NOVO
             vivo.planilha_id = None
             vivo.planilha_gerada_em = None
+            # Motivo no próprio processo, não só no histórico (14/09/2026).
+            vivo.erro = (
+                f"O cadastro no Legal One falhou: {str(exc)[:300]}. "
+                "A pasta segue no pool para gerar a planilha de novo."
+            )
         registrar_evento(
             db, secao=SECAO_CADASTRO, nivel=NIVEL_ERRO, acao="Pasta avulsa: falha no L1",
             mensagem=f"A pasta foi criada, mas o cadastro no Legal One falhou: {exc}. Ela segue no pool.",

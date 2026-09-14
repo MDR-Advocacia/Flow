@@ -150,11 +150,21 @@ def _cadastrar_lote(db: Session, lote_id: int, processo_ids: list[int]) -> None:
     # anterior (`_marcar_ja_existentes_no_l1`) já removeu quem tinha pasta do
     # MESMO cliente, então o que sobra pendente é duplicata de outro cliente e
     # DEVE ser cadastrada.
-    rel = cadastrar_planilha(
-        bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False,
-        cnjs_liberados=cnjs_liberados_da_planilha(db, planilha.id),
-        esperadas=planilha.total_processos,
-    )
+    try:
+        rel = cadastrar_planilha(
+            bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False,
+            cnjs_liberados=cnjs_liberados_da_planilha(db, planilha.id),
+            esperadas=planilha.total_processos,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Envio que estoura (401, rede, fila cheia) não pode deixar processo sem
+        # motivo: grava em cada pendente da planilha e deixa o erro seguir
+        # (passagem 257, 14/09/2026).
+        from app.services.distribuidos_bb.cadastro_descartes import registrar_falha_de_envio
+
+        db.rollback()
+        registrar_falha_de_envio(db, planilha.id, str(exc), run_id=None)
+        raise
     registrar_descartes(db, rel, planilha_id=planilha.id)
     # Linha que não voltou da revisão do import: planilha fica "não subida" e o
     # monitor re-tenta; o motivo já ficou em cada processo.

@@ -360,11 +360,21 @@ def _cadastrar_lote(db: Session, lote_id: int, processo_ids: list[int]) -> None:
     # A liberação é segura porque a trava anterior (`_marcar_ja_existentes_no_l1`)
     # já removeu quem tinha pasta do MESMO cliente — o que sobra pendente só
     # pode ser duplicata de outro cliente, que DEVE ser cadastrada.
-    rel = cadastrar_planilha(
-        bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False,
-        cnjs_liberados=cnjs_liberados_da_planilha(db, planilha.id),
-        esperadas=planilha.total_processos,
-    )
+    try:
+        rel = cadastrar_planilha(
+            bytes(planilha.conteudo), planilha.nome_arquivo, dry_run=False,
+            cnjs_liberados=cnjs_liberados_da_planilha(db, planilha.id),
+            esperadas=planilha.total_processos,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Envio que estoura (401, rede, fila cheia) não pode deixar processo sem
+        # motivo: grava em cada pendente da planilha e deixa o erro seguir
+        # (passagem 257, 14/09/2026).
+        from app.services.distribuidos_bb.cadastro_descartes import registrar_falha_de_envio
+
+        db.rollback()
+        registrar_falha_de_envio(db, planilha.id, str(exc), run_id=None)
+        raise
     from app.services.distribuidos_bb.cadastro_descartes import registrar_descartes
 
     registrar_descartes(db, rel, planilha_id=planilha.id)

@@ -181,6 +181,51 @@ def registrar_descartes(
         return 0
 
 
+def registrar_falha_de_envio(
+    db,
+    planilha_id: int,
+    erro: str,
+    *,
+    run_id: Optional[int] = None,
+) -> int:
+    """O envio da planilha estourou (401, rede, fila cheia…): cada processo
+    pendente dela recebe o motivo NA HORA, sem esperar a rede de segurança.
+
+    Caso da passagem 257 (14/09/2026 12:11): o 20º processo pegou um 401 do L1
+    — o evento de erro ficou na passagem, mas o processo ficou sem motivo.
+    Best-effort. Devolve quantos processos receberam o motivo.
+    """
+    try:
+        from app.models.distribuidos_bb import POOL_PENDENTE_CADASTRO, BbPlanilha, BbProcesso
+
+        pl = db.get(BbPlanilha, planilha_id)
+        nome = pl.nome_arquivo if pl is not None else f"#{planilha_id}"
+        motivo = (
+            f"O envio da planilha {nome} ao Legal One falhou: {str(erro or 'erro não detalhado')[:300]}. "
+            "Nenhuma pasta foi criada; o sistema tenta de novo sozinho."
+        )
+        pendentes = (
+            db.query(BbProcesso)
+            .filter(
+                BbProcesso.planilha_id == planilha_id,
+                BbProcesso.planilha_status == POOL_PENDENTE_CADASTRO,
+            )
+            .all()
+        )
+        for proc in pendentes:
+            _marcar(db, proc, motivo, dados={"planilha_id": planilha_id}, run_id=run_id)
+        if pendentes:
+            db.commit()
+        return len(pendentes)
+    except Exception:  # noqa: BLE001
+        logger.exception("Falha ao registrar o motivo do envio que estourou (ignorado).")
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
+
+
 def motivar_pendentes_sem_motivo(
     db,
     agora: Optional[datetime] = None,
