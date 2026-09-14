@@ -1275,6 +1275,37 @@ class PublicationSearchService:
             cache[office_external_id] = path
         return cache[office_external_id]
 
+    @staticmethod
+    def _sem_subtipo_repetido(propostas: Optional[list]) -> list:
+        """Uma tarefa por subtipo: fica a primeira ocorrência, na ordem.
+
+        Aceita a proposta gravada ({"payload": {...}, "template_id": ...}) e o
+        payload solto ({"subTypeId": ...}); item sem subtipo passa direto. A
+        ordem já põe a classificação PRIMÁRIA antes das extras (e o template de
+        subcategoria antes do de categoria), então a tarefa que fica é a da
+        classificação principal.
+
+        Por que existe (14/09/2026): 8 das 126 sentenças e acórdãos pendentes do
+        BB Réu propunham o mesmo subtipo duas ou três vezes — a classificação
+        extra da IA trazia template com o mesmo subtipo da primária (ex.:
+        "Análise de Encerramento Réu" por "Arquivamento Definitivo" e por
+        "Trânsito em Julgado Certificado"). Quem agendava tinha de remover na
+        mão; se não removesse, o L1 ganhava tarefa repetida. E o roteamento por
+        squad, que indexa as propostas por subtipo, só enxergava uma delas.
+        """
+        vistos: set = set()
+        unicas: list = []
+        for proposta in propostas or []:
+            payload = proposta.get("payload", proposta) if isinstance(proposta, dict) else None
+            subtipo = payload.get("subTypeId") if isinstance(payload, dict) else None
+            if subtipo is not None:
+                chave = str(subtipo)
+                if chave in vistos:
+                    continue
+                vistos.add(chave)
+            unicas.append(proposta)
+        return unicas
+
     def _build_task_proposals(
         self,
         records: List[PublicationRecord],
@@ -1568,6 +1599,7 @@ class PublicationSearchService:
                         "Falha ao montar proposta p/ record %s, tmpl %s: %s",
                         rec.id, tmpl.id, exc,
                     )
+            proposals = self._sem_subtipo_repetido(proposals)
 
             # SEMPRE atualiza as chaves de proposta (limpando as antigas), pra
             # que reclassificacao manual / rebuild reflita a classificacao
@@ -2865,6 +2897,9 @@ class PublicationSearchService:
                         proposed_tasks.append(p)
             elif proposed_task:
                 proposed_tasks = [proposed_task]
+        # Proposta gravada antes da regra de um subtipo por proposta
+        # (14/09/2026) ainda pode repetir subtipo: a tela nunca mostra repetido.
+        proposed_tasks = PublicationSearchService._sem_subtipo_repetido(proposed_tasks)
 
         all_classifications: list = []
         for r in items:
@@ -4768,6 +4803,7 @@ class PublicationSearchService:
         payload_overrides: Optional[list[dict]] = None,
         scheduled_by: Optional[Any] = None,
         force_duplicate: bool = False,
+        record_ids: Optional[list[int]] = None,
     ) -> dict[str, Any]:
         """
         Executa o agendamento de um grupo de publicações (mesmo processo) no LegalOne.
@@ -4775,13 +4811,23 @@ class PublicationSearchService:
         Aceita 1 ou N payloads numa única chamada. N tarefas são criadas e
         vinculadas ao processo; os registros só são marcados como SCHEDULED
         depois de TODAS as tarefas serem criadas com sucesso.
+
+        `record_ids` restringe o grupo às publicações informadas (do mesmo
+        processo). Sem ele, TODA publicação pendente ou ignorada do processo vira
+        AGENDADO junto — é o comportamento da tela e continua igual. O
+        agendamento em lote precisa do recorte: medido em 14/09/2026, nos 125
+        processos com sentença/acórdão pendente do BB Réu, 72 publicações
+        IGNORADAS e 2 classificadas de outra providência seriam marcadas como
+        agendadas sem tarefa própria.
         """
-        records = (
+        query = (
             self.db.query(PublicationRecord)
             .filter(PublicationRecord.linked_lawsuit_id == lawsuit_id)
             .filter(PublicationRecord.status.in_([RECORD_STATUS_NEW, RECORD_STATUS_CLASSIFIED, RECORD_STATUS_IGNORED]))
-            .all()
         )
+        if record_ids:
+            query = query.filter(PublicationRecord.id.in_([int(i) for i in record_ids]))
+        records = query.all()
         if not records:
             raise ValueError("Nenhuma publicação pendente para este processo.")
 
@@ -4795,6 +4841,9 @@ class PublicationSearchService:
                 p = first.raw_relationships.get("_proposed_task")
                 if p:
                     proposals = [p]
+        # Uma tarefa por subtipo (14/09/2026), também para proposta gravada
+        # antes da regra — o roteamento por squad indexa as propostas por subtipo.
+        proposals = self._sem_subtipo_repetido(proposals)
 
         # Determina a lista de payloads a criar
         if payload_overrides:
@@ -4990,6 +5039,7 @@ class PublicationSearchService:
                 p = first.raw_relationships.get("_proposed_task")
                 if p:
                     proposals = [p]
+        proposals = self._sem_subtipo_repetido(proposals)
 
         if payload_overrides:
             payloads = list(payload_overrides)
@@ -5436,6 +5486,8 @@ class PublicationSearchService:
         if isinstance(record.raw_relationships, dict):
             proposal = record.raw_relationships.get("_proposed_task")
             proposals = record.raw_relationships.get("_proposed_tasks")
+            if isinstance(proposals, list):
+                proposals = PublicationSearchService._sem_subtipo_repetido(proposals)
 
         result = {
             "id": record.id,
