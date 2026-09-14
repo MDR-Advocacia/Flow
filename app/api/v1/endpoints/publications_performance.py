@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
@@ -89,6 +90,54 @@ def performance_report_pdf(
         raise HTTPException(status_code=500, detail="Falha ao renderizar o PDF do relatório.")
 
     filename = f"relatorio-performance-publicacoes-{date_from}_{date_to}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/entradas-escritorio-report.pdf")
+def entradas_escritorio_report_pdf(
+    date_from: date = Query(..., description="Início do período (YYYY-MM-DD)."),
+    date_to: date = Query(..., description="Fim do período (YYYY-MM-DD), inclusivo."),
+    base: Literal["captura", "publicacao"] = Query(
+        "captura",
+        description="Dia da entrada: captura (quando o Flow viu) ou publicacao (quando o diário publicou).",
+    ),
+    db: Session = Depends(get_db),
+    user: LegalOneUser = Depends(auth_security.require_permission("publications")),
+) -> Response:
+    """Relatório executivo de entradas e tratamento por escritório responsável (PDF).
+
+    Pedido do operador em 14/09/2026: volume de entrada por escritório e volume
+    tratado, só números. Mesmos critérios do Dashboard de Publicações — ver
+    app/services/publications_report/entradas_escritorio.py.
+    """
+    from app.services.publications_report.entradas_escritorio import (
+        compute_entradas_escritorio,
+        render_entradas_escritorio_html,
+    )
+
+    try:
+        dados = compute_entradas_escritorio(db, date_from, date_to, base)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    except Exception:
+        logger.exception("Relatório de entradas por escritório: falha ao compilar os números.")
+        raise HTTPException(status_code=500, detail="Falha ao compilar os números do período.")
+
+    logger.info(
+        "Relatório de entradas por escritório solicitado por %s: %s a %s (base %s).",
+        getattr(user, "email", getattr(user, "id", None)), date_from, date_to, base,
+    )
+    try:
+        pdf_bytes = html_to_pdf(render_entradas_escritorio_html(dados))
+    except Exception:
+        logger.exception("Relatório de entradas por escritório: falha ao renderizar o PDF.")
+        raise HTTPException(status_code=500, detail="Falha ao renderizar o PDF do relatório.")
+
+    filename = f"entradas-tratamento-por-escritorio-{date_from}_{date_to}.pdf"
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

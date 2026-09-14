@@ -2748,6 +2748,35 @@ export async function downloadPublicationsPerformanceReport(
   URL.revokeObjectURL(objectUrl);
 }
 
+/**
+ * Relatório de Entradas e Tratamento por Escritório (Publicações) — PDF
+ * executivo do período [dateFrom, dateTo]. `base` define o dia da entrada:
+ * data de captura (carga da fila) ou data de publicação (fato no diário).
+ */
+export async function downloadPublicacoesEntradasEscritorioReport(
+  dateFrom: string,
+  dateTo: string,
+  base: "captura" | "publicacao" = "captura",
+): Promise<void> {
+  const url = `/api/v1/publications/entradas-escritorio-report.pdf?date_from=${encodeURIComponent(
+    dateFrom,
+  )}&date_to=${encodeURIComponent(dateTo)}&base=${base}`;
+  const res = await apiFetch(url);
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || `Erro ao gerar relatório (HTTP ${res.status})`);
+  }
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objectUrl;
+  a.download = `entradas-tratamento-por-escritorio-${dateFrom}_${dateTo}.pdf`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
 
 // ─── Varredura de andamentos (modulo incidental) ─────────────────────
 

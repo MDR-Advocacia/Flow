@@ -5,6 +5,7 @@ import {
   Activity,
   ArrowDown,
   ArrowRight,
+  Building2,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -48,7 +49,10 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { apiFetch } from '@/lib/api-client';
-import { downloadPublicationsPerformanceReport } from '@/services/api';
+import {
+  downloadPublicacoesEntradasEscritorioReport,
+  downloadPublicationsPerformanceReport,
+} from '@/services/api';
 
 // ──────────────────────────────────────────────────────────────
 // Types
@@ -824,6 +828,7 @@ const PublicationsDashboardPage = () => {
   const { toast } = useToast();
   const { canUsePublications, user, isAdmin } = useAuth();
   const [reportOpen, setReportOpen] = useState(false);
+  const [entradasReportOpen, setEntradasReportOpen] = useState(false);
 
   // Granularidade do grafico de velocidade (Bloco 2): 'day' (N dias) ou 'hour' (24h)
   const [chartGranularity, setChartGranularity] = useState<'day' | 'hour'>('day');
@@ -969,21 +974,40 @@ const PublicationsDashboardPage = () => {
             Visão operacional das publicações — últimos {windowDays} dias.
           </p>
         </div>
-        {isAdmin && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-2"
-            onClick={() => setReportOpen(true)}
-          >
-            <FileBarChart2 className="h-4 w-4" />
-            Relatório Crítico de Performance
-          </Button>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {(canUsePublications || isAdmin) && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2"
+              onClick={() => setEntradasReportOpen(true)}
+            >
+              <Building2 className="h-4 w-4" />
+              Entradas por Escritório
+            </Button>
+          )}
+          {isAdmin && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2"
+              onClick={() => setReportOpen(true)}
+            >
+              <FileBarChart2 className="h-4 w-4" />
+              Relatório Crítico de Performance
+            </Button>
+          )}
+        </div>
       </div>
 
       {isAdmin && (
         <PerformanceReportDialog open={reportOpen} onOpenChange={setReportOpen} />
+      )}
+      {(canUsePublications || isAdmin) && (
+        <EntradasEscritorioReportDialog
+          open={entradasReportOpen}
+          onOpenChange={setEntradasReportOpen}
+        />
       )}
 
       {canUsePublications && (
@@ -1687,6 +1711,145 @@ function PerformanceReportDialog({ open, onOpenChange }: PerformanceReportDialog
             ) : (
               <FileBarChart2 className="h-4 w-4" />
             )}
+            {loading ? 'Gerando…' : 'Gerar PDF'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────
+// Entradas e Tratamento por Escritório — PDF executivo com o volume de
+// entrada por escritório responsável e o volume tratado no período.
+// ──────────────────────────────────────────────────────────────
+
+function EntradasEscritorioReportDialog({ open, onOpenChange }: PerformanceReportDialogProps) {
+  const { toast } = useToast();
+  const hoje = isoDiasAtras(0);
+  const [inicio, setInicio] = useState(() => isoDiasAtras(29));
+  const [fim, setFim] = useState(hoje);
+  const [base, setBase] = useState<'captura' | 'publicacao'>('captura');
+  const [loading, setLoading] = useState(false);
+
+  const dias = useMemo(() => {
+    if (!inicio || !fim) return 0;
+    const a = new Date(`${inicio}T00:00:00`).getTime();
+    const b = new Date(`${fim}T00:00:00`).getTime();
+    if (Number.isNaN(a) || Number.isNaN(b) || b < a) return 0;
+    return Math.round((b - a) / 86400000) + 1;
+  }, [inicio, fim]);
+
+  const valido = dias >= 1 && dias <= 370;
+  const presetAtivo = ENTRADA_PRESETS.find((d) => inicio === isoDiasAtras(d - 1) && fim === hoje);
+
+  const gerar = async () => {
+    if (!valido || loading) return;
+    setLoading(true);
+    try {
+      await downloadPublicacoesEntradasEscritorioReport(inicio, fim, base);
+      toast({ title: 'Relatório gerado', description: 'O download do PDF foi iniciado.' });
+      onOpenChange(false);
+    } catch (e) {
+      toast({
+        title: 'Não foi possível gerar o relatório',
+        description: e instanceof Error ? e.message : 'Erro inesperado ao gerar o relatório.',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !loading && onOpenChange(v)}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Building2 className="h-5 w-5 text-[hsl(var(--dunatech-blue))]" />
+            Entradas por Escritório
+          </DialogTitle>
+          <DialogDescription>
+            PDF executivo com o volume de entrada de publicações por escritório responsável e o
+            volume tratado no período.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3 py-1">
+          <div className="flex flex-wrap gap-1">
+            {ENTRADA_PRESETS.map((d) => (
+              <Button
+                key={d}
+                size="sm"
+                variant={presetAtivo === d ? 'default' : 'outline'}
+                className="h-7 px-2 text-xs"
+                onClick={() => {
+                  setInicio(isoDiasAtras(d - 1));
+                  setFim(hoje);
+                }}
+              >
+                {d}d
+              </Button>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="entradas-from">Início</Label>
+              <Input
+                id="entradas-from"
+                type="date"
+                value={inicio}
+                max={fim || hoje}
+                onChange={(e) => setInicio(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="entradas-to">Fim</Label>
+              <Input
+                id="entradas-to"
+                type="date"
+                value={fim}
+                min={inicio || undefined}
+                max={hoje}
+                onChange={(e) => setFim(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <Label>Dia da entrada</Label>
+            <div className="flex w-fit gap-1 rounded-md border p-0.5">
+              <Button
+                size="sm"
+                variant={base === 'captura' ? 'default' : 'ghost'}
+                className="h-7 px-2 text-xs"
+                onClick={() => setBase('captura')}
+              >
+                Data de captura
+              </Button>
+              <Button
+                size="sm"
+                variant={base === 'publicacao' ? 'default' : 'ghost'}
+                className="h-7 px-2 text-xs"
+                onClick={() => setBase('publicacao')}
+              >
+                Data de publicação
+              </Button>
+            </div>
+          </div>
+          {dias > 370 && (
+            <p className="text-xs text-destructive">
+              O período máximo é de 370 dias (selecionado: {dias}).
+            </p>
+          )}
+          {valido && <p className="text-xs text-muted-foreground">{dias} dia(s) selecionado(s).</p>}
+        </div>
+
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={loading}>
+            Cancelar
+          </Button>
+          <Button onClick={gerar} disabled={!valido || loading} className="gap-2">
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Building2 className="h-4 w-4" />}
             {loading ? 'Gerando…' : 'Gerar PDF'}
           </Button>
         </DialogFooter>
