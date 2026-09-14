@@ -50,6 +50,7 @@ import DistribuidosBBConfigPage from './pages/DistribuidosBBConfigPage';
 import MinhaEquipePage from './pages/MinhaEquipePage';
 import EmbargosExecucaoDetalhePage from './pages/EmbargosExecucaoDetalhePage';
 import EmbargosTemplatesPage from './pages/EmbargosTemplatesPage';
+import EmbargosCasoPage from './pages/EmbargosCasoPage';
 
 // Contexto de Autenticação
 import { AuthProvider, AuthContext } from './contexts/AuthContext';
@@ -125,6 +126,7 @@ function AppContent() {
             <Route path="/minha-equipe" element={<MinhaEquipePage />} />
             <Route path="/minha-equipe/:team" element={<MinhaEquipePage />} />
             <Route path="/minha-equipe/:team/embargos/templates" element={<EmbargosTemplatesPage />} />
+            <Route path="/minha-equipe/:team/embargos/caso/:id" element={<EmbargosCasoPage />} />
             <Route path="/minha-equipe/:team/embargos/:id" element={<EmbargosExecucaoDetalhePage />} />
           </Route>
 

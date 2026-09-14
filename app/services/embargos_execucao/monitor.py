@@ -35,6 +35,7 @@ from app.models.embargos_execucao import (
     NIVEL_DESCARTADO,
     NIVEL_FRACO,
     NIVEL_PROVAVEL,
+    SECAO_AVISO,
     SECAO_L1,
     SECAO_TRIBUNAL,
     EmbCandidato,
@@ -342,6 +343,22 @@ def processar(
             dados={"fortes": [c.cnj for c in fortes]},
         )
         db.flush()
+        # Controle de Embargos (decisão do operador, 14/09/2026): se esses
+        # embargos já chegaram por Publicações, a 1ª fonte já criou a tarefa —
+        # o monitor só vincula e não repete o aviso.
+        from app.services.embargos_execucao import controle
+
+        chegou = controle.caso_de_publicacao_para(db, [c.cnj_digitos for c in fortes])
+        if chegou is not None:
+            exe.aviso_enviado_em = service.agora()
+            service.registrar_evento(
+                db, SECAO_AVISO,
+                f"Embargos {chegou.cnj_embargos} já tinham chegado por publicação"
+                + (f" (tarefa {chegou.tarefa_l1_id})" if chegou.tarefa_l1_id else "")
+                + " — vinculado ao caso, sem novo aviso.",
+                execucao_id=exe.id, caso_id=chegou.id,
+            )
+            return "encontrado"
         try:
             from app.services.embargos_execucao import aviso
 

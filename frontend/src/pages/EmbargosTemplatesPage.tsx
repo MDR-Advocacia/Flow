@@ -146,7 +146,7 @@ export default function EmbargosTemplatesPage() {
     <div className="space-y-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <Button variant="ghost" size="sm" className="-ml-2 mb-1 gap-1" onClick={() => navigate(`/minha-equipe/${team || "bb-cadastro"}?aba=embargos`)}>
+          <Button variant="ghost" size="sm" className="-ml-2 mb-1 gap-1" onClick={() => navigate(`/minha-equipe/${team || "bb-cadastro"}?aba=embargos&visao=monitor`)}>
             <ArrowLeft className="h-4 w-4" /> Embargos à Execução
           </Button>
           <h1 className="text-2xl font-bold tracking-tight">Templates de tarefa do incidente</h1>

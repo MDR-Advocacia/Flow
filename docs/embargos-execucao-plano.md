@@ -256,3 +256,43 @@ dependência + mais recentes.
   "Já cadastrado no L1"; 2 seguem monitorando.
 - **Futuro (segurar):** motor de monitoramento EXTERNO por API — o Flow envia os casos a
   monitorar e recebe o resultado. O monitor interno (DataJud + DJEN) fica até lá.
+
+## 10. Controle de Embargos — visão única das filas (14/09/2026)
+
+Embargos à execução correm em autos apartados e chegam por três caminhos: o **monitor do
+tribunal** (advogado fora do processo), a **publicação sem pasta** (motor sem pasta de
+Publicações, tarefa 1404) e a **publicação com pasta** do BB Autor (subcategoria
+"Embargos à execução / monitórios"). O Controle junta tudo na aba da Controladoria.
+
+**Decisões do operador:** um caso por execução + embargos; **pasta incidental existe no L1 =
+trabalho feito, ponto** (sem controle de tarefa de resposta); publicação dos embargos na pasta da
+execução = falha de cadastro; só BB Autor (escritório 22) por enquanto; mesmo embargo por duas
+filas = um caso só (a 1ª fonte cria a tarefa, a 2ª só vincula — o monitor não repete aviso).
+
+**Etapas:** Em vigilância (execução monitorada sem embargos) → Sem pasta incidental (pendência;
+com os recortes *falha de cadastro* e *a verificar*) → Cadastrado no Legal One (fim) · Descartado.
+
+**Como funciona (sem tocar o motor de Publicações — só lê `publicacao_registros` e o L1):**
+job a cada 30 min (6h–21h) + botão; cada publicação é lida uma vez (`emb_caso_publicacao`);
+publicação na pasta do incidente → cadastrado; na pasta da execução → procura o processo
+apartado; caso pendente é conferido no L1 a cada 6 h (CNJ dos embargos e incidentes da pasta da
+execução); publicação sem pasta sem execução citada casa pela vara (DataJud) + embargante ∈ partes.
+
+**Regras aprendidas com as 95 publicações reais do BB Autor (Docker local, 14/09):**
+- 34 eram embargos à **monitória** (classe no DataJud) → fora;
+- 11 eram **embargos de declaração** (a subcategoria mistura) → fora;
+- 7 eram embargos opostos **nos próprios autos** (sem processo apartado, nada a cadastrar) → fora;
+- "falha de cadastro" só com processo apartado **confirmado**: CNJ citado de classe 172 **e** com o
+  mesmo J.TR.OOOO da execução (um CNJ de jurisprudência do TJAL citado numa execução do TJRN virava
+  falso positivo); sem processo identificado → "a verificar".
+
+| Peça | Onde |
+|---|---|
+| Tabelas `emb_caso`, `emb_caso_publicacao`, `emb_evento.caso_id` | migration `emb002_controle_embargos` (down emb001) |
+| Sincronização e regras | `app/services/embargos_execucao/controle.py`; gancho no `monitor.py` |
+| Job (lock 826100012, kill-switch `EMBARGOS_EXECUCAO_CONTROLE_ATIVO`) | `worker.py` |
+| Endpoints `/embargos-execucao/controle*` | `app/api/v1/endpoints/embargos_execucao.py` |
+| Tela | `EmbargosControladoria.tsx`, `ControleEmbargosView.tsx`, `EmbargosCasoPage.tsx` |
+
+**Primeira sincronização em produção:** lê o histórico todo de uma vez (~10 min no teste local,
+por causa das consultas ao L1/DataJud); as seguintes só leem publicação nova.

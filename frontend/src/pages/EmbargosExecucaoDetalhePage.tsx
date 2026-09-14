@@ -83,7 +83,7 @@ export default function EmbargosExecucaoDetalhePage() {
   const [confirmarDisparo, setConfirmarDisparo] = useState(false);
   const [mostrarDescartados, setMostrarDescartados] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const voltar = `/minha-equipe/${team || "bb-cadastro"}?aba=embargos`;
+  const voltar = `/minha-equipe/${team || "bb-cadastro"}?aba=embargos&visao=monitor`;
 
   const load = useCallback(async () => {
     setLoading(true);

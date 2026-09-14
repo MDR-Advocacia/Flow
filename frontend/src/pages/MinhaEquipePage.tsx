@@ -67,7 +67,7 @@ import ReagendamentosSection from "@/components/performance/ReagendamentosSectio
 import RedistribuicoesLog from "@/components/balanceador/RedistribuicoesLog";
 import AcompanhamentoVinculosTab from "@/components/distribuidos-bb/AcompanhamentoVinculosTab";
 import AnaliseRiscoTab from "@/components/minha-equipe/AnaliseRiscoTab";
-import EmbargosExecucaoTab from "@/components/minha-equipe/EmbargosExecucaoTab";
+import EmbargosControladoria from "@/components/minha-equipe/EmbargosControladoria";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/hooks/useAuth";
 import {
@@ -494,16 +494,7 @@ export default function MinhaEquipePage() {
         </Tabs>
       ) : null}
 
-      {ehControladoria && abaControladoria === "embargos" && (
-        <div className="space-y-3">
-          <p className="text-sm text-muted-foreground">
-            Execuções do BB Autor com a <strong>inicial protocolada</strong>. Passada a janela de dias úteis, o
-            Flow consulta o tribunal a cada intervalo até achar <strong>embargos à execução</strong> ligados a
-            elas — aí para, avisa e mostra aqui para a conferência do vínculo.
-          </p>
-          <EmbargosExecucaoTab team={team} />
-        </div>
-      )}
+      {ehControladoria && abaControladoria === "embargos" && <EmbargosControladoria team={team} />}
 
       {ehBbReu && abaBbReu === "analise-risco" && (
         <div className="space-y-3">

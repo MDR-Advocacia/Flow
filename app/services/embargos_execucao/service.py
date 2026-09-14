@@ -211,9 +211,10 @@ def registrar_evento(
     execucao_id: Optional[int] = None,
     dados: Optional[dict[str, Any]] = None,
     user_id: Optional[int] = None,
+    caso_id: Optional[int] = None,
 ) -> EmbEvento:
     ev = EmbEvento(
-        execucao_id=execucao_id, secao=secao, nivel=nivel,
+        execucao_id=execucao_id, caso_id=caso_id, secao=secao, nivel=nivel,
         mensagem=mensagem[:4000], dados=dados, user_id=user_id,
     )
     db.add(ev)

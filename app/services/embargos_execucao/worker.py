@@ -216,6 +216,65 @@ def _tick_monitor() -> None:
             db.close()
 
 
+# ── Controle de Embargos (monitor + Publicações numa visão única) ────
+_LOCK_CONTROLE = 826100012
+
+
+def rodar_controle(origem: str = "agendada") -> dict[str, Any]:
+    from app.db.session import SessionLocal
+    from app.services.embargos_execucao import controle, service
+    from app.services.onerequest._concurrency import single_worker_lock
+
+    with single_worker_lock(_LOCK_CONTROLE) as got:
+        if not got:
+            return {"desfecho": "ocupado"}
+        controle.gravar_status(running=True, iniciado_em=service.agora().isoformat(), origem=origem)
+        db = SessionLocal()
+        resumo: dict[str, Any] = {}
+        erro = None
+        try:
+            from app.services.legal_one_client import LegalOneApiClient
+
+            try:
+                l1 = LegalOneApiClient()
+            except Exception as exc:  # noqa: BLE001 — sem L1 ainda junta o que é local
+                l1, erro = None, f"Legal One indisponível: {exc}"
+            resumo = controle.sincronizar(db, l1)
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            erro = str(exc)[:500]
+            logger.exception("Controle de Embargos: sincronização falhou.")
+        finally:
+            db.close()
+            controle.gravar_status(running=False, ultimo={
+                "em": service.agora().isoformat(), "origem": origem, "resumo": resumo, "erro": erro,
+            })
+        if resumo:
+            logger.info("Controle de Embargos (%s): %s", origem, resumo)
+        return {"desfecho": "erro" if erro else "ok", "resumo": resumo, "erro": erro}
+
+
+def disparar_controle_manual() -> bool:
+    from app.services.embargos_execucao import controle
+
+    if controle.status().get("running"):
+        return False
+    threading.Thread(target=rodar_controle, kwargs={"origem": "manual"},
+                     name="embargos-controle-manual", daemon=True).start()
+    return True
+
+
+def _tick_controle() -> None:
+    from app.core.config import settings
+
+    if not settings.embargos_execucao_controle_ativo:
+        return
+    try:
+        rodar_controle("agendada")
+    except Exception:  # noqa: BLE001
+        logger.exception("Embargos: tick do controle falhou.")
+
+
 def register_embargos_execucao_jobs(scheduler) -> None:
     from app.core.config import settings
 
@@ -233,6 +292,11 @@ def register_embargos_execucao_jobs(scheduler) -> None:
         _tick_monitor,
         trigger=CronTrigger(hour="6-20", minute=40, timezone=_TZ),
         id="embargos_execucao_monitor", replace_existing=True, max_instances=1, coalesce=True,
+    )
+    scheduler.add_job(
+        _tick_controle,
+        trigger=CronTrigger(hour="6-21", minute="10,40", timezone=_TZ),
+        id="embargos_execucao_controle", replace_existing=True, max_instances=1, coalesce=True,
     )
     logger.info(
         "Embargos à Execução: jobs registrados — relatório (%sh20), partes (%sh), monitor (6h-20h).",

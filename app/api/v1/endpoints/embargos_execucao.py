@@ -231,6 +231,90 @@ def templates_excluir(template_id: int, db: Session = Depends(get_db), _user: Le
 
 
 # ── Execução ─────────────────────────────────────────────────────────
+# ── Controle de Embargos (visão única: monitor + Publicações) ────────
+class DescarteCasoIn(BaseModel):
+    motivo: str
+
+
+@router.get("/controle", summary="Controle de Embargos: vigilância, sem pasta incidental e cadastrados")
+def controle_listar(
+    etapa: str = Query("pendente", description="vigilancia | pendente | cadastrado | descartado"),
+    origem: Optional[str] = Query(None, description="TRIBUNAL | PUB_SEM_PASTA | PUB_NA_PASTA | PUB_INCIDENTE | L1"),
+    so_falha: bool = Query(False, description="Só falha de cadastro (publicação na pasta da execução)"),
+    sem_execucao: bool = Query(False, description="Só casos sem execução identificada"),
+    a_verificar: bool = Query(False, description="Publicação na execução sem processo apartado identificado"),
+    busca: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    _user: LegalOneUser = Depends(_gate),
+):
+    from app.services.embargos_execucao import controle
+
+    return controle.listar(db, etapa=etapa, origem=origem, so_falha=so_falha, sem_execucao=sem_execucao,
+                           a_verificar=a_verificar, busca=busca, limit=limit, offset=offset)
+
+
+@router.get("/controle/status", summary="Estado da sincronização do Controle de Embargos")
+def controle_status(_user: LegalOneUser = Depends(_gate)):
+    from app.services.embargos_execucao import controle
+
+    return controle.status()
+
+
+@router.post("/controle/sincronizar", summary="Sincroniza agora (monitor + Publicações + conferência no L1)")
+def controle_sincronizar(_user: LegalOneUser = Depends(_gate)):
+    if not worker.disparar_controle_manual():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A sincronização já está rodando.")
+    return {"ok": True, "mensagem": "Sincronização disparada — roda no servidor."}
+
+
+@router.get("/controle/casos/{caso_id}", summary="Detalhe do caso de embargos")
+def controle_caso(caso_id: int, db: Session = Depends(get_db), _user: LegalOneUser = Depends(_gate)):
+    from app.services.embargos_execucao import controle
+
+    dados = controle.detalhe(db, caso_id)
+    if dados is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Caso não encontrado.")
+    return dados
+
+
+@router.post("/controle/casos/{caso_id}/verificar", summary="Confere agora no L1 se a pasta dos embargos existe")
+def controle_caso_verificar(caso_id: int, db: Session = Depends(get_db), user: LegalOneUser = Depends(_gate)):
+    from app.services.embargos_execucao import controle
+
+    try:
+        achou = controle.verificar_agora(db, caso_id, _l1(), user_id=_uid(user))
+    except LookupError as exc:
+        _erro(exc)
+    dados = controle.detalhe(db, caso_id)
+    dados["cadastrado_agora"] = achou
+    return dados
+
+
+@router.post("/controle/casos/{caso_id}/descartar", summary="Descarta o caso (não são embargos desta carteira)")
+def controle_caso_descartar(caso_id: int, body: DescarteCasoIn, db: Session = Depends(get_db),
+                            user: LegalOneUser = Depends(_gate)):
+    from app.services.embargos_execucao import controle
+
+    try:
+        controle.descartar(db, caso_id, motivo=body.motivo, user_id=_uid(user))
+    except (LookupError, ValueError) as exc:
+        _erro(exc)
+    return controle.detalhe(db, caso_id)
+
+
+@router.post("/controle/casos/{caso_id}/reabrir", summary="Reabre o caso descartado")
+def controle_caso_reabrir(caso_id: int, db: Session = Depends(get_db), user: LegalOneUser = Depends(_gate)):
+    from app.services.embargos_execucao import controle
+
+    try:
+        controle.reabrir(db, caso_id, user_id=_uid(user))
+    except LookupError as exc:
+        _erro(exc)
+    return controle.detalhe(db, caso_id)
+
+
 @router.get("/{execucao_id}", summary="Detalhe da execução: partes, candidatos, tarefas e trilha")
 def detalhe(execucao_id: int, db: Session = Depends(get_db), _user: LegalOneUser = Depends(_gate)):
     dados = service.detalhe(db, execucao_id)

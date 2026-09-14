@@ -68,6 +68,7 @@ export const NIVEL_LABEL: Record<string, string> = {
   FRACO: "A verificar (só vara + classe + data)",
   DESCARTADO: "Descartado (embargante de outro processo)",
   DESCARTADO_EMBARGADO: "Descartado (embargado não é o cliente)",
+  PUBLICACAO: "Chegou por publicação",
 };
 
 export const PRIORIDADE_LABEL: Record<string, string> = { Low: "Baixa", Normal: "Normal", High: "Alta" };

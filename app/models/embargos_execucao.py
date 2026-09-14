@@ -66,7 +66,10 @@ NIVEL_CONFIRMADO_DJEN = "CONFIRMADO_DJEN"  # embargante do DJEN é parte da exec
 NIVEL_PROVAVEL = "PROVAVEL"                # dependência + petição na execução no mesmo dia
 NIVEL_FRACO = "FRACO"                      # só vara + classe + data
 NIVEL_DESCARTADO = "DESCARTADO"            # DJEN mostra embargante que não é da execução
-NIVEIS_FORTES = (NIVEL_CONFIRMADO_DJEN, NIVEL_PROVAVEL)
+# Os embargos chegaram pela fila de Publicações (controle unificado) — vira
+# candidato da execução pra encerrar o monitor sem repetir o aviso.
+NIVEL_PUBLICACAO = "PUBLICACAO"
+NIVEIS_FORTES = (NIVEL_CONFIRMADO_DJEN, NIVEL_PROVAVEL, NIVEL_PUBLICACAO)
 
 DECISAO_PENDENTE = "PENDENTE"
 DECISAO_CONFIRMADO = "CONFIRMADO"
@@ -80,6 +83,38 @@ SECAO_L1 = "L1"
 SECAO_AVISO = "AVISO"
 SECAO_TAREFAS = "TAREFAS"
 SECAO_OPERADOR = "OPERADOR"
+SECAO_CONTROLE = "CONTROLE"
+
+# ── Controle de Embargos (visão única da Controladoria) ──────────────
+# Decisões do operador (14/09/2026): um caso por execução + embargos; se a
+# pasta incidental (ou a pasta dos embargos) existe no L1, o trabalho da
+# Controladoria está feito, ponto; publicação caída na pasta da execução sem
+# incidente é FALHA DE CADASTRO; só BB Autor por enquanto; o mesmo embargo
+# vindo por duas filas vira um caso só (a 1ª fonte cria a tarefa, a 2ª vincula).
+CASO_PENDENTE = "PENDENTE"        # embargos sem pasta incidental no L1
+CASO_CADASTRADO = "CADASTRADO"    # a pasta existe — fim
+CASO_DESCARTADO = "DESCARTADO"    # não eram embargos desta carteira
+
+ORIG_TRIBUNAL = "TRIBUNAL"            # monitor do tribunal (DataJud + DJEN)
+ORIG_PUB_SEM_PASTA = "PUB_SEM_PASTA"  # publicação sem pasta, tipo Embargos à Execução
+ORIG_PUB_NA_PASTA = "PUB_NA_PASTA"    # publicação caída na pasta da EXECUÇÃO (falha de cadastro)
+ORIG_PUB_INCIDENTE = "PUB_INCIDENTE"  # publicação já na pasta dos embargos
+ORIG_L1 = "L1"                        # incidente achado direto no Legal One
+ORIGENS_COLUNA = {
+    ORIG_TRIBUNAL: "origem_tribunal",
+    ORIG_PUB_SEM_PASTA: "origem_pub_sem_pasta",
+    ORIG_PUB_NA_PASTA: "origem_pub_na_pasta",
+    ORIG_PUB_INCIDENTE: "origem_pub_incidente",
+    ORIG_L1: "origem_l1",
+}
+ORIGENS_PUBLICACAO = (ORIG_PUB_SEM_PASTA, ORIG_PUB_NA_PASTA, ORIG_PUB_INCIDENTE)
+PUB_IGNORADA_MONITORIA = "IGNORADA_MONITORIA"  # embargos à monitória: fora do controle
+# Medido no Docker local em 14/09/2026 com as 95 publicações reais do BB Autor:
+# a subcategoria de Publicações mistura embargos de declaração, e parte dos
+# embargos à execução foi oposta NOS PRÓPRIOS AUTOS (sem processo apartado,
+# logo sem pasta incidental a cadastrar).
+PUB_IGNORADA_NAO_EMBARGOS = "IGNORADA_NAO_EMBARGOS_EXECUCAO"
+PUB_IGNORADA_PROPRIOS_AUTOS = "IGNORADA_PROPRIOS_AUTOS"
 
 EVT_INFO = "INFO"
 EVT_AVISO = "AVISO"
@@ -231,6 +266,9 @@ class EmbEvento(Base):
     execucao_id = Column(
         Integer, ForeignKey("emb_execucao.id", ondelete="CASCADE"), nullable=True, index=True
     )
+    caso_id = Column(
+        Integer, ForeignKey("emb_caso.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     secao = Column(String, nullable=False, index=True)
     nivel = Column(String, nullable=False, server_default=EVT_INFO)
     mensagem = Column(Text, nullable=False)
@@ -286,3 +324,76 @@ class EmbTarefaDisparo(Base):
     erro = Column(Text, nullable=True)
     user_id = Column(Integer, ForeignKey("legal_one_users.id"), nullable=True)
     criado_em = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class EmbCaso(Base):
+    """Um caso de embargos à execução do BB Autor, venha de onde vier."""
+
+    __tablename__ = "emb_caso"
+
+    id = Column(Integer, primary_key=True)
+    # CNJ dos embargos. Nulo só quando a publicação caiu na pasta da execução e
+    # o texto não traz o número dos embargos (o caso fica pela pasta).
+    cnj_embargos = Column(String, nullable=True)
+    cnj_embargos_digitos = Column(String, nullable=True, unique=True, index=True)
+    execucao_id = Column(
+        Integer, ForeignKey("emb_execucao.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    pasta_execucao = Column(String, nullable=True, index=True)
+    cnj_execucao = Column(String, nullable=True)
+    lawsuit_id_execucao = Column(Integer, nullable=True, index=True)
+
+    estado = Column(String, nullable=False, server_default=CASO_PENDENTE, index=True)
+    falha_cadastro = Column(Boolean, nullable=False, server_default="0", index=True)
+    vinculo_confirmado = Column(Boolean, nullable=False, server_default="0")
+    origem_tribunal = Column(Boolean, nullable=False, server_default="0")
+    origem_pub_sem_pasta = Column(Boolean, nullable=False, server_default="0")
+    origem_pub_na_pasta = Column(Boolean, nullable=False, server_default="0")
+    origem_pub_incidente = Column(Boolean, nullable=False, server_default="0")
+    origem_l1 = Column(Boolean, nullable=False, server_default="0")
+    primeira_origem = Column(String, nullable=True)
+
+    embargante = Column(String, nullable=True)
+    candidato_id = Column(Integer, nullable=True)
+    tarefa_l1_id = Column(BigInteger, nullable=True)
+    detectado_em = Column(DateTime(timezone=True), nullable=True)
+
+    incidente_id = Column(Integer, nullable=True)
+    incidente_folder = Column(String, nullable=True)
+    cadastrado_em = Column(DateTime(timezone=True), nullable=True)
+    verificado_l1_em = Column(DateTime(timezone=True), nullable=True)
+    verificacoes_l1 = Column(Integer, nullable=False, server_default="0")
+    vinculo_tentado_em = Column(DateTime(timezone=True), nullable=True)
+
+    descartado_motivo = Column(Text, nullable=True)
+    decidido_por_user_id = Column(Integer, ForeignKey("legal_one_users.id"), nullable=True)
+    criado_em = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    atualizado_em = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    execucao = relationship("EmbExecucao")
+    publicacoes = relationship(
+        "EmbCasoPublicacao", back_populates="caso", cascade="all, delete-orphan",
+        order_by="EmbCasoPublicacao.id",
+    )
+
+
+class EmbCasoPublicacao(Base):
+    """Publicação já lida pelo controle (uma publicação entra uma vez só)."""
+
+    __tablename__ = "emb_caso_publicacao"
+
+    id = Column(Integer, primary_key=True)
+    caso_id = Column(
+        Integer, ForeignKey("emb_caso.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    publicacao_id = Column(Integer, nullable=False, unique=True, index=True)
+    origem = Column(String, nullable=False)
+    data_publicacao = Column(String, nullable=True)
+    status_publicacao = Column(String, nullable=True)
+    linked_lawsuit_id = Column(Integer, nullable=True)
+    trecho = Column(Text, nullable=True)
+    criado_em = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    caso = relationship("EmbCaso", back_populates="publicacoes")

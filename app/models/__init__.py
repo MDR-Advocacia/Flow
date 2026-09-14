@@ -74,6 +74,8 @@ from .onerequest import OnerequestAnotacao, OnerequestSolicitacao
 from .analise_risco import AnaliseRiscoTarefa
 from .embargos_execucao import (
     EmbCandidato,
+    EmbCaso,
+    EmbCasoPublicacao,
     EmbEvento,
     EmbExecucao,
     EmbParte,

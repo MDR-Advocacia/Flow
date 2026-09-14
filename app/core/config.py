@@ -588,6 +588,9 @@ class Settings(BaseSettings):
     embargos_execucao_partes_teto_min: int = 60
     embargos_execucao_monitor_ativo: bool = True
     embargos_execucao_monitor_lote: int = 40
+    # Controle de Embargos: junta monitor + Publicações (com e sem pasta) numa
+    # visão única e confere no L1 se a pasta incidental já existe.
+    embargos_execucao_controle_ativo: bool = True
 
 
     # Cadastro 100% automático: ao fim de uma coleta com processos distribuídos,
