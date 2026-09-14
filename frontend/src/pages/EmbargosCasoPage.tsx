@@ -124,8 +124,9 @@ export default function EmbargosCasoPage() {
       </div>
 
       {c.falha_cadastro && c.estado === "PENDENTE" && (
-        <div className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900 dark:bg-red-950/30 dark:text-red-200">
-          Falha de cadastro: a publicação dos embargos caiu na pasta da execução porque a pasta incidental não existe no Legal One.
+        <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+          Embargos identificados: o processo dos embargos foi identificado no tribunal e a intimação chegou na pasta da
+          execução, porque a pasta dos embargos ainda não existe no Legal One.
         </div>
       )}
 

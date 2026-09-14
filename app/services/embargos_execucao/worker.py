@@ -5,10 +5,18 @@ Decisão do operador (11/09/2026):
     só caso novo (data de corte);
   • partes do BB UMA passagem por dia, de madrugada — Chromium o dia inteiro
     pilharia o servidor; o board tem botão pra disparar na hora;
-  • monitor do tribunal de hora em hora das 6h às 20h — consome os cards com
-    consulta vencida (a cadência real em dias úteis mora no card).
+  • Controle de Embargos UMA vez por dia, 7h40 — depois das publicações da noite
+    classificadas e antes do monitor, pra ele já saber o que chegou por publicação;
+  • monitor do tribunal UMA vez por dia, 8h — consome os cards com consulta
+    vencida (a cadência real, em dias úteis, mora no card).
 
-Chaves de lock: 826100009 relatório, ...010 partes, ...011 monitor
+Decisão do operador (14/09/2026): nada aqui precisa de frequência de minutos —
+tudo anda em dias úteis e publicação nova chega de madrugada; rodar de 30 em 30
+min só pesava no servidor. Os botões manuais continuam pra quem não quer esperar.
+Mesmo dia: a sequência inteira (relatório → controle → monitor) roda de novo à
+noite — 19h20, 19h40 e 20h. Partes continua só às 3h (pega o que a noite trouxe).
+
+Chaves de lock: 826100009 relatório, ...010 partes, ...011 monitor, ...012 controle
 (001-008 já em uso; ver portal_verify_worker).
 """
 from __future__ import annotations
@@ -290,15 +298,16 @@ def register_embargos_execucao_jobs(scheduler) -> None:
     )
     scheduler.add_job(
         _tick_monitor,
-        trigger=CronTrigger(hour="6-20", minute=40, timezone=_TZ),
+        trigger=CronTrigger(hour=settings.embargos_execucao_monitor_horarios, minute=0, timezone=_TZ),
         id="embargos_execucao_monitor", replace_existing=True, max_instances=1, coalesce=True,
     )
     scheduler.add_job(
         _tick_controle,
-        trigger=CronTrigger(hour="6-21", minute="10,40", timezone=_TZ),
+        trigger=CronTrigger(hour=settings.embargos_execucao_controle_horarios, minute=40, timezone=_TZ),
         id="embargos_execucao_controle", replace_existing=True, max_instances=1, coalesce=True,
     )
     logger.info(
-        "Embargos à Execução: jobs registrados — relatório (%sh20), partes (%sh), monitor (6h-20h).",
+        "Embargos à Execução: jobs registrados (horas BRT) — relatório [%s]:20, partes [%s]:00, controle [%s]:40, monitor [%s]:00.",
         settings.embargos_execucao_relatorio_horarios, settings.embargos_execucao_partes_hora,
+        settings.embargos_execucao_controle_horarios, settings.embargos_execucao_monitor_horarios,
     )

@@ -38,7 +38,7 @@ export const IGNORADA_LABEL: Record<string, string> = {
 export const ORIGEM_HINT: Record<string, string> = {
   TRIBUNAL: "O advogado não está no processo: o monitor achou os embargos no DataJud/DJEN.",
   PUB_SEM_PASTA: "Chegou intimação dos embargos sem pasta no Legal One (fila sem pasta de Publicações).",
-  PUB_NA_PASTA: "A publicação dos embargos caiu na pasta da execução: falta a pasta incidental (falha de cadastro).",
+  PUB_NA_PASTA: "A intimação dos embargos chegou na pasta da execução, porque a pasta dos embargos ainda não existe.",
   PUB_INCIDENTE: "A publicação já chegou na pasta dos embargos.",
   L1: "O incidente foi achado direto no Legal One.",
 };

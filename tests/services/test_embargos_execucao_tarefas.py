@@ -211,5 +211,8 @@ def test_fila_de_partes_por_execucao_e_agenda_de_madrugada(db_session):
         exe.partes_status = "PENDENTE"
     db_session.commit()
     assert [e.id for e in service.fila_partes(db_session, 10, execucao_id=b.id)] == [b.id]
-    assert settings.embargos_execucao_relatorio_horarios == "7"
+    # rodada da manhã e da noite (operador, 14/09); partes só de madrugada
+    assert settings.embargos_execucao_relatorio_horarios == "7,19"
+    assert settings.embargos_execucao_controle_horarios == "7,19"
+    assert settings.embargos_execucao_monitor_horarios == "8,20"
     assert settings.embargos_execucao_partes_hora == "3"

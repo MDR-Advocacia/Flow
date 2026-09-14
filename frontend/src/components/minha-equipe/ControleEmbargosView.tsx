@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { AlertTriangle, Loader2, RefreshCw, Search } from "lucide-react";
+import { Loader2, RefreshCw, Search } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -39,7 +39,7 @@ export function OrigemBadges({ origens }: { origens: string[] }) {
           key={o}
           variant="outline"
           title={ORIGEM_HINT[o]}
-          className={o === "PUB_NA_PASTA" ? "cursor-help border-red-400 text-red-700" : "cursor-help"}
+          className="cursor-help"
         >
           {ORIGEM_LABEL[o] ?? o}
         </Badge>
@@ -57,8 +57,9 @@ export function SituacaoCaso({ caso }: { caso: ControleCaso }) {
   }
   if (caso.falha_cadastro) {
     return (
-      <Badge variant="destructive" className="gap-1" title="A publicação caiu na pasta da execução: falta a pasta incidental.">
-        <AlertTriangle className="h-3 w-3" /> Falha de cadastro
+      <Badge variant="outline" className="cursor-help border-amber-500 bg-amber-50 text-amber-800 dark:bg-amber-950/30 dark:text-amber-200"
+        title="O processo dos embargos foi identificado no tribunal e a intimação chegou na pasta da execução: falta a pasta dos embargos no Legal One.">
+        Embargos identificados
       </Badge>
     );
   }
@@ -160,11 +161,11 @@ export default function ControleEmbargosView({ team }: { team: string }) {
   };
 
   const filtroAtivo = soFalha ? "falha" : aVerificar ? "verificar" : undefined;
-  const CARDS: { etapa: Etapa; filtro?: "falha" | "verificar"; label: string; valor: number; hint: string; cls?: string }[] = [
+  const CARDS: { etapa: Etapa; filtro?: "falha" | "verificar"; label: string; sub?: string; valor: number; hint: string; cls?: string }[] = [
     { etapa: "vigilancia", label: "Em vigilância", valor: k?.vigilancia ?? 0, hint: "Execuções ajuizadas sem embargos encontrados ainda (monitor do tribunal)." },
     { etapa: "pendente", label: "Sem pasta incidental", valor: k?.pendente ?? 0, hint: "Embargos detectados que ainda não têm pasta no Legal One — a pendência da Controladoria.", cls: (k?.pendente ?? 0) > 0 ? "border-amber-500" : "" },
-    { etapa: "pendente", filtro: "falha", label: "… falha de cadastro", valor: k?.pendente_falha_cadastro ?? 0, hint: "Existe processo de embargos apartado e a publicação caiu na pasta da execução: falta a pasta incidental.", cls: (k?.pendente_falha_cadastro ?? 0) > 0 ? "border-red-500" : "" },
-    { etapa: "pendente", filtro: "verificar", label: "… a verificar", valor: k?.pendente_a_verificar ?? 0, hint: "A publicação na pasta da execução fala em embargos à execução, mas o processo apartado não foi identificado." },
+    { etapa: "pendente", filtro: "falha", label: "Embargos identificados", sub: "dentro de Sem pasta incidental", valor: k?.pendente_falha_cadastro ?? 0, hint: "O processo dos embargos foi identificado no tribunal e a intimação chegou na pasta da execução: falta a pasta dos embargos no Legal One." },
+    { etapa: "pendente", filtro: "verificar", label: "A verificar", sub: "dentro de Sem pasta incidental", valor: k?.pendente_a_verificar ?? 0, hint: "A publicação na pasta da execução fala em embargos à execução, mas o processo apartado não foi identificado." },
     { etapa: "cadastrado", label: "Cadastrados no Legal One", valor: k?.cadastrado ?? 0, hint: "A pasta dos embargos existe — trabalho feito." },
     { etapa: "descartado", label: "Descartados", valor: k?.descartado ?? 0, hint: "Não eram embargos desta carteira." },
   ];
@@ -190,6 +191,7 @@ export default function ControleEmbargosView({ team }: { team: string }) {
             <CardContent className="p-3">
               <div className="text-[11px] leading-tight text-muted-foreground">{c.label}</div>
               <div className="text-2xl font-bold tabular-nums">{c.valor}</div>
+              {c.sub && <div className="text-[10px] leading-tight text-muted-foreground/80">{c.sub}</div>}
             </CardContent>
           </Card>
         ))}
@@ -301,7 +303,7 @@ export default function ControleEmbargosView({ team }: { team: string }) {
                   (itens as ControleCaso[]).map((c) => (
                     <TableRow
                       key={`c${c.id}`}
-                      className={`cursor-pointer ${c.falha_cadastro && c.estado === "PENDENTE" ? "bg-red-50 dark:bg-red-950/20" : ""}`}
+                      className={`cursor-pointer ${c.falha_cadastro && c.estado === "PENDENTE" ? "bg-amber-50/60 dark:bg-amber-950/20" : ""}`}
                       onClick={() => navigate(`/minha-equipe/${team}/embargos/caso/${c.id}`)}
                     >
                       <TableCell className="font-mono text-xs">{c.cnj_embargos ?? <span className="text-muted-foreground">número não identificado</span>}</TableCell>

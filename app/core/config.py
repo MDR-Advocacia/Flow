@@ -579,7 +579,8 @@ class Settings(BaseSettings):
     # partes no portal do BB (processo filho com teto) e monitor do tribunal
     # (DataJud + DJEN). A cadência em dias úteis mora no card, não aqui.
     embargos_execucao_relatorio_ativo: bool = True
-    embargos_execucao_relatorio_horarios: str = "7"
+    # Duas rodadas por dia (manhã e noite) — operador, 14/09/2026. CSV de horas BRT.
+    embargos_execucao_relatorio_horarios: str = "7,19"
     embargos_execucao_partes_ativo: bool = True
     # Uma passagem por dia, de madrugada (operador: Chromium o dia todo pilharia
     # o servidor). O board tem botão pra disparar na hora.
@@ -591,6 +592,10 @@ class Settings(BaseSettings):
     # Controle de Embargos: junta monitor + Publicações (com e sem pasta) numa
     # visão única e confere no L1 se a pasta incidental já existe.
     embargos_execucao_controle_ativo: bool = True
+    # Rodada da manhã e da noite (operador, 14/09/2026): relatório :20, controle
+    # :40 e monitor na hora cheia seguinte — 7h20/7h40/8h e 19h20/19h40/20h.
+    embargos_execucao_controle_horarios: str = "7,19"
+    embargos_execucao_monitor_horarios: str = "8,20"
 
 
     # Cadastro 100% automático: ao fim de uma coleta com processos distribuídos,

@@ -212,7 +212,7 @@ Legado entra por planilha, que não passa pelo corte.
 | Planilha do legado / inclusão manual | `POST /embargos-execucao/importar`, `/manual` |
 | Partes demandadas no portal BB (processo filho, teto 30 min; falha de sessão não gasta tentativa) | `partes_bb.py`, `partes_runner.py` |
 | Monitor: incidente já no L1 → capa DataJud → embargos da vara → DJEN → nível → aviso | `monitor.py`, `datajud_embargos.py`, `djen_embargos.py`, `aviso.py` |
-| Jobs: relatório **1×/dia 7h20**, partes **1×/dia às 3h** (+ botão "Buscar partes no portal BB"), monitor 6h–20h (locks 826100009–011) | `worker.py`, registrado no `main.py` |
+| Jobs em duas rodadas (manhã e noite): relatório **7h20 e 19h20**, controle **7h40 e 19h40**, monitor **8h e 20h**; partes **1×/dia às 3h** (+ botão "Buscar partes no portal BB") (locks 826100009–012) | `worker.py`, registrado no `main.py` |
 | Templates das tarefas do incidente (tela própria, mutável) + disparo pelo Flow no incidente localizado no L1 | `tarefas.py`, `EmbargosTemplatesPage.tsx`, seção "Incidente e tarefas" da página da execução |
 | Aba "Embargos à Execução" na Controladoria + página da execução | `EmbargosExecucaoTab.tsx`, `EmbargosExecucaoDetalhePage.tsx` |
 
@@ -266,14 +266,15 @@ Publicações, tarefa 1404) e a **publicação com pasta** do BB Autor (subcateg
 
 **Decisões do operador:** um caso por execução + embargos; **pasta incidental existe no L1 =
 trabalho feito, ponto** (sem controle de tarefa de resposta); publicação dos embargos na pasta da
-execução = falha de cadastro; só BB Autor (escritório 22) por enquanto; mesmo embargo por duas
+execução = **embargos identificados** (o operador vetou "falha de cadastro": é a circunstância da
+comunicação do judiciário, não falha de ninguém); só BB Autor (escritório 22) por enquanto; mesmo embargo por duas
 filas = um caso só (a 1ª fonte cria a tarefa, a 2ª só vincula — o monitor não repete aviso).
 
 **Etapas:** Em vigilância (execução monitorada sem embargos) → Sem pasta incidental (pendência;
-com os recortes *falha de cadastro* e *a verificar*) → Cadastrado no Legal One (fim) · Descartado.
+com os recortes *embargos identificados* e *a verificar*) → Cadastrado no Legal One (fim) · Descartado.
 
 **Como funciona (sem tocar o motor de Publicações — só lê `publicacao_registros` e o L1):**
-job a cada 30 min (6h–21h) + botão; cada publicação é lida uma vez (`emb_caso_publicacao`);
+job **7h40 e 19h40** (operador: 30 min pesava no servidor à toa; a noite repete a rodada inteira) + botão; cada publicação é lida uma vez (`emb_caso_publicacao`);
 publicação na pasta do incidente → cadastrado; na pasta da execução → procura o processo
 apartado; caso pendente é conferido no L1 a cada 6 h (CNJ dos embargos e incidentes da pasta da
 execução); publicação sem pasta sem execução citada casa pela vara (DataJud) + embargante ∈ partes.
@@ -282,7 +283,7 @@ execução); publicação sem pasta sem execução citada casa pela vara (DataJu
 - 34 eram embargos à **monitória** (classe no DataJud) → fora;
 - 11 eram **embargos de declaração** (a subcategoria mistura) → fora;
 - 7 eram embargos opostos **nos próprios autos** (sem processo apartado, nada a cadastrar) → fora;
-- "falha de cadastro" só com processo apartado **confirmado**: CNJ citado de classe 172 **e** com o
+- "embargos identificados" só com processo apartado **confirmado**: CNJ citado de classe 172 **e** com o
   mesmo J.TR.OOOO da execução (um CNJ de jurisprudência do TJAL citado numa execução do TJRN virava
   falso positivo); sem processo identificado → "a verificar".
 

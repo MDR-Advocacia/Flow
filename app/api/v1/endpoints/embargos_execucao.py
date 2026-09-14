@@ -240,7 +240,7 @@ class DescarteCasoIn(BaseModel):
 def controle_listar(
     etapa: str = Query("pendente", description="vigilancia | pendente | cadastrado | descartado"),
     origem: Optional[str] = Query(None, description="TRIBUNAL | PUB_SEM_PASTA | PUB_NA_PASTA | PUB_INCIDENTE | L1"),
-    so_falha: bool = Query(False, description="Só falha de cadastro (publicação na pasta da execução)"),
+    so_falha: bool = Query(False, description="Só embargos identificados (intimação na pasta da execução, processo dos embargos confirmado)"),
     sem_execucao: bool = Query(False, description="Só casos sem execução identificada"),
     a_verificar: bool = Query(False, description="Publicação na execução sem processo apartado identificado"),
     busca: Optional[str] = Query(None),

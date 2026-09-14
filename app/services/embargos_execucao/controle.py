@@ -93,7 +93,9 @@ CLASSE_EMBARGOS_EXECUCAO = 172
 _STATUS_FORA = (RECORD_STATUS_IGNORED, RECORD_STATUS_DISCARDED_DUPLICATE, RECORD_STATUS_OBSOLETE)
 
 VERIFICAR_L1_A_CADA = timedelta(hours=6)
-TENTAR_VINCULO_A_CADA = timedelta(hours=24)
+# Menos de 24 h: o job é diário e a passagem de ontem terminou minutos depois
+# do horário — com 24 h exatas o caso pularia um dia sim, um dia não.
+TENTAR_VINCULO_A_CADA = timedelta(hours=20)
 
 ESTADOS_VIGILANCIA = (ESTADO_SEM_CNJ, ESTADO_AGUARDANDO_JANELA, ESTADO_MONITORANDO)
 ETAPA_VIGILANCIA = "vigilancia"
@@ -513,12 +515,13 @@ def importar_na_pasta(db: Session, l1, datajud, lidas: set[int], resumo: dict[st
 
         if emb:
             # Processo de embargos APARTADO confirmado no DataJud e a publicação
-            # caiu na execução: é a falha de cadastro (decisão do operador).
+            # chegou na execução: "embargos identificados" — circunstância da
+            # comunicação do judiciário, não erro de cadastro (operador, 14/09/2026).
             caso = _caso_por_cnj(db, emb)
             if not caso.falha_cadastro:
                 caso.falha_cadastro = True
-                _evento(db, caso, "Falha de cadastro: publicação dos embargos caiu na pasta da execução, "
-                                  "sem pasta incidental.", nivel=EVT_AVISO)
+                _evento(db, caso, "Embargos identificados: o processo dos embargos foi confirmado no tribunal e a "
+                                  "intimação chegou na pasta da execução — falta a pasta dos embargos.", nivel=EVT_AVISO)
             resumo["falha_cadastro"] += 1
         else:
             caso = (

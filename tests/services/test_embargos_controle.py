@@ -3,7 +3,7 @@
 
 Decisões do operador: um caso por execução + embargos; pasta incidental existe
 no L1 = trabalho feito; publicação caída na pasta da execução sem incidente é
-falha de cadastro; só BB Autor; mesmo embargo nas duas filas vira um caso só
+"embargos identificados" (circunstância, não falha); só BB Autor; mesmo embargo nas duas filas vira um caso só
 (a 1ª fonte cria a tarefa, a 2ª só vincula). Casos baseados nos dados medidos
 em produção em 14/09 (publicações 95719, 88190, 98213 etc.).
 """

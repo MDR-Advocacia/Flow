@@ -89,7 +89,9 @@ SECAO_CONTROLE = "CONTROLE"
 # Decisões do operador (14/09/2026): um caso por execução + embargos; se a
 # pasta incidental (ou a pasta dos embargos) existe no L1, o trabalho da
 # Controladoria está feito, ponto; publicação caída na pasta da execução sem
-# incidente é FALHA DE CADASTRO; só BB Autor por enquanto; o mesmo embargo
+# incidente é "EMBARGOS IDENTIFICADOS" (circunstância da comunicação do
+# judiciário, não falha de ninguém — a coluna ainda se chama falha_cadastro);
+# só BB Autor por enquanto; o mesmo embargo
 # vindo por duas filas vira um caso só (a 1ª fonte cria a tarefa, a 2ª vincula).
 CASO_PENDENTE = "PENDENTE"        # embargos sem pasta incidental no L1
 CASO_CADASTRADO = "CADASTRADO"    # a pasta existe — fim
@@ -97,7 +99,7 @@ CASO_DESCARTADO = "DESCARTADO"    # não eram embargos desta carteira
 
 ORIG_TRIBUNAL = "TRIBUNAL"            # monitor do tribunal (DataJud + DJEN)
 ORIG_PUB_SEM_PASTA = "PUB_SEM_PASTA"  # publicação sem pasta, tipo Embargos à Execução
-ORIG_PUB_NA_PASTA = "PUB_NA_PASTA"    # publicação caída na pasta da EXECUÇÃO (falha de cadastro)
+ORIG_PUB_NA_PASTA = "PUB_NA_PASTA"    # intimação dos embargos chegou na pasta da EXECUÇÃO
 ORIG_PUB_INCIDENTE = "PUB_INCIDENTE"  # publicação já na pasta dos embargos
 ORIG_L1 = "L1"                        # incidente achado direto no Legal One
 ORIGENS_COLUNA = {
