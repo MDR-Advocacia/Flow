@@ -319,13 +319,18 @@ async def importar_ativos(
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
     _require_gestao(current_user)
+    from fastapi.concurrency import run_in_threadpool
+
     from app.services.distribuidos_bb.ativos_service import disparar_ingestao
 
     conteudo = await arquivo.read()
     if not conteudo:
         raise HTTPException(status_code=400, detail="Arquivo vazio.")
     try:
-        res = disparar_ingestao(
+        # Leitura da planilha (openpyxl) e criação do lote são síncronas: fora
+        # do event loop, pra não segurar as outras requisições deste worker.
+        res = await run_in_threadpool(
+            disparar_ingestao,
             db, conteudo=conteudo, nome_arquivo=arquivo.filename or "lista.xlsx",
             user_id=current_user.id,
         )
@@ -518,13 +523,18 @@ async def importar_master(
     current_user: LegalOneUser = Depends(auth.get_current_user),
 ):
     _require_gestao(current_user)
+    from fastapi.concurrency import run_in_threadpool
+
     from app.services.distribuidos_bb.master_service import disparar_ingestao
 
     conteudo = await arquivo.read()
     if not conteudo:
         raise HTTPException(status_code=400, detail="Arquivo vazio.")
     try:
-        res = disparar_ingestao(
+        # Leitura da Listagem (openpyxl) e criação do lote são síncronas: fora
+        # do event loop, pra não segurar as outras requisições deste worker.
+        res = await run_in_threadpool(
+            disparar_ingestao,
             db, conteudo=conteudo, nome_arquivo=arquivo.filename or "listagem.xlsx",
             user_id=current_user.id,
         )

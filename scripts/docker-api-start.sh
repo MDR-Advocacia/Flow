@@ -47,7 +47,11 @@ python /app/scripts/run_migrations.py
 # Python + engine do SQLAlchemy). Em EC2 com 4 vCPUs use 4; em 8, 6-8.
 WORKERS="${UVICORN_WORKERS:-4}"
 
-exec python -m uvicorn main:app \
+# Supervisor com health check tolerante (app/core/uvicorn_supervisor.py): em
+# 15/09/2026 o host ficou ~40 s travado sem memória e o uvicorn matou 2 workers
+# que só estavam lentos. UVICORN_TIMEOUT_WORKER_HEALTHCHECK (padrão 120 s)
+# ajusta a espera pelo painel do Coolify. Os argumentos são os do uvicorn.
+exec python -m app.core.uvicorn_supervisor main:app \
     --host 0.0.0.0 \
     --port 8000 \
     --workers "$WORKERS" \

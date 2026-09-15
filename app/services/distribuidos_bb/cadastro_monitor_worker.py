@@ -454,6 +454,20 @@ def _tick() -> None:
             logger.exception("Monitor cadastro L1: erro ao registrar motivo dos pendentes.")
         finally:
             db.close()
+        # Lote de upload (Ativos/Master) cuja thread morreu com o worker: retoma
+        # o cadastro do que ficou no pool e fecha o lote (lote 40, 15/09/2026).
+        # Vem antes do retry de planilha: se a retomada gerar planilha e o
+        # import estourar, o retry assume nos ticks seguintes.
+        db = SessionLocal()
+        try:
+            from app.services.distribuidos_bb.lotes_orfaos import reapear_lotes_orfaos
+
+            reapear_lotes_orfaos(db)
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            logger.exception("Monitor cadastro L1: erro no reaper de lotes órfãos.")
+        finally:
+            db.close()
         db = SessionLocal()
         try:
             retentar_planilhas_orfas(db)

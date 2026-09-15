@@ -207,8 +207,17 @@ def _registrar_duplicado(
 def ingerir_lote_background(lote_id: int, linhas: list[dict]) -> None:
     """Cria os processos a partir da Listagem e fecha no cadastro do L1.
 
-    Sem DataJud: a Listagem já é a capa. Roda em thread própria.
+    Sem DataJud: a Listagem já é a capa. Roda em thread própria e segura a
+    trava de execução do lote enquanto vive: é por ela que o reaper sabe que o
+    lote não ficou órfão (ver `lotes_orfaos`).
     """
+    from app.services.distribuidos_bb.lotes_orfaos import lote_em_execucao
+
+    with lote_em_execucao(lote_id):
+        _ingerir_lote(lote_id, linhas)
+
+
+def _ingerir_lote(lote_id: int, linhas: list[dict]) -> None:
     from app.db.session import SessionLocal
 
     db = SessionLocal()

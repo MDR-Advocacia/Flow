@@ -420,7 +420,15 @@ def ingerir_lote_background(lote_id: int, linhas: list[dict], ja_cadastrado: set
     DataJud UMA vez por CNJ, na hora (fluxo sequencial: subiu → DataJud →
     planilha → cadastro). Sem worker recorrente depois — decisão do operador:
     o que o DataJud não tiver no momento, fica com o dado da planilha e pronto
-    (`datajud_status=sem_capa`). Roda em thread própria."""
+    (`datajud_status=sem_capa`). Roda em thread própria e segura a trava de
+    execução do lote enquanto vive (ver `lotes_orfaos`)."""
+    from app.services.distribuidos_bb.lotes_orfaos import lote_em_execucao
+
+    with lote_em_execucao(lote_id):
+        _ingerir_lote(lote_id, linhas, ja_cadastrado)
+
+
+def _ingerir_lote(lote_id: int, linhas: list[dict], ja_cadastrado: set[str]) -> None:
     from app.db.session import SessionLocal
 
     db = SessionLocal()
