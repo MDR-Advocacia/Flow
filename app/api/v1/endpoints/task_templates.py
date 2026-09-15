@@ -735,7 +735,9 @@ def list_users(db: Session = Depends(get_db)):
         .order_by(LegalOneUser.name)
         .all()
     )
-    return [{"external_id": u.external_id, "name": u.name, "email": u.email} for u in users]
+    # `id` (interno) é o que os modais de agendamento e de reativação dos Distribuídos
+    # usam para o responsável; sem ele o id ia como null e a reativação dava erro 500.
+    return [{"id": u.id, "external_id": u.external_id, "name": u.name, "email": u.email} for u in users]
 
 
 @router.get("/meta/etiquetas")

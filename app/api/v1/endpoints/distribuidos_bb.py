@@ -379,6 +379,22 @@ def listar_lotes_ativos(
 # ─────────────────────────────────────────────────────────────────────
 
 
+def _ids_do_payload(payload: dict, chave: str) -> list[int]:
+    """Ids inteiros do corpo da requisição. Valor vazio ou não numérico vira 422 com
+    mensagem para o operador — antes era int(None) e a tela só mostrava "HTTP 500"."""
+    ids: list[int] = []
+    for valor in payload.get(chave) or []:
+        try:
+            ids.append(int(valor))
+        except (TypeError, ValueError):
+            oque = "os responsáveis" if chave == "responsavel_ids" else "os processos"
+            raise HTTPException(
+                status_code=422,
+                detail=f"Seleção inválida: recarregue a tela e escolha de novo {oque}.",
+            )
+    return ids
+
+
 @router.get("/reativacoes", summary="Fila de pastas fechadas que o cliente reenviou")
 def listar_reativacoes(
     cliente: Optional[str] = Query(None, description="BB | ATIVOS | MASTER"),
@@ -414,7 +430,7 @@ def dispensar_reativacoes(
     _require_gestao(current_user)
     from app.services.distribuidos_bb import reativacao_service as rs
 
-    ids = [int(x) for x in (payload.get("processo_ids") or [])]
+    ids = _ids_do_payload(payload, "processo_ids")
     if not ids:
         raise HTTPException(status_code=422, detail="Selecione ao menos um processo.")
     return {"dispensados": rs.dispensar(db, processo_ids=ids)}
@@ -431,8 +447,8 @@ def preview_reativacoes(
 
     return rs.preview(
         db,
-        processo_ids=[int(x) for x in (payload.get("processo_ids") or [])],
-        responsavel_ids=[int(x) for x in (payload.get("responsavel_ids") or [])],
+        processo_ids=_ids_do_payload(payload, "processo_ids"),
+        responsavel_ids=_ids_do_payload(payload, "responsavel_ids"),
         dividir_igual=bool(payload.get("dividir_igual", True)),
     )
 
@@ -458,8 +474,8 @@ def executar_reativacoes(
     try:
         return rs.disparar(
             db,
-            processo_ids=[int(x) for x in (payload.get("processo_ids") or [])],
-            responsavel_ids=[int(x) for x in (payload.get("responsavel_ids") or [])],
+            processo_ids=_ids_do_payload(payload, "processo_ids"),
+            responsavel_ids=_ids_do_payload(payload, "responsavel_ids"),
             dividir_igual=bool(payload.get("dividir_igual", True)),
             config=config,
             dry_run=dry_run,
